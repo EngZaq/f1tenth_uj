@@ -1,0 +1,51 @@
+LakiBeam Initial Calibration
+
+ROS frame:
+  laser
+
+Orientation:
+  0 deg   = physical front
+  +90 deg = physical left
+  -90 deg = physical right
+
+Measured scan frequency:
+  approximately 29.95-29.99 Hz
+
+Angular increment:
+  0.25 deg
+
+Total ROS samples:
+  1440
+
+Physical active FOV:
+  approximately 270 deg
+
+Measured active region:
+  approximately -135.75 deg to +134.25 deg
+
+Measured blind region:
+  approximately 89.75 deg at rear
+
+Initial front-distance check:
+  physical = 0.500 m
+  measured = 0.487-0.488 m
+
+Side-object check:
+  left object approximately 0.10 m
+  +90 deg measurement approximately 0.103 m
+
+Status:
+  Ethernet PASS
+  UDP PASS
+  ROS driver PASS
+  /scan PASS
+  frequency PASS
+  FOV PASS
+  orientation PASS
+  real ranges PASS
+  intensity PASS
+
+Pending:
+  formal distance accuracy test
+  repeatability test
+  longer range test

@@ -1,0 +1,16 @@
+# ROS 2 / colcon generated directories
+build/
+install/
+log/
+
+# ROS bag recordings
+bags/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors
+.vscode/
+.idea/
+*~

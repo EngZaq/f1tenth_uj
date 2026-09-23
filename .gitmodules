@@ -1,0 +1,3 @@
+[submodule "src/Lakibeam_ROS2_Driver"]
+	path = src/Lakibeam_ROS2_Driver
+	url = https://github.com/RichbeamTechnology/Lakibeam_ROS2_Driver.git
