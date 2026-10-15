@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    drive:
+      type: topic
+      interface_type: ackermann_msgs/msg/AckermannDriveStamped
+      topic_name: drive
+      deadman_buttons: [5]
+      axis_mappings:
+        drive-steering_angle:
+          axis: 2
+          scale: 0.58
+          offset: 0.0
+        drive-speed:
+          axis: 1
+          scale: 1.18
+          offset: 0.0
