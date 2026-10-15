@@ -1,3 +1,7 @@
 [submodule "src/Lakibeam_ROS2_Driver"]
-	path = src/Lakibeam_ROS2_Driver
+	path = src/hardware/lakibeam_driver
 	url = https://github.com/RichbeamTechnology/Lakibeam_ROS2_Driver.git
+[submodule "src/hardware/f1tenth_system"]
+	path = src/hardware/f1tenth_system
+	url = https://github.com/f1tenth/f1tenth_system.git
+	branch = humble-devel
