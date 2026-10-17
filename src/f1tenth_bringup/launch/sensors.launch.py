@@ -17,13 +17,6 @@ def generate_launch_description():
     sensor_ip = LaunchConfiguration('sensor_ip')
     lidar_port = LaunchConfiguration('lidar_port')
 
-    lidar_x = LaunchConfiguration('lidar_x')
-    lidar_y = LaunchConfiguration('lidar_y')
-    lidar_z = LaunchConfiguration('lidar_z')
-
-    lidar_roll = LaunchConfiguration('lidar_roll')
-    lidar_pitch = LaunchConfiguration('lidar_pitch')
-    lidar_yaw = LaunchConfiguration('lidar_yaw')
 
     # ---------------------------------------------------------
     # LakiBeam LiDAR
@@ -46,45 +39,33 @@ def generate_launch_description():
         }.items()
     )
 
-    # Temporary TF until the physical LiDAR mounting is measured.
-    lidar_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='laser_static_tf',
-        arguments=[
-            '--x', lidar_x,
-            '--y', lidar_y,
-            '--z', lidar_z,
-
-            '--roll', lidar_roll,
-            '--pitch', lidar_pitch,
-            '--yaw', lidar_yaw,
-
-            '--frame-id', 'base_link',
-            '--child-frame-id', 'laser',
-        ]
-    )
 
     # ---------------------------------------------------------
     # BMI160 IMU
     # ---------------------------------------------------------
 
-    imu_node = Node(
-        package='f1tenth_imu',
-        executable='bmi160_node',
-        name='bmi160',
-        output='screen',
-        parameters=[{
-            'i2c_bus': 7,
-            'i2c_address': 0x69,
-            'frame_id': 'imu_link',
-            'topic_name': '/imu/data_raw',
-            'publish_rate_hz': 100.0,
-            'warmup_seconds': 2.0,
-            'gyro_calibration_samples': 500,
-            'gyro_motion_std_limit_dps': 0.5,
-        }]
-    )
+    # imu_node = Node(
+    #     package='f1tenth_imu',
+    #     executable='bmi160_node',
+    #     name='bmi160',
+    #     output='screen',
+    #     parameters=[{
+    #         'i2c_bus': 7,
+    #         'i2c_address': 0x69,
+    #         'frame_id': 'imu_link',
+    #         'topic_name': '/imu/data_raw',
+    #         'publish_rate_hz': 100.0,
+    #         'warmup_seconds': 2.0,
+    #         'gyro_calibration_samples': 500,
+    #         'gyro_motion_std_limit_dps': 0.5,
+    #     }]
+    # )
+
+    tf_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('f1tenth_bringup'),
+                'launch', 'tf.launch.py')))
 
     return LaunchDescription([
 
@@ -103,38 +84,8 @@ def generate_launch_description():
             default_value='"2368"'
         ),
 
-        # Temporary until LiDAR mounting is measured.
-        DeclareLaunchArgument(
-            'lidar_x',
-            default_value='0.0'
-        ),
-
-        DeclareLaunchArgument(
-            'lidar_y',
-            default_value='0.0'
-        ),
-
-        DeclareLaunchArgument(
-            'lidar_z',
-            default_value='0.0'
-        ),
-
-        DeclareLaunchArgument(
-            'lidar_roll',
-            default_value='0.0'
-        ),
-
-        DeclareLaunchArgument(
-            'lidar_pitch',
-            default_value='0.0'
-        ),
-
-        DeclareLaunchArgument(
-            'lidar_yaw',
-            default_value='0.0'
-        ),
 
         lidar_driver,
-        lidar_tf,
-        imu_node,
+        tf_launch,
+        # imu_node,
     ])
