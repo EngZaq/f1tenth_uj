@@ -5,3 +5,7 @@
 	path = src/hardware/f1tenth_system
 	url = https://github.com/f1tenth/f1tenth_system.git
 	branch = humble-devel
+[submodule "src/localization/rf2o_laser_odometry"]
+	path = src/localization/rf2o_laser_odometry
+	url = https://github.com/MAPIRlab/rf2o_laser_odometry.git
+	branch = ros2

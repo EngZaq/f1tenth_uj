@@ -14,6 +14,9 @@ slam_toolbox:
     map_frame: map
     base_frame: base_link
     scan_topic: /scan
+    # rf2o publishes odom->base_link ~50 ms after each scan; with a queue of 1
+    # every scan is dropped before its TF arrives. 5 gives ~165 ms of slack.
+    scan_queue_size: 5
     use_map_saver: true
     mode: mapping #localization
 
@@ -35,13 +38,13 @@ slam_toolbox:
     transform_timeout: 0.2
     tf_buffer_duration: 30.
     stack_size_to_use: 40000000 #// program needs a larger stack size to serialize large maps
-    enable_interactive_mode: true
+    enable_interactive_mode: false
 
     # General Parameters
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.0
-    minimum_travel_heading: 0.0
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.1  

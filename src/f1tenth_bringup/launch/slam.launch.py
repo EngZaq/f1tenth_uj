@@ -10,18 +10,22 @@ def generate_launch_description():
         get_package_share_directory('f1tenth_bringup'),
         'config', 'slam_toolbox.yaml')
 
-    # Placeholder odometry: the car is treated as not moving.
-    # Remove this when a real odom -> base_link source is added.
-    odom_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='odom_static_tf',
-        arguments=[
-            '--x', '0', '--y', '0', '--z', '0',
-            '--roll', '0', '--pitch', '0', '--yaw', '0',
-            '--frame-id', 'odom',
-            '--child-frame-id', 'base_link',
-        ],
+    # LiDAR odometry: publishes odom -> base_link from scan-to-scan motion.
+    # Do not run another odom -> base_link publisher at the same time.
+    rf2o = Node(
+        package='rf2o_laser_odometry',
+        executable='rf2o_laser_odometry_node',
+        name='rf2o_laser_odometry',
+        output='screen',
+        parameters=[{
+            'laser_scan_topic': '/scan',
+            'odom_topic': '/odom_rf2o',
+            'publish_tf': True,
+            'base_frame_id': 'base_link',
+            'odom_frame_id': 'odom',
+            'init_pose_from_topic': '',
+            'freq': 20.0,
+        }],
     )
 
     slam = Node(
@@ -32,4 +36,4 @@ def generate_launch_description():
         parameters=[cfg, {'use_sim_time': False}],
     )
 
-    return LaunchDescription([odom_tf, slam])
+    return LaunchDescription([rf2o, slam])
