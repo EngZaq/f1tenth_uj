@@ -9,7 +9,7 @@ vesc_driver:
     duty_cycle_min: 0.0
     position_max: 0.0
     position_min: 0.0
-    servo_max: 0.65          # temporary, widen after the sweep
+    servo_max: 0.67          # temporary, widen after the sweep
     servo_min: 0.1           # temporary, widen after the sweep
     speed_max: 10000.0       # ERPM, temporary low cap for first tests
     speed_min: -10000.0
