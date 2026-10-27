@@ -1,0 +1,12 @@
+/vesc_to_odom_node:
+  ros__parameters:
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: false        # rf2o (later the EKF) owns odom -> base_link
+    use_servo_cmd_to_calc_angular_velocity: true
+    wheelbase: 0.25          # rough, measure
+    # must match ackermann_to_vesc.yaml (this node applies the inverse conversion)
+    speed_to_erpm_gain: -8414.0
+    speed_to_erpm_offset: 0.0
+    steering_angle_to_servo_gain: -0.50
+    steering_angle_to_servo_offset: 0.361

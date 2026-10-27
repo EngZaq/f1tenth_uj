@@ -28,4 +28,10 @@ def generate_launch_description():
         parameters=[os.path.join(cfg, 'ackermann_to_vesc.yaml')],
         remappings=[('ackermann_cmd', 'drive')])
 
-    return LaunchDescription([vesc, joy_node, joy_teleop, ackermann_to_vesc])
+    vesc_to_odom = Node(
+        package='vesc_ackermann', executable='vesc_to_odom_node',
+        name='vesc_to_odom_node',
+        parameters=[os.path.join(cfg, 'vesc_to_odom.yaml')],
+        remappings=[('odom', 'odom_vesc')])
+
+    return LaunchDescription([vesc, joy_node, joy_teleop, ackermann_to_vesc, vesc_to_odom])
