@@ -105,3 +105,52 @@ python3 tools/observe_only_audit.py --duration 35 --with-vesc --output "$OUT/aud
 The audit **only subscribes**. It reports message arrival rates, observed TF edges, latest occupancy map, net RF2O motion, VESC telemetry and whether each topic was received. Passing does not validate actual wheel-speed scale, steering, motor limits, physical route tracking or braking.
 
 **Deferred but NOT completed:** physical E-stop verification, UBEC / steering power validation, battery discharge/regen current rating, VESC electrical limits, firmware timeout fault injection and live actuator calibration. Do not mark these as passed just because the read-only integration succeeds.
+
+## Non-authoritative shadow EKF experiment (added 2026-11-04)
+
+**Preflight observed** 700 RF2O messages at 20.001 Hz (median header age 49.8 ms) and 1,751 VESC odometry messages at 49.992 Hz (median header age 1.35 ms). Both reported `odom`/`base_link` frames and monotonic stamps. Original RF2O pose covariance (X,Y,yaw) was **zero**, as was VESC forward-speed twist covariance. **Original topics stay unchanged.**
+
+The new, **not-yet-tested-on-Jetson** shadow-only files are:
+
+- `tools/shadow_covariance_adapter.py`: forwards RF2O/VESC odometry to `/shadow_inputs/odom_rf2o` and `/shadow_inputs/odom_vesc`, adding **provisional** test-only variances for fused variables.
+- `src/f1tenth_bringup/config/ekf_shadow.yaml`: planar EKF; fuse RF2O X,Y,yaw and VESC forward velocity only; `publish_tf: false`, world/odom `odom`. No IMU at this stage.
+- `tools/shadow_ekf_audit.py`: read-only check of incoming corrected topics and `/odometry/filtered_shadow`.
+
+Adapter defaults use **explicitly uncalibrated test assumptions**: RF2O position standard deviation 0.25 m, yaw 15 degrees, and VESC forward-velocity standard deviation 0.4 m/s. These numbers are *not* supported by moving ground truth or sensor characterization; they are only a way to test filter data plumbing without feeding zero-variance observations into the EKF. Do **not** tune racing from them or present the resulting covariance as measured accuracy.
+
+With the working `ros2 launch f1tenth_bringup observe_only.launch.py enable_vesc:=true` running (no motor commands), run in a separate terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/f1tenth_uj/install/local_setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+python3 tools/shadow_covariance_adapter.py
+```
+
+In a third terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/f1tenth_uj/install/local_setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 run robot_localization ekf_node --ros-args \
+  -r __node:=ekf_shadow \
+  --params-file "$HOME/f1tenth_uj/src/f1tenth_bringup/config/ekf_shadow.yaml" \
+  -r odometry/filtered:=/odometry/filtered_shadow
+```
+
+In a fourth sourced terminal:
+
+```bash
+ros2 param get /ekf_shadow publish_tf   # MUST be False
+ros2 topic info /odometry/filtered_shadow -v
+OUT="$HOME/f1tenth_hw_evidence/shadow_ekf_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUT"
+python3 tools/shadow_ekf_audit.py --duration 35 --output "$OUT/audit.json" | tee "$OUT/audit.log"
+```
+
+If `publish_tf` is not False or the source topics/frames are wrong, stop the shadow EKF. The filter's output is **diagnostic only** and must not be used for robot navigation or physical control. RF2O remains the only publisher of `odom -> base_link` and SLAM remains the publisher of `map -> odom`.
+
+**Deferred hardware to-do items remain open:** independently verified emergency stop, suitable UBEC output and servo electrical setup, battery C-rating / safe discharge and regen limits, controller-level command timeout verification, actual motor polarity/speed gain, physical servo calibration, and measured odometry covariance under real motion.
