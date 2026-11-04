@@ -24,7 +24,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('lidar_x', default_value='0.195'),
+        DeclareLaunchArgument('lidar_x', default_value='0.215'),
         DeclareLaunchArgument('lidar_y', default_value='0.0'),
         DeclareLaunchArgument('lidar_z', default_value='0.15'),
         DeclareLaunchArgument('lidar_roll', default_value='0.0'),
