@@ -1,0 +1,52 @@
+# F1TENTH UJ: non-authoritative, read-only shadow EKF experiment.
+# DO NOT remap its output to /odom or use it for actuators/navigation.
+# RF2O alone remains the odom -> base_link TF broadcaster.
+# The covariance adapter injects PROVISIONAL (not calibrated) uncertainty;
+# values must be replaced after measured-motion calibration.
+#
+# 15-component state selection order:
+# x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az
+#
+ekf_shadow:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: false
+    publish_acceleration: false
+    print_diagnostics: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # RF2O LiDAR odometry is our current pose reference.
+    # Fuse *only* planar x/y position and yaw, not derived RF2O twist
+    # (which would double-count information from the same scans).
+    odom0: /shadow_inputs/odom_rf2o
+    odom0_config: [true, true, false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_nodelay: true
+    odom0_differential: false
+    odom0_relative: false
+
+    # VESC provides a *provisional, uncalibrated* forward wheel speed.
+    # No VESC pose, yaw, or angular velocity is fused.
+    odom1: /shadow_inputs/odom_vesc
+    odom1_config: [false, false, false,
+                   false, false, false,
+                   true, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_queue_size: 10
+    odom1_nodelay: true
+    odom1_differential: false
+    odom1_relative: false
+
+    use_control: false
