@@ -75,3 +75,33 @@ See the [engineering handoff](docs/HARDWARE_ENGINEERING_HANDOFF_2026-11-04.md) f
 ## Development policy
 
 Work on `zaq/hardware-integration`. Do not force-push or push unreviewed changes to `main`. Do not commit raw bags or archives by accident. Before activating propulsion: independently verified physical stop, motor-controller stale-command failsafe, secured test stand, steering/motor calibration and controlled supervision are required. All simulation-derived speed and steering values are provisional until tested on the real robot.
+
+## Integrated hardware observation — new, untested on Jetson (2026-11-04)
+
+The new `observe_only.launch.py` and `tools/observe_only_audit.py` are **committed but still require execution on the Jetson**.
+
+The launch starts LiDAR, laser TF, RF2O (`odom -> base_link`), SLAM Toolbox (`map -> odom`, loop closing overridden OFF), and optionally a VESC driver with all six actuator command subscriptions isolated to `/observe_only_unused/*`. VESC odometry publishes to `/odom_vesc_observe` with TF disabled.
+
+**Do not start VESC Tool, teleop or another ROS VESC driver concurrently.** The isolated topics are not a hardware stop and can still be targeted by other publishers.
+
+```bash
+git pull --ff-only origin zaq/hardware-integration
+colcon build --symlink-install --packages-select f1tenth_bringup
+source /opt/ros/humble/setup.bash
+source install/local_setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 launch f1tenth_bringup observe_only.launch.py enable_vesc:=true
+```
+
+In a separate sourced terminal:
+
+```bash
+OUT="$HOME/f1tenth_hw_evidence/observe_only_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUT"
+python3 tools/observe_only_audit.py --duration 35 --with-vesc --output "$OUT/audit.json" | tee "$OUT/audit.log"
+```
+
+The audit **only subscribes**. It reports message arrival rates, observed TF edges, latest occupancy map, net RF2O motion, VESC telemetry and whether each topic was received. Passing does not validate actual wheel-speed scale, steering, motor limits, physical route tracking or braking.
+
+**Deferred but NOT completed:** physical E-stop verification, UBEC / steering power validation, battery discharge/regen current rating, VESC electrical limits, firmware timeout fault injection and live actuator calibration. Do not mark these as passed just because the read-only integration succeeds.
