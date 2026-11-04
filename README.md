@@ -154,3 +154,7 @@ python3 tools/shadow_ekf_audit.py --duration 35 --output "$OUT/audit.json" | tee
 If `publish_tf` is not False or the source topics/frames are wrong, stop the shadow EKF. The filter's output is **diagnostic only** and must not be used for robot navigation or physical control. RF2O remains the only publisher of `odom -> base_link` and SLAM remains the publisher of `map -> odom`.
 
 **Deferred hardware to-do items remain open:** independently verified emergency stop, suitable UBEC output and servo electrical setup, battery C-rating / safe discharge and regen limits, controller-level command timeout verification, actual motor polarity/speed gain, physical servo calibration, and measured odometry covariance under real motion.
+
+## Latest accepted localization milestone — stationary shadow EKF (2026-11-04)
+
+**14/14 read-only integration checks PASSED**: RF2O 20.0 Hz, VESC wheel odom 50.0 Hz, filtered shadow EKF 30.0 Hz; valid frames/stamps, corrected test-only covariance and no EKF TF. This validates transport and stationary behavior **only**, not moving accuracy or safe driving. See the dated [shadow EKF validation and evidence report](docs/LOCALIZATION_SHADOW_EKF_VALIDATION_2026-11-04.md) for observed values, caveats and planned manual-motion comparison. Independent hardware E-stop, electrical current / regen limits, controller-level timeout and actuator calibration remain **pending**, not completed.
