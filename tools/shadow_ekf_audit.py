@@ -29,9 +29,9 @@ class Audit(Node):
     def __init__(self):
         super().__init__('f1tenth_shadow_ekf_audit')
         self.data = defaultdict(list)
-        self.subscriptions = []
+        self._audit_subscriptions = []
         for topic in TOPICS:
-            self.subscriptions.append(self.create_subscription(
+            self._audit_subscriptions.append(self.create_subscription(
                 Odometry, topic,
                 lambda msg, t=topic: self.receive(t, msg),
                 qos_profile_sensor_data,
