@@ -325,15 +325,23 @@ def run_ros():
                 speed, steer = 0.0, 0.0
                 reason = 'LATCH_STOP_' + reason
 
-            # Detect competing publishers; this check cannot stop a rogue
-            # publisher, so physical emergency cutoff remains mandatory.
+            # Check *both* ends of the real hardware chain. On 2026-11-05
+            # three stale Ackermann converter nodes each subscribed to /drive
+            # and published /commands/motor/speed. A single /drive publisher
+            # is insufficient to establish a single converter or command path.
+            # This software only suppresses its own output; rogue publishers
+            # must be removed and a physical independent cutoff remains vital.
             drive_publishers = len(self.get_publishers_info_by_topic('/drive'))
+            drive_subscribers = len(self.get_subscriptions_info_by_topic('/drive'))
             motor_publishers = len(
                 self.get_publishers_info_by_topic('/commands/motor/speed'))
-            if drive_publishers != 1 or motor_publishers != 1:
+            motor_subscribers = len(
+                self.get_subscriptions_info_by_topic('/commands/motor/speed'))
+            if (drive_publishers != 1 or drive_subscribers != 1
+                    or motor_publishers != 1 or motor_subscribers != 1):
                 speed, steer = 0.0, 0.0
                 self.mode = 'STOP'
-                reason = 'UNEXPECTED_ACTUATOR_PUBLISHER_COUNTS'
+                reason = 'ACTUATOR_GRAPH_OWNERSHIP_FAULT'
 
             cmd_out = AckermannDriveStamped()
             cmd_out.header.stamp = self.get_clock().now().to_msg()
@@ -358,7 +366,9 @@ def run_ros():
                 'speed_mps': round(speed, 4),
                 'steer_rad': round(steer, 4),
                 'drive_publisher_count': drive_publishers,
+                'drive_subscriber_count': drive_subscribers,
                 'motor_publisher_count': motor_publishers,
+                'motor_subscriber_count': motor_subscribers,
             }
             self.status_pub.publish(String(data=json.dumps(status, separators=(',', ':'))))
             if reason != self.last_reason:
