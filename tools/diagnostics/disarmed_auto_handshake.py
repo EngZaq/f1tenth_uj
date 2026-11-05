@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Verify STOP -> AUTO_READY -> AUTO_ACTIVE -> STOP with VESC actuation DISABLED.
 
-Never publishes /drive, motor speed or servo position. Refuses to start unless
+Never publishes or subscribes to /drive, motor speed or servo position.
+Refuses to start unless
 the live physical mux advertises real_actuation_enabled=false.
 Refuses multiple existing hold publishers. Not a physical safety test.
 """
@@ -12,20 +13,15 @@ import time
 def main():
     import rclpy
     from rclpy.node import Node
-    from rclpy.qos import qos_profile_sensor_data
     from std_msgs.msg import Bool, String
-    from ackermann_msgs.msg import AckermannDriveStamped
 
     class Check(Node):
         def __init__(self):
             super().__init__('disarmed_auto_handshake_diagnostic')
             self.status = None
-            self.last_drive = None
             self.status_samples = 0
             self.status_sub = self.create_subscription(
                 String, '/control/status', self.status_cb, 10)
-            self.drive_sub = self.create_subscription(
-                AckermannDriveStamped, '/drive', self.drive_cb, 10)
             self.hold_pub = None
             self.mode_pub = None
 
@@ -36,10 +32,6 @@ def main():
             except (ValueError, TypeError):
                 pass
 
-        def drive_cb(self, msg):
-            self.last_drive = (
-                float(msg.drive.speed), float(msg.drive.steering_angle))
-
         def step(self, duration):
             stop_at = time.monotonic() + duration
             while time.monotonic() < stop_at:
@@ -48,8 +40,9 @@ def main():
         def verify_disarmed(self):
             if self.status is None or self.status.get('real_actuation_enabled') is not False:
                 raise RuntimeError('ABORT: mux not confirmed disarmed')
-            if self.last_drive is not None and any(abs(x)>1e-5 for x in self.last_drive):
-                raise RuntimeError('ABORT: nonzero /drive detected')
+            if (abs(float(self.status.get('speed_mps', 0))) > 1e-5 or
+                    abs(float(self.status.get('steer_rad', 0))) > 1e-5):
+                raise RuntimeError('ABORT: mux status reports nonzero actuation request')
 
         def publish_hold(self, value):
             self.hold_pub.publish(Bool(data=value))
@@ -85,12 +78,19 @@ def main():
         n.verify_disarmed()
         counts = {
             'mux_status_publishers': len(n.get_publishers_info_by_topic('/control/status')),
+            'drive_publishers': len(n.get_publishers_info_by_topic('/drive')),
+            'drive_subscribers': len(n.get_subscriptions_info_by_topic('/drive')),
+            'motor_publishers': len(n.get_publishers_info_by_topic('/commands/motor/speed')),
+            'motor_subscribers': len(n.get_subscriptions_info_by_topic('/commands/motor/speed')),
             'hold_publishers_before_test': len(n.get_publishers_info_by_topic('/control/auto_hold')),
             'mode_request_publishers_before_test': len(n.get_publishers_info_by_topic('/control/request_mode')),
         }
         print('ROS endpoints:', json.dumps(counts))
         if counts['mux_status_publishers'] != 1:
             raise RuntimeError('ABORT: not exactly one physical mux status publisher')
+        if any(counts[k] != 1 for k in (
+                'drive_publishers','drive_subscribers','motor_publishers','motor_subscribers')):
+            raise RuntimeError('ABORT: actuator graph ownership must be 1 publisher and 1 subscriber at both links')
         if counts['hold_publishers_before_test'] != 0:
             raise RuntimeError('ABORT: old AUTO-hold publisher still running; Ctrl+C that terminal first')
         if counts['mode_request_publishers_before_test'] != 0:
@@ -114,7 +114,7 @@ def main():
             lambda s: (s.get('mode')=='AUTO_ACTIVE' and
                        s.get('auto_hold_held_and_fresh') is True),
             'AUTO state entered without actuation', 3.0, True)
-        # Stay in the state for repeated ticks and verify zero /drive.
+        # Stay in the state for repeated ticks and verify zero mux output from status.
         until = time.monotonic()+.8
         while time.monotonic()<until:
             n.publish_hold(True)
@@ -123,7 +123,7 @@ def main():
             if not n.status or n.status.get('mode')!='AUTO_ACTIVE':
                 raise RuntimeError('AUTO state dropped unexpectedly: '+
                                    json.dumps(n.status))
-        print('PASS: AUTO_ACTIVE stable ~0.8s; physical /drive stays zero')
+        print('PASS: AUTO_ACTIVE stable ~0.8s; mux reports zero physical /drive')
     except Exception as exc:
         print('FAIL:',str(exc))
         raise SystemExit(1)
