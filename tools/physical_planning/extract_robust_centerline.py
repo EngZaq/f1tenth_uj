@@ -348,7 +348,7 @@ def extract(map_yaml, output_prefix, step, max_speed, expected_length):
     speedfile=prefix.with_name(prefix.name+'_speed_profile.csv')
     preview=prefix.with_name(prefix.name+'_preview.png')
     with pathfile.open('w') as f:
-        f.write('# Coordinates generated in slam_map frame\n')
+        f.write('# Coordinates generated in the ROS saved occupancy map frame (typically map)\n')
         f.write('# s_m;x_m;y_m;psi_rad;kappa_1pm;vx_mps;ax_mps2\n')
         for z in zip(s,xs,ys,headings,kappa,speed,ax):
             f.write(';'.join(f'{float(q):.6f}' for q in z)+'\n')
