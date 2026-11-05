@@ -115,6 +115,11 @@ def run(args):
                 'time_increment_s':round(float(msg.time_increment),8),
                 'range_min':float(msg.range_min),
                 'range_max':float(msg.range_max),
+                'nonzero_intensity_fraction': round(
+                    sum(math.isfinite(float(x)) and float(x)>0 for x in msg.intensities)
+                    /len(msg.intensities),4) if msg.intensities else None,
+                'wall_clock_minus_header_stamp_s': round(
+                    time.time()-(msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9),3),
                 'angle_min_deg':round(math.degrees(msg.angle_min),2),
                 'angle_max_deg':round(math.degrees(msg.angle_max),2),
                 'computed_final_angle_deg':round(math.degrees(
@@ -140,6 +145,13 @@ def run(args):
     rows=node.summary
     intervals=[rows[i]['receive_monotonic_s']-rows[i-1]['receive_monotonic_s']
                for i in range(1,len(rows))]
+    counts_by_frame = dict(Counter(str(r['scan_count']) for r in rows))
+    metadata_inconsistencies = {
+        'frames_not_1440_samples': sum(r['scan_count'] != 1440 for r in rows),
+        'frames_with_range_max_100': sum(r['range_max'] == 100.0 for r in rows),
+        'frames_with_large_timestamp_age_over_0_3s': sum(
+            abs(r['wall_clock_minus_header_stamp_s']) > .3 for r in rows),
+    }
     per_angle=[
         {
             'angle_deg':key/2,
@@ -161,6 +173,8 @@ def run(args):
         'device_http_get':None if args.no_http else read_device(args.sensor_ip),
         'scan_frames':len(rows),
         'observed_hz':round(1/statistics.mean(intervals),2) if intervals else None,
+        'scan_length_histogram': counts_by_frame,
+        'metadata_inconsistencies': metadata_inconsistencies,
         'max_inter_scan_gap_s':round(max(intervals),4) if intervals else None,
         'latest_metadata':{k:v for k,v in rows[-1].items()
                            if k!='receive_monotonic_s'},
