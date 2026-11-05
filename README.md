@@ -164,3 +164,25 @@ If `publish_tf` is not False or the source topics/frames are wrong, stop the sha
 The physical explorer's initial 60-second real-LiDAR evaluation had **healthy ROS transport** (1800 LiDAR scans, 1202 exploration proposals, 1200 RF2O odom messages, 12 maps), but **FAILED** independent front-view safety acceptance: 1102 proposed motions had an insufficiently valid +/-20° forward scan. The controller previously accepted only three valid beams and used the 15th-percentile forward distance; the independent audit required >=90% valid and checked the nearest finite return. The physical shadow controller was tightened to fail closed for incomplete scans, while retaining its **physical-drive interlock**. The auditor now records missing-ray classifications and flags whether zero output means no useful exploration decisions. **Jetson retest pending.**
 
 See [2026-11-05 physical LiDAR exploration diagnostic and retest runbook](docs/PHYSICAL_EXPLORATION_SHADOW_AUDIT_2026-11-05.md). The initial 161 × 109 @ 0.05 m occupancy map was saved to `~/f1tenth_hw_evidence/exploration_shadow_20261105_092813/initial_map.{pgm,yaml}`; known area remained ~10.93 m² with the car stationary. Jetson spontaneous shutdown cause is still unknown (no persistent previous-boot journal). No powered autonomous driving is authorized.
+
+## Offline real-LiDAR exploration comparison (2026-11-05)
+
+First **stationary, non-actuating** raw ROS 2 bag recorded on the physical Jetson: `~/f1tenth_hw_evidence/real_exploration_baseline_20261105_101514/rosbag`. Recorder cleanly stopped after ~43 s, all five subscriptions connected (`/scan`, `/odom_rf2o`, `/map`, `/tf`, `/tf_static`); exact bag duration/message counts require `ros2 bag info`.
+
+`tools/exploration/offline_footprint_replay.py` is a research-only script comparing the old 90%-valid ±20° criterion against **sampled hypothetical front-bumper paths** at steering angles -0.15, -0.075, 0, +0.075 and +0.15 rad. It retains `+Inf` as unknown, never publishes any ROS commands, and does **not** claim a collision-free swept volume. Wheelbase and laser/body offsets are estimates/measurements from our physical geometry record; actual servo steering calibration remains pending.
+
+```bash
+cd ~/f1tenth_uj
+git pull --ff-only origin zaq/hardware-integration
+source /opt/ros/humble/setup.bash
+source install/local_setup.bash
+ros2 bag info ~/f1tenth_hw_evidence/real_exploration_baseline_20261105_101514/rosbag
+python3 -m py_compile tools/exploration/offline_footprint_replay.py
+python3 tools/exploration/offline_footprint_replay.py --self-test
+python3 tools/exploration/offline_footprint_replay.py \
+  ~/f1tenth_hw_evidence/real_exploration_baseline_20261105_101514/rosbag \
+  --every 5 --preview-m 0.50 \
+  --output ~/f1tenth_hw_evidence/real_exploration_baseline_20261105_101514/offline_footprint_report.json
+```
+
+**Important:** All output is diagnostic. A single laser plane, sampled leading edge and uncompensated frame cannot certify pedestrian/obstacle avoidance. No physical VESC actuation is enabled by this code. The independent hardware stop, safe controller timeout, battery limits, steering calibration and Jetson power reliability remain open.
