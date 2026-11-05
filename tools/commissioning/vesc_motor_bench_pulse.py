@@ -136,7 +136,19 @@ def run():
         print('Max observed |ERPM|:', node.max_erpm)
         print('Max observed |motor A|:', node.max_motor_current)
         print('Fault:', node.abort or 'none reported')
-        print('Motor test complete. Remain raised and monitor until zero motion.')
+        if node.max_erpm < 50 and node.max_motor_current < 0.1:
+            print('RESULT: MOTOR DID NOT RESPOND TO SPEED COMMAND.')
+            print('DIAGNOSIS: check VESC Tool > Motor Settings > PID Controllers >')
+            print('Speed Controller > Minimum ERPM (s_pid_min_erpm).')
+            print('Firmware speed control may release the motor when the')
+            print('requested |ERPM| is below that parameter. Do not blindly')
+            print('increase the test speed or change current limits.')
+        elif node.abort:
+            print('RESULT: PULSE ABORTED ON TELEMETRY FAULT.')
+        else:
+            print('RESULT: Measurable motor response observed; movement direction')
+            print('and safe motor stop still require independent verification.')
+        print('Motor pulse sequence ended. Remain raised and monitor until zero motion.')
     except KeyboardInterrupt:
         print('Interrupted: publishing STOP...', flush=True)
     finally:
