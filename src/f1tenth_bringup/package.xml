@@ -26,6 +26,11 @@
   <exec_depend>joy</exec_depend>
   <exec_depend>joy_teleop</exec_depend>
   <exec_depend>ackermann_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>vesc_driver</exec_depend>
   <exec_depend>vesc_ackermann</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
