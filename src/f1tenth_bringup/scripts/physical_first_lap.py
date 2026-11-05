@@ -43,9 +43,9 @@ def main():
                     or self.thresholds['return_radius_m']<=0
                     or not 0<self.thresholds['heading_tolerance_deg']<=180):
                 raise ValueError('Invalid physical first-lap thresholds')
+            self.file = Path(str(self.get_parameter('output').value)).expanduser()
             self.progress_file=self.file.with_name('physical_first_lap_progress.json')
             self.last_progress_at=0.0
-            self.file = Path(str(self.get_parameter('output').value)).expanduser()
             self.first = None
             self.previous = None
             self.travel = 0.0
