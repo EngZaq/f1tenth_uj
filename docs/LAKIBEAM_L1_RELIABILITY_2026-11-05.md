@@ -110,3 +110,53 @@ A second white-wall 2m run is useful:
       --front-wall-m 2.0 --out ~/f1tenth_hw_evidence/lidar_white_wall_2m.json
 
 Do NOT run this known-wall calibration with the vehicle driving toward the wall. If center returns disappear or the wall appears at a wrong bearing, inspect physical sensor yaw / ROS angle indexing and firmware scan window before changing explorer code.
+
+## Evidence update: controlled board measurements, 2026-11-05
+
+The device GET confirms model LakiBeam1, 30 Hz, 1800 RPM, 0.25-degree
+angular resolution, 45..315 degree physical window, actual filter level 3,
+min_angle=10, max_angle=170, window=90, neighbors=0.
+
+User reports the second wall was at ACTUAL 1.95m, although the CLI was run
+with 2.00m. Reported median residual -0.0327m under the wrong reference
+becomes approximately +0.0175m under actual geometry, conditional on samples
+really hitting the board. The original all-bin 0.1593m RMSE is NOT a proven
+16cm instrument error: board edges, background and mixed aggregate bin ranges
+can dominate the statistic. Forward finite fraction was 0.8801 for +/-10deg
+and ~0.815 for +/-20deg; samples per scan 1440 all frames and scan ~30Hz.
+
+The 1m experiment labeled lidar_open.json has 303 full 1440-point scans at
+30.22Hz, front median finite fraction 0.9321, and known_wall_test=null
+because the user omitted --front-wall-m 1.0. The original JSON retains
+angle_data and can be analyzed offline.
+
+Board geometry is essential: at 1.95m a perpendicular white target centered
+on the 0 degree ray requires >=1.42m width to fill +/-20deg. At 1.0m,
+the same FOV requires >=0.73m. For +/-10deg at 1.95m width >=0.69m.
+Without measured board width the coverage falloff from 1m to 1.95m
+cannot be called intrinsic sensor dropout.
+
+Upstream manufacturer specification LakiBeam1: 25m @ 70% reflectivity,
+at least 15m @ 10% reflectivity, typical +/-2cm range accuracy. The
+100m LaserScan metadata is a hardcoded driver value, not an instrument
+capability.
+
+Reanalyze both EXISTING JSON files without restarting ROS or moving car:
+
+    cd ~/f1tenth_uj
+    git pull --ff-only origin zaq/hardware-integration
+    python3 tools/diagnostics/reanalyze_lidar_wall.py --self-test
+    python3 tools/diagnostics/reanalyze_lidar_wall.py --file       ~/f1tenth_hw_evidence/lidar_white_wall_2m.json --distance-m 1.95
+    python3 tools/diagnostics/reanalyze_lidar_wall.py --file       ~/f1tenth_hw_evidence/lidar_open.json --distance-m 1.0
+
+If the exact board width is measured, pass --board-width-m WIDTH to either
+command. This crops the angular ROI to what the board should actually cover,
+with a 2 degree edge margin. Without this value, +/-5deg is assumed
+for screening ONLY. The inlier grouping uses +/-10cm as a diagnostic
+background exclusion criterion, not as a sensor accuracy or driving limit.
+
+Next engineering gates: actual board width and angle, known white/dark
+target test, possible filter LV3 versus LV1 or LV0 controlled comparison
+when user elects to change LiDAR settings; retain conservative unknown
+handling until sensor's dark-object behavior and physical stopping system
+are tested. Do NOT replace zero-return/+inf by fake 25m free-space data.
