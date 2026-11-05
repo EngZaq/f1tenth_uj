@@ -170,6 +170,9 @@ def run_ros():
             self.odom_at = None
             self.map_at = None
             self.last_reason = None
+            self.last_mode_request = None
+            self.last_mode_request_at = None
+            self.mode_request_result = 'NO_MODE_REQUEST_RECEIVED'
             self.drive_pub = self.create_publisher(
                 AckermannDriveStamped, '/drive', 10)
             self.status_pub = self.create_publisher(
@@ -245,26 +248,34 @@ def run_ros():
 
         def mode_cb(self, msg):
             m = msg.data.strip().upper()
+            self.last_mode_request = m
+            self.last_mode_request_at = time.monotonic()
             if m == 'STOP':
                 self.mode = 'STOP'
+                self.mode_request_result = 'STOP_ACCEPTED'
                 self.get_logger().warn('Operator STOP requested; reselect mode to re-arm')
                 return
             if m not in ('MANUAL', 'AUTO'):
+                self.mode_request_result = 'REJECT_INVALID_MODE'
                 self.get_logger().warn('Invalid mode; use STOP, MANUAL or AUTO')
                 return
             if self.first_lap_completed:
+                self.mode_request_result = 'REJECT_FIRST_LAP_COMPLETED'
                 self.get_logger().warn('Mission complete: restart after map handoff')
                 return
-            # Manual uses joystick button 5. AUTO uses independent supervised
-            # hold topic so a remote is NOT required for mission preparation.
-            # This ROS topic is NOT a physical emergency stop.
+            # Never allow selecting while the respective hold is asserted;
+            # an explicit received release event is required. A short-lived
+            # "ros2 topic pub --once false" may be lost to ROS discovery.
             if m == 'MANUAL' and self.deadman:
+                self.mode_request_result = 'REJECT_JOYSTICK_DEADMAN_HELD'
                 self.get_logger().warn('Release joystick deadman before MANUAL selection')
                 return
             if m == 'AUTO' and self.auto_hold:
+                self.mode_request_result = 'REJECT_AUTO_HOLD_HELD'
                 self.get_logger().warn('Release /control/auto_hold before AUTO selection')
                 return
             if m == 'AUTO' and not self.allow_auto:
+                self.mode_request_result = 'REJECT_AUTO_DISABLED_AT_LAUNCH'
                 self.get_logger().warn('AUTO is locked at launch; no automatic actuation')
                 return
             self.mode = m + '_READY'
@@ -272,7 +283,11 @@ def run_ros():
             self.auto_cmd = None
             self.manual_at = None
             self.auto_at = None
-            self.get_logger().warn('Mode %s ready, hold joystick button 5 to engage' % m)
+            self.mode_request_result = m + '_READY_ACCEPTED'
+            if m == 'AUTO':
+                self.get_logger().warn('AUTO_READY: request accepted; assert fresh auto hold to enter AUTO_ACTIVE')
+            else:
+                self.get_logger().warn('MANUAL_READY: request accepted; hold joystick button 5 to engage')
 
         def fresh(self, timestamp, seconds, now):
             return timestamp is not None and 0 <= now-timestamp < seconds
@@ -362,6 +377,12 @@ def run_ros():
                 'autonomous_actuation_enabled': self.allow_auto,
                 'deadman_button_5_held': joy_held,
                 'auto_hold_held_and_fresh': auto_hold_held,
+                'auto_hold_raw_value': self.auto_hold,
+                'last_mode_request': self.last_mode_request,
+                'mode_request_result': self.mode_request_result,
+                'mode_request_age_s': (
+                    round(now-self.last_mode_request_at, 3)
+                    if self.last_mode_request_at is not None else None),
                 'first_lap_completed': self.first_lap_completed,
                 'scan_fresh': scan_fresh,
                 'scan_reason': scan_reason,
