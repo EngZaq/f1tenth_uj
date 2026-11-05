@@ -39,8 +39,16 @@ def scan_bins(msg):
             bucket = bins[int(round(angle*2))]
             bucket['n'] += 1
             bucket[k] += 1
-            if k == 'measured' and raw < .8:
-                bucket['near_80cm'] += 1
+            if k == 'measured':
+                bucket['range_mm_sum'] += int(round(float(raw)*1000))
+                bucket['range_count'] += 1
+                if raw < .8:
+                    bucket['near_80cm'] += 1
+                if i < len(msg.intensities):
+                    signal = float(msg.intensities[i])
+                    if math.isfinite(signal):
+                        bucket['rssi_sum_milli'] += int(round(signal*1000))
+                        bucket['rssi_count'] += 1
     return all_counts, bins
 
 
@@ -159,6 +167,10 @@ def run(args):
             'positive_inf_fraction':round(c['positive_inf']/c['n'],4),
             'measured_fraction':round(c['measured']/c['n'],4),
             'near_0_8m_observations':c['near_80cm'],
+            'mean_measured_m':round(c['range_mm_sum']/c['range_count']/1000,3)
+                              if c['range_count'] else None,
+            'mean_rssi':round(c['rssi_sum_milli']/c['rssi_count']/1000,2)
+                        if c['rssi_count'] else None,
         } for key,c in sorted(node.bins.items()) if c['n']
     ]
     persistent=[v['angle_deg'] for v in per_angle
@@ -166,7 +178,29 @@ def run(args):
     intermittent=[v['angle_deg'] for v in per_angle
                   if .1<v['positive_inf_fraction']<.9]
     fractions=[r['front_valid_fraction'] for r in rows]
+    wall_report = None
+    if args.front_wall_m is not None:
+        # Independent simple geometry check with a *stationary* broad wall
+        # orthogonal to the validated front axis, at tape-measured distance.
+        # If the frame is reversed, missing center returns are diagnostic.
+        center = [a for a in per_angle if abs(a['angle_deg'])<=10]
+        tested = sum(a['observations'] for a in center)
+        seen = sum(round(a['observations']*a['measured_fraction']) for a in center)
+        errors = [
+            a['mean_measured_m']-args.front_wall_m/math.cos(math.radians(a['angle_deg']))
+            for a in center if a['mean_measured_m'] is not None
+        ]
+        wall_report = {
+            'expected_wall_perpendicular_distance_m':args.front_wall_m,
+            'center_half_width_deg':10,
+            'finite_coverage':round(seen/tested,4) if tested else 0,
+            'range_residual_median_m':round(statistics.median(errors),4) if errors else None,
+            'range_residual_rmse_m':round(math.sqrt(sum(v*v for v in errors)/len(errors)),4)
+                                   if errors else None,
+            'note':'Diagnostic only: assumes wall is broad, vertical, perpendicular, 0deg is physical forward and tape measured from LiDAR optical origin.'
+        }
     report={
+        'known_wall_test':wall_report,
         'warning':("Read only. Upstream driver maps raw distance ZERO to +INF. "
                    "It cannot distinguish beyond-range, weak reflection, filter "
                    "suppression or missing echo. Do not infer an empty path."),
@@ -201,6 +235,8 @@ def main():
     p.add_argument('--topic',default='/scan')
     p.add_argument('--sensor-ip',default='192.168.198.2')
     p.add_argument('--no-http',action='store_true')
+    p.add_argument('--front-wall-m',type=float,default=None,
+                   help='Optional stationary perpendicular white-wall distance from LiDAR origin for 0deg alignment and range error')
     p.add_argument('--out',default='~/f1tenth_hw_evidence/lakibeam_audit.json')
     args=p.parse_args()
     if args.self_test:
@@ -208,6 +244,8 @@ def main():
     else:
         if not 2<=args.seconds<=60:
             p.error('--seconds must be between 2 and 60')
+        if args.front_wall_m is not None and not .3<=args.front_wall_m<=10:
+            p.error('--front-wall-m must be 0.3 to 10 metres')
         run(args)
 
 
