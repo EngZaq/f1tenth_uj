@@ -4,7 +4,52 @@
 
 Hardware repository for the F1TENTH autonomous racing car running ROS 2 Humble on an NVIDIA Jetson Orin Nano. The project is integrating a real LakiBeam LiDAR, RF2O, SLAM Toolbox, VESC drive interface, measured vehicle geometry, simulator-derived offline planning and staged safety validation.
 
-> **STATUS (2026-11-04): NOT APPROVED FOR POWERED AUTONOMOUS DRIVING.** The hardware emergency stop is not yet installed/tested. VESC physical direction, steering range, command timeout, wheel-speed calibration, real-track localization and tracking remain open. Safety-gate code under `tools/safety/` is **BENCH-ONLY** and must **not** be wired to the real VESC/servo command path.
+> **CURRENT STATUS — 2026-11-05: DISARMED PHYSICAL AUTONOMY INTEGRATION VERIFIED; NO POWERED DRIVING AUTHORIZED.** The ROS AUTO hold handshake, real LiDAR exploration proposals and one optimized swept-path precondition all passed on the Jetson with real actuation disabled. The mapping-only real-track rehearsal is running but is waiting for the car to depart the start: **no track has been built, no physical closed loop has been completed, and no real-track centerline has been generated yet**. The VESC Tool settings were deliberately left unchanged. Motor/brake calibration, firmware electrical safeguards and an independent physical stop are unresolved. The experimental §tools/safety/§ prototypes remain bench-only.
+
+
+## End-of-day hardware milestone — 2026-11-05
+
+**Read the full team handoff:** [Daily engineering report and resume plan](docs/DAILY_ENGINEERING_HANDOFF_2026-11-05.md). The [physical first-motion readiness notes](docs/PHYSICAL_FIRST_MOTION_READINESS_2026-11-05.md) and [no-VESC real-track mapping guide](docs/PHYSICAL_TRACK_MAPPING_REHEARSAL_2026-11-05.md) describe the implemented subsystems and the remaining work.
+
+| Subsystem / observation | Latest grounded result | Interpretation |
+| --- | --- | --- |
+| Real sensors | LakiBeam ~30 Hz; RF2O ~20 Hz; SLAM publishes /map | Connected; moving-course accuracy not validated |
+| Remote-free AUTO state machine | STOP -> AUTO_READY -> AUTO_ACTIVE passed; 0.8 s stable | **Disarmed only**, independent stop not certified |
+| Autonomous exploration | Physical /exploration/drive generated 0.075 m/s at −0.10 rad; later 0.146 m/s at −0.0053 rad | Proposals, NOT actual wheel movement |
+| Exclusive command graph | /drive and motor command topics had 1 publisher / 1 subscriber each | Snapshot ownership validated |
+| Physical swept-path guard | 0 blocking returns; ~80.51% measured path rays; max blind width 0.0113 m | Experimental software precondition PASS, not obstacle safety proof |
+| Guard timing on Jetson | Reduced from 78.2 ms to **4.17 ms** in sampled run | Meets configured 40 ms single-call budget for that sample |
+| Read-only map rehearsal | /mission/physical_lap_progress reported AWAITING_DEPARTURE | Startup and progress publishing work, no physical lap |
+| Partial stationary map | 3,228 known free cells; 203 safe cells; observed closed corridor false | **Not a completed track map** |
+| Physical drive / racing | Not executed | Firmware, e-stop, steering, braking still unverified |
+
+### Delivered code
+
+- **ROS-integrated but normally disarmed real hardware launch:** `real_integrated.launch.py`, VESC command selector `physical_drive_mux.py`, remote-free AUTO hold, mode acknowledgments, single-owner /drive and /commands/motor/speed checks.
+- **Physical path guard:** `physical_path_guard.py` now uses vectorized Ackermann swept-body geometry, reports blocking hits/unknown sectors/path width and actual `compute_ms`, and stops software acceptance if its computation exceeds budget. Missing LiDAR returns are treated as unknown, never guaranteed free.
+- **Real mapping-only rehearsal:** `physical_map_rehearsal.launch.py` uses real LiDAR + RF2O + SLAM with loop closing, then physical first-lap progression and automatic map/centerline/vehicle-route preparation. It intentionally launches **no VESC or drive node**; physically isolate propulsion before manually pushing the car.
+- **Documentation/tests:** disarmed AUTO handshake, near-return probe, calibration precheck, ROS-free physical guard regression and full dated engineering report.
+
+### Resume at next session — produce a real track map
+
+**Next practical prerequisite: build a LiDAR-visible closed course.** The initial suggested map/low-speed development layout (not built) is a 7 m outer diameter / 5 m inner diameter loop with ~1 m lane, secured walls at LiDAR height. It is **not** a >5 m/s racing circuit. With propulsion physically isolated, manually push the car around a complete closed lap; the mapping-only pipeline will attempt to create real `new_track.yaml`, `new_track.pgm`, `new_track_centerline.csv` and `new_track_body_optimized.csv`.
+
+    cd ~/f1tenth_uj
+    git pull --ff-only origin zaq/hardware-integration
+    source /opt/ros/humble/setup.bash
+    colcon build --symlink-install --packages-select f1tenth_bringup
+    source install/local_setup.bash
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    ros2 launch f1tenth_bringup physical_map_rehearsal.launch.py
+
+Second sourced terminal: `ros2 topic echo /mission/physical_lap_progress --field data`. Inspect results in `~/f1tenth_hw_evidence/physical_mapping_YYYYMMDD_HHMMSS/mission_status.json`. **A COMPLETE result has not occurred yet.** Avoid repeating stationary LiDAR and AUTO-mode tests unless a new failure appears.
+
+### Hardware speed and firmware decision
+
+The project speed goal is **greater than 5 m/s**, subject to mechanical/electrical/control validation. Existing ±1,400 ERPM ROS command clamps are provisional and must **not** be mistaken for final firmware or speed limits. The user requested leaving all VESC Tool parameters unchanged for now; no firmware changes were made. Battery C rating is unknown and current/brake/regen/timeout settings are not approved by the software tests. Do not enable physical actuation without a verified independent propulsion cutoff and physical motor, steering and stopping commissioning.
+
+---
 
 ## Real integrated ROS 2 launch (2026-11-05)
 
@@ -23,12 +68,12 @@ ros2 launch f1tenth_bringup real_integrated.launch.py \
   enable_real_actuation:=false enable_autonomous_actuation:=false
 ```
 
-The VESC is connected to the **real command path**, but default STOP and no nonzero actuation. A separate opt-in live manual commissioning mode is documented **only after independent physical stop and actual firmware current/timeout checks**. The VESC firmware has previously exhibited a 7.93 A startup current; changing ROS speed limits does not enforce phase-current limits.
+The VESC is connected to the **real command path**, but default STOP and no nonzero actuation; the remote-free disarmed AUTO handshake later passed on the Jetson. A separate opt-in live manual commissioning mode is documented **only after independent physical stop and actual firmware current/timeout checks**. The VESC firmware has previously exhibited a 7.93 A startup current; changing ROS speed limits does not enforce phase-current limits.
 
 ## Engineering documentation
 
 - **[Complete physical hardware integration handoff — 2026-11-04](docs/HARDWARE_ENGINEERING_HANDOFF_2026-11-04.md)**: exact tests, numeric evidence, source changes, ROS commands, geometry model, map/route validation, bench safety tests, known problems, evidence locations and next steps.
-- **[Simulation reference repository](https://github.com/EngZaq/f1tenth_uj_sim)**: established exploration, SLAM, centerline extraction and path optimization work. The hardware planning copy is presently **offline only**.
+- **[Simulation reference repository](https://github.com/EngZaq/f1tenth_uj_sim)**: established exploration, SLAM, centerline extraction and path optimization work. The hardware map-to-route finalizer is wired into a mapping-only physical rehearsal, but has **not yet produced a real completed-lap route**.
 
 ## System snapshot
 
@@ -209,7 +254,7 @@ python3 tools/exploration/offline_footprint_replay.py \
 
 ### Fast physical commissioning (2026-11-05)
 
-See [physical first-motion readiness](docs/PHYSICAL_FIRST_MOTION_READINESS_2026-11-05.md) for one disarmed Jetson verification, Ackermann swept-footprint guard tests, ROS steering/ERPM calibration report, and the required VESC firmware/independent-stop checks. The physical `/control/status` reports `swept_path` evidence. Real actuation is DISABLED by default and the new guard has not been validated on the Jetson yet.
+See [physical first-motion readiness](docs/PHYSICAL_FIRST_MOTION_READINESS_2026-11-05.md) for one disarmed Jetson verification, Ackermann swept-footprint guard tests, ROS steering/ERPM calibration report, and the required VESC firmware/independent-stop checks. The physical `/control/status` reports `swept_path` evidence. Real actuation remains disabled by default. The revised software guard **passed a single live disarmed Jetson snapshot** at 4.17 ms, but physical obstacle coverage, emergency stopping and braking are not certified.
 
 ## First real track map + route (no VESC Tool changes)
 
