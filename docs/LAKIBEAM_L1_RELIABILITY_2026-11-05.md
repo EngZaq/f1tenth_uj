@@ -160,3 +160,42 @@ target test, possible filter LV3 versus LV1 or LV0 controlled comparison
 when user elects to change LiDAR settings; retain conservative unknown
 handling until sensor's dark-object behavior and physical stopping system
 are tested. Do NOT replace zero-return/+inf by fake 25m free-space data.
+
+## 2026-11-05: Direct engineering fix for false-positive 90% forward dropout
+
+Observed offline calibration:
+- Actual white-board 1.95m: central +/-5 degrees **100% measured**, corrected perpendicular residual median **+0.0217m**, RMSE **0.0208m**.
+- User's approx 1m test: central +/-5 degrees **100% measured**, perpendicular residual median **-0.0200m**, RMSE **0.0193m**.
+- Across the full +/-20 degrees the 1.95m board test had missing echoes, but board width was not provided. Without width or angular coverage, this is not proof of an out-of-range or failed sensor. The 25m nominal range has no bearing on a near 1m or 1.95m *central return*.
+- 303/303 frames have full 1440 angular samples, 30.2Hz, consistent timestamps. Real firmware filter level 3 is configured; no filter changes were required for the central measurement.
+
+The immediate software defect was that the physical exploration **proposal** used the same global >=90% finite-ray requirement across +/-20 degrees as a motion precondition. That turns legitimate no-return rays outside a narrow target into an all-front STOP even if the measured central sector is clean.
+
+Code now calls proposal_front_guard() from tools/exploration/front_scan_guard.py for **non-actuating exploration proposals**:
+- Require >=90% finite measured points in the central +/-5 degrees with no central object below 0.80m.
+- Independently reject ANY finite measured object closer than 0.80m anywhere in +/-20 degrees.
+- All invalid/inf rays remain unknown, represented as zero in the existing exploration gap selection. Never convert +inf into a fabricated 25m distance.
+- Simulator behavior unchanged.
+- **IMPORTANT** This is ONLY a less misleading proposal-availability criterion. A central +/-5 degrees region does NOT span the physical car's full swept footprint, especially in turns. Therefore the separate real actuator mux STILL requires >=90% across +/-20 degrees and will not authorize movement merely because proposals are available. This patch does NOT certify safe driving.
+
+Regression test:
+
+    cd ~/f1tenth_uj
+    git pull --ff-only origin zaq/hardware-integration
+    python3 tools/exploration/test_proposal_front_guard.py
+    source /opt/ros/humble/setup.bash
+    colcon build --symlink-install --packages-select f1tenth_bringup
+    source install/local_setup.bash
+
+Restart ONE launch, for ROS graph examination only:
+
+    ros2 launch f1tenth_bringup real_integrated.launch.py       enable_real_actuation:=false       enable_autonomous_actuation:=true       enable_joystick:=false
+
+In a second sourced terminal:
+
+    ros2 topic echo /exploration/drive --once --field drive
+    ros2 topic echo /control/status --once --field data
+
+A nonzero exploration proposal now becomes possible on scans with valid central measured gap while real /drive stays zero. If the explorer remains at zero, its once-per-second logs identify obstacle/gap constraints; do not disable the full-footprint/motor gate to force movement.
+
+Further motor commissioning must check VESC firmware limits, actual stopping distance and an independent cutoff. For powered autonomy, the next safety improvement is a physically validated swept-path/unknown-return policy rather than merely reusing a narrow central proposal test for propulsion.
