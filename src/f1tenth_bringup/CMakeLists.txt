@@ -8,4 +8,14 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Real physical integrated command selector and existing hardware-shadow explorer.
+# Install the explorer and its ROS-free guard adjacent to preserve Python imports.
+install(
+  PROGRAMS
+    scripts/physical_drive_mux.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/exploration_controller_v2.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/front_scan_guard.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
