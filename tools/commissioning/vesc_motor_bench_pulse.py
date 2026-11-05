@@ -39,6 +39,8 @@ def run():
     from rclpy.node import Node
     from std_msgs.msg import Float64
     from vesc_msgs.msg import VescStateStamped
+    from rcl_interfaces.srv import GetParameters
+    from rcl_interfaces.msg import ParameterType
 
     class Bench(Node):
         def __init__(self):
@@ -53,6 +55,33 @@ def run():
             self.sub = self.create_subscription(
                 VescStateStamped, '/sensors/core', self.telem_cb, 10
             )
+
+        def verify_driver_speed_limits(self):
+            """Query the ACTIVE node, not the on-disk YAML file. Fail closed."""
+            client = self.create_client(GetParameters, '/vesc_driver/get_parameters')
+            if not client.wait_for_service(timeout_sec=2.0):
+                raise RuntimeError('VESC parameter service unavailable: cannot verify active limits')
+            req = GetParameters.Request()
+            req.names = ['speed_min', 'speed_max']
+            future = client.call_async(req)
+            deadline = time.monotonic() + 2.0
+            while not future.done() and time.monotonic() < deadline:
+                rclpy.spin_once(self, timeout_sec=0.05)
+            if not future.done() or future.exception() is not None:
+                raise RuntimeError('Unable to read active /vesc_driver speed bounds')
+            values = future.result().values
+            if len(values) != 2 or any(v.type != ParameterType.PARAMETER_DOUBLE for v in values):
+                raise RuntimeError('Invalid driver speed parameter types')
+            lo, hi = values[0].double_value, values[1].double_value
+            print('ACTIVE /vesc_driver speed limits: [%.1f, %.1f] ERPM' % (lo, hi))
+            if (not all(map(math.isfinite, (lo, hi)))
+                    or lo > -ERPM or hi < ERPM or hi > 1100.0):
+                raise RuntimeError(
+                    'ACTIVE SPEED LIMIT MISCONFIGURATION: %.1f ERPM pulse would be '
+                    'clipped or bounds exceed dedicated bench config. '
+                    'Stop the old driver, restart using vesc_motor_bench.yaml, '
+                    'and verify /vesc_driver speed_max = 1100.0' % ERPM)
+            return lo, hi
 
         def telem_cb(self, msg):
             s = msg.state
@@ -109,6 +138,7 @@ def run():
         print('Bench motor command subscribers:', endpoints)
         if endpoints != 1:
             raise RuntimeError('Need exactly one dedicated bench VESC subscriber')
+        node.verify_driver_speed_limits()
         if node.abort or not node.telem_is_fresh():
             raise RuntimeError('VESC telemetry fault or stale preflight')
         st = node.last_telem
@@ -129,6 +159,9 @@ def run():
         node.poll(.15, 0.0)
         if node.abort or not node.telem_is_fresh() or node.pub.get_subscription_count() != 1:
             raise RuntimeError('preflight became invalid before pulse')
+        node.verify_driver_speed_limits()
+        if node.abort or not node.telem_is_fresh():
+            raise RuntimeError('telemetry became invalid during active parameter check')
         print('EXECUTING SHORT MOTOR PULSE...')
         node.poll(PULSE_SECONDS, ERPM)
         node.poll(STOP_SECONDS, 0.0)
