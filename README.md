@@ -6,6 +6,25 @@ Hardware repository for the F1TENTH autonomous racing car running ROS 2 Humble o
 
 > **STATUS (2026-11-04): NOT APPROVED FOR POWERED AUTONOMOUS DRIVING.** The hardware emergency stop is not yet installed/tested. VESC physical direction, steering range, command timeout, wheel-speed calibration, real-track localization and tracking remain open. Safety-gate code under `tools/safety/` is **BENCH-ONLY** and must **not** be wired to the real VESC/servo command path.
 
+## Real integrated ROS 2 launch (2026-11-05)
+
+A new **real VESC-connected** integration is available on the hardware development branch. It uses actual VESC driver + Ackermann converter, real LiDAR/RF2O/SLAM, the original joystick deadman, and an exclusive command mux. See [real integrated hardware runbook](docs/REAL_INTEGRATED_ROS_HARDWARE_2026-11-05.md). Not autonomous-driving certified.
+
+```bash
+cd ~/f1tenth_uj
+git pull --ff-only origin zaq/hardware-integration
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select f1tenth_bringup
+source install/local_setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+python3 src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
+ros2 launch f1tenth_bringup real_integrated.launch.py \
+  enable_real_actuation:=false enable_autonomous_actuation:=false
+```
+
+The VESC is connected to the **real command path**, but default STOP and no nonzero actuation. A separate opt-in live manual commissioning mode is documented **only after independent physical stop and actual firmware current/timeout checks**. The VESC firmware has previously exhibited a 7.93 A startup current; changing ROS speed limits does not enforce phase-current limits.
+
 ## Engineering documentation
 
 - **[Complete physical hardware integration handoff — 2026-11-04](docs/HARDWARE_ENGINEERING_HANDOFF_2026-11-04.md)**: exact tests, numeric evidence, source changes, ROS commands, geometry model, map/route validation, bench safety tests, known problems, evidence locations and next steps.
