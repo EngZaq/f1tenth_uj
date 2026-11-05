@@ -57,3 +57,17 @@ Based on per-angle missing-data pattern, design a corridor-specific shadow propo
 A future `strict_shadow_acceptance_pass` is necessary but insufficient; also require nonzero, valid proposals in a controlled clear environment to demonstrate feasible progress.
 
 **Hardware drive interlock remains ACTIVE.**
+
+## Angle-resolved evidence (user Jetson output ~09:55)
+
+Full read-only profile, 593 scans, 1440 ranges/scan, `frame_id=laser`. Evidence JSON remains on Jetson at `~/f1tenth_hw_evidence/lidar_angle_profile_20261105_095538/profile.json`.
+
+- Reported LaserScan metadata `range_min=0.0`, `range_max=100.0`. **Verified against Richbeam's official ROS 2 source**: `src/lakibeam1_scan.cpp` explicitly sets these constants and replaces every raw zero-distance entry with `+Inf`, setting its intensity to zero. Source: https://github.com/RichbeamTechnology/Lakibeam_ROS2_Driver/blob/main/src/lakibeam1_scan.cpp . Thus `+Inf` here means *raw distance zero/unmeasured*, not proven obstacle-free space and not evidence of a 100-meter effective LiDAR range.
+- Median invalid fraction across forward +/-20° was **18.75%**, while the central +/-5° valid fraction was only **67.5%**.
+- p50/p95 maximum consecutive missing angular arc in +/-20° was **1.25° / 1.50°**. The invalid rays appear fragmented over angle, not one large blind sector.
+- Angular bin valid fractions: -15° to -10° =54.5%; -5°..0°=70.5%; 0°..+5°=65.0%; +5°..+10°=95.0%; +15°..+20°=96.9%.
+- Closest finite observed 0°..+5°~5.189m, +15°..+20°~2.335m, +20°..+25°~1.169m, +50°..+55°~0.886m. These are **per-bin minima over 593 scans**, not a synchronized single-scan obstacle map. In ROS conventions **positive bearing is counter-clockwise**, nominally **left**, assuming the current `laser` alignment is accurate.
+- The exact cause of zero distance is still unknown (surface reflectivity, angle, missed return, driver/data or environmental conditions). The accepted fail-closed controller is not yet producing autonomous progress.
+
+## Next read-only diagnostic
+The newly committed `tools/exploration/temporal_scan_coverage.py` compares per-angle measurement **coverage**, not free-space clearance, across 1, 2, 3, 5 and 10 consecutive scans, with no ROS publishers. Run **only with the car stationary**. It helps distinguish intermittent no-returns from persistent angular gaps. Historical readings cannot be used for physical collision avoidance without compensating for robot and obstacle motion and validating conservatism. A matte flat target near the central field of view can independently verify orientation and reveal whether +Inf decreases as a nearby surface becomes measurable.
