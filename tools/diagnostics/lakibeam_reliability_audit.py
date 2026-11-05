@@ -79,6 +79,7 @@ def self_test():
     assert classify(float('nan'),0,100) == 'nan'
     class Scan:
         ranges = [1.5,float('inf'),0.0,2.0]
+        intensities = [35.0,0.0,0.0,41.0]
         range_min = 0.0
         range_max = 100.0
         angle_min = -math.radians(.75)
