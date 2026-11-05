@@ -74,3 +74,23 @@ One consolidated output:
 - physical_calibration_precheck output,
 - a single /control/status JSON with swept_path details after the new launch.
 Separately note whether an independent motor cutoff exists and provide VESC Tool screenshot showing actual firmware current limits/timeout (not stale disconnected screenshot).
+
+## Latest physical guard evidence and short-path diagnosis (2026-11-05)
+
+The user ran tests successfully: ROS-free swept guard PASS, 16.6ms mean computation; predicted servo/ERPM and disarmed ROS launch validated. Important caveat: actual motor/servo directions, VESC firmware current limit, and independent cutoff remain NOT VERIFIED.
+
+Physical swept path status: ready=false; MEASURED_OBSTACLE_IN_SWEPT_PATH; nearest=0.111m; nearest measured=0.111m; swept known fraction=0.8174; max unknown run=1.5deg; proposed steer=-0.1rad and speed=0.075m/s.
+
+Separately the central +/-20deg front check reports minimum=1.224m, so the 0.111m point lies outside +/-20deg, in a lateral scan segment. It may reflect the car's own bodywork/tire/mount but could be a real close side obstacle. Nominal front bumper is only 0.090m ahead of laser. The guard is correct to refuse forward actuation pending classification.
+
+Fast read-only angle localization while the launch remains running:
+
+    cd ~/f1tenth_uj
+    git pull --ff-only origin zaq/hardware-integration
+    source /opt/ros/humble/setup.bash
+    source install/local_setup.bash
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    python3 tools/diagnostics/physical_near_return_probe.py
+
+The new probe subscribes to /scan and /exploration/drive ONLY, never /drive, and reports 0.111m beam angle, physical-frame x/y, closest five blocking returns, and whether each is inside nominal body. It requires no ROS rebuild/restart, no motor command, and no repeated calibration test. Do not mask the return until angle/geometry and physical nearby obstacle are checked. If confirmed self-return, preferable remedy is physically eliminate the LiDAR line-of-sight obstruction with verified mounting and update TF, rather than blindly ignoring close distances.
