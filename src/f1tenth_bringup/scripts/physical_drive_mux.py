@@ -337,6 +337,12 @@ def run_ros():
                 self.get_publishers_info_by_topic('/commands/motor/speed'))
             motor_subscribers = len(
                 self.get_subscriptions_info_by_topic('/commands/motor/speed'))
+            rf2o_publishers = len(
+                self.get_publishers_info_by_topic('/odom_rf2o'))
+            if self.mode == 'AUTO_ACTIVE' and rf2o_publishers != 1:
+                speed, steer = 0.0, 0.0
+                self.mode = 'STOP'
+                reason = 'AUTO_DUPLICATE_OR_MISSING_RF2O_ODOMETRY'
             if (drive_publishers != 1 or drive_subscribers != 1
                     or motor_publishers != 1 or motor_subscribers != 1):
                 speed, steer = 0.0, 0.0
@@ -369,6 +375,7 @@ def run_ros():
                 'drive_subscriber_count': drive_subscribers,
                 'motor_publisher_count': motor_publishers,
                 'motor_subscriber_count': motor_subscribers,
+                'rf2o_publisher_count': rf2o_publishers,
             }
             self.status_pub.publish(String(data=json.dumps(status, separators=(',', ':'))))
             if reason != self.last_reason:
