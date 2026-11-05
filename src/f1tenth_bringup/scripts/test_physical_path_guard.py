@@ -36,6 +36,12 @@ def check():
             scan.ranges[scan.i(angle+j*.25)]=float('inf')
     gap=swept_path_guard(scan,.075,0.)
     assert not gap['ready'] and gap['reason']=='SWEEP_CONTIGUOUS_UNKNOWN_SECTOR',gap
+    assert gap['largest_unknown_sectors'],gap
+    biggest=gap['largest_unknown_sectors'][0]
+    assert biggest['start_angle_deg']<=-2.75,biggest
+    assert biggest['end_angle_deg']>=2.75,biggest
+    assert biggest['ray_count']>=20,biggest
+    assert biggest['unobserved_width_at_farthest_sample_m']>0,biggest
 
     scan=Scan(3.)
     scan.ranges[scan.i(0.)]=.36
