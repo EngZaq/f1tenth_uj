@@ -1,0 +1,19 @@
+# REAL VESC driver. These are software-side command range clamps ONLY.
+# Firmware current/regen limits are UNVERIFIED and high as of 2026-11-05.
+# Do not interpret ROS current_max as motor phase-current limiting in speed mode.
+# Not ready for autonomous ground driving, even if launch enables real VESC.
+vesc_driver:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
+    speed_min: -1400.0
+    speed_max: 1400.0
+    current_min: -2.0
+    current_max: 2.0
+    brake_min: 0.0
+    brake_max: 0.0
+    duty_cycle_min: 0.0
+    duty_cycle_max: 0.0
+    position_min: 0.0
+    position_max: 0.0
+    servo_min: 0.30
+    servo_max: 0.42
