@@ -15,6 +15,7 @@ install(
 install(
   FILES
     scripts/physical_drive_mux.py
+    scripts/physical_path_guard.py
     scripts/physical_first_lap.py
     scripts/physical_map_finalizer.py
     scripts/map_coverage.py
