@@ -14,13 +14,12 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, ExecuteProcess
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -78,36 +77,39 @@ def generate_launch_description():
 
     # The LiDAR proposal is NEVER published directly to the VESC. The mux
     # enforces a separate AUTO mode, sensor freshness, heartbeat and bounds.
-    explorer = Node(
-        package='f1tenth_bringup',
-        executable='exploration_controller_v2.py',
-        name='uj_exploration_controller',
+    # Start GitHub-created mode-100644 Python scripts with interpreter; this
+    # works even under colcon --symlink-install (no chmod dependency).
+    scripts_dir = os.path.join(share, 'python_nodes')
+    explorer = ExecuteProcess(
+        cmd=[
+            'python3', '-u',
+            os.path.join(scripts_dir, 'exploration_controller_v2.py'),
+            '--ros-args',
+            '-p', 'platform:=physical',
+            '-p', 'enable_drive:=false',
+            '-p', 'scan_topic:=/scan',
+            '-p', 'proposal_topic:=/exploration/drive',
+            '-p', 'wheelbase:=0.260',
+            '-p', 'speed:=0.15',
+            '-p', 'max_steer:=0.10',
+            '-p', 'stop_distance:=0.80',
+            '-p', 'scan_timeout:=0.22',
+            '-p', 'min_front_valid_fraction:=0.90',
+        ],
         output='screen',
-        parameters=[{
-            'platform': 'physical',
-            'enable_drive': False,
-            'scan_topic': '/scan',
-            'proposal_topic': '/exploration/drive',
-            'wheelbase': 0.260,
-            'speed': 0.15,
-            'max_steer': 0.10,
-            'stop_distance': 0.80,
-            'scan_timeout': 0.22,
-            'min_front_valid_fraction': 0.90,
-        }],
     )
 
-    mux = Node(
-        package='f1tenth_bringup',
-        executable='physical_drive_mux.py',
-        name='physical_drive_mux',
+    mux = ExecuteProcess(
+        cmd=[
+            'python3', '-u',
+            os.path.join(scripts_dir, 'physical_drive_mux.py'),
+            '--ros-args',
+            '-p', ['enable_real_actuation:=', enable_real],
+            '-p', ['enable_autonomous_actuation:=', allow_auto],
+            '-p', 'manual_min_front_valid:=0.75',
+            '-p', 'auto_min_front_valid:=0.90',
+        ],
         output='screen',
-        parameters=[{
-            'enable_real_actuation': ParameterValue(enable_real, value_type=bool),
-            'enable_autonomous_actuation': ParameterValue(allow_auto, value_type=bool),
-            'manual_min_front_valid': 0.75,
-            'auto_min_front_valid': 0.90,
-        }],
     )
 
     return LaunchDescription([
