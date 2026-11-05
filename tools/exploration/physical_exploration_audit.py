@@ -98,6 +98,10 @@ def run_ros(args):
             self.speeds = []
             self.steering = []
             self.nearest = []
+            self.front_valid_fraction_samples = []
+            self.front_scan_reasons = {}
+            self.forward_beam_tallies = {'valid': 0, 'pos_inf': 0, 'neg_inf': 0,
+                                         'nan': 0, 'below_min': 0, 'above_max': 0}
             self.map_known_start = None
             self.map_known_end = None
             self.map_resolution = None
@@ -123,6 +127,26 @@ def run_ros(args):
                 msg.ranges, float(msg.range_min), float(msg.range_max))
             if self.last_scan['nearest_m'] is not None:
                 self.nearest.append(self.last_scan['nearest_m'])
+            self.front_valid_fraction_samples.append(
+                self.last_scan['valid_fraction'])
+            reason = self.last_scan['reason']
+            self.front_scan_reasons[reason] = self.front_scan_reasons.get(reason, 0) + 1
+            half = math.radians(20.0)
+            for i, raw in enumerate(msg.ranges):
+                if abs(float(msg.angle_min) + i * float(msg.angle_increment)) > half:
+                    continue
+                value = float(raw)
+                if math.isnan(value):
+                    k = 'nan'
+                elif math.isinf(value):
+                    k = 'pos_inf' if value > 0 else 'neg_inf'
+                elif value < msg.range_min:
+                    k = 'below_min'
+                elif value > msg.range_max:
+                    k = 'above_max'
+                else:
+                    k = 'valid'
+                self.forward_beam_tallies[k] += 1
 
         def on_proposal(self, msg):
             self.proposals += 1
@@ -161,6 +185,14 @@ def run_ros(args):
                 self.odom_last[1]-self.odom_first[1])
                 if self.odom_first and self.odom_last else None)
             area = self.map_resolution**2 if self.map_resolution else None
+            fr = sorted(self.front_valid_fraction_samples)
+            front_fraction_stats = ({
+                'p10': fr[int((len(fr) - 1) * 0.10)],
+                'median': statistics.median(fr),
+                'p90': fr[int((len(fr) - 1) * 0.90)],
+                'min': fr[0], 'max': fr[-1],
+                'fraction_below_90pct': sum(x < .90 for x in fr) / len(fr),
+            } if fr else None)
             pass_transport = (self.scans > 10 and self.proposals > 10
                               and self.odom > 10 and self.maps >= 1)
             return {
@@ -179,6 +211,9 @@ def run_ros(args):
                 'median_observed_front_nearest_m': statistics.median(self.nearest)
                                                    if self.nearest else None,
                 'proposal_violations': self.issues,
+                'front_scan_validity': front_fraction_stats,
+                'front_scan_reason_counts': self.front_scan_reasons,
+                'forward_sector_beam_tallies': self.forward_beam_tallies,
                 'last_proposal_decision': self.last_reason,
                 'slam_known_area_start_m2': self.map_known_start * area
                                             if area is not None and self.map_known_start is not None else None,
