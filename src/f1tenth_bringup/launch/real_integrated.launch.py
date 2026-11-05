@@ -2,6 +2,7 @@
 
 Sensors + RF2O + SLAM come from proven observe_only bringup.
 The VESC driver and Ackermann converter use real actuator topics, unlike shadow.
+Physical first-lap monitor and mapping planner ported from simulator are included.
 ONLY physical_drive_mux is allowed to publish /drive.
 Default mux is STOP and enable_real_actuation:=false.
 This is NOT an emergency-stop system, safety certification, or ready-to-race.
@@ -112,6 +113,22 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Ports the simulator's first-lap map-closure gate to real RF2O /map.
+    # It publishes completion only, never direct actuator commands.
+    lap_watcher = ExecuteProcess(
+        cmd=['python3', '-u',
+             os.path.join(scripts_dir, 'physical_first_lap.py')],
+        output='screen',
+    )
+
+    # Upon first-lap completion save the actual SLAM map and apply the
+    # existing physical-geometry route preparation. Not a racing controller.
+    map_finalizer = ExecuteProcess(
+        cmd=['python3', '-u',
+             os.path.join(scripts_dir, 'physical_map_finalizer.py')],
+        output='screen',
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'enable_real_actuation', default_value='false',
@@ -122,8 +139,8 @@ def generate_launch_description():
             description='Experimental AUTO mode; dangerous without hardware validation.'
         ),
         DeclareLaunchArgument(
-            'enable_joystick', default_value='true',
-            description='Start existing joystick/joy_teleop with button-5 deadman.'
+            'enable_joystick', default_value='false',
+            description='Optional original RC joystick path; default false (no remote connected).'
         ),
         LogInfo(
             msg='REAL VESC PATH CONNECTED. Command mux starts STOP. '
@@ -131,5 +148,5 @@ def generate_launch_description():
                 'No software-only mechanism substitutes for physical cutoff.'
         ),
         observation, vesc_driver, ackermann_to_vesc,
-        joystick, manual_teleop, explorer, mux
+        joystick, manual_teleop, explorer, mux, lap_watcher, map_finalizer
     ])
