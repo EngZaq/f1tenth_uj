@@ -210,3 +210,7 @@ python3 tools/exploration/offline_footprint_replay.py \
 ### Fast physical commissioning (2026-11-05)
 
 See [physical first-motion readiness](docs/PHYSICAL_FIRST_MOTION_READINESS_2026-11-05.md) for one disarmed Jetson verification, Ackermann swept-footprint guard tests, ROS steering/ERPM calibration report, and the required VESC firmware/independent-stop checks. The physical `/control/status` reports `swept_path` evidence. Real actuation is DISABLED by default and the new guard has not been validated on the Jetson yet.
+
+## First real track map + route (no VESC Tool changes)
+
+[Physical mapping rehearsal](docs/PHYSICAL_TRACK_MAPPING_REHEARSAL_2026-11-05.md): with propulsion physically isolated, manually push the instrumented robot once around a real closed track. The `physical_map_rehearsal.launch.py` launches **only LiDAR, RF2O, SLAM with loop closing, real lap monitor, and map/route finalizer**. It launches **no VESC, motor converter, or drive publisher**. Watch `/mission/physical_lap_progress`. An observed closed loop produces a time-stamped real map, centerline and body-size route audit; it is not an autonomous lap. The firmware is untouched. Speeds above 5m/s remain a future design objective requiring mechanical/electrical calibration and verified independent stopping.
