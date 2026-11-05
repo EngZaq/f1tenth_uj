@@ -6,7 +6,7 @@ topics. Never publish to /observe_only_unused/*; do not use teleop concurrently.
 
 RF2O is the sole odom -> base_link TF authority. VESC odometry publishes
 /odom_vesc_observe only, with TF explicitly disabled.
-SLAM loop closing is disabled for this initial real-world integration audit.
+SLAM loop closing defaults OFF; can be explicitly enabled for isolated map-only rehearsal.
 """
 
 import os
@@ -22,6 +22,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 VESC_BY_ID = (
@@ -34,6 +35,7 @@ def generate_launch_description():
     bringup_share = get_package_share_directory('f1tenth_bringup')
     vesc_enabled = LaunchConfiguration('enable_vesc')
     vesc_port = LaunchConfiguration('vesc_port')
+    enable_loop_closing = LaunchConfiguration('enable_slam_loop_closing')
 
     sensors = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -67,7 +69,8 @@ def generate_launch_description():
         output='screen',
         parameters=[
             slam_config,
-            {'use_sim_time': False, 'do_loop_closing': False},
+            {'use_sim_time': False,
+             'do_loop_closing': ParameterValue(enable_loop_closing, value_type=bool)},
         ],
     )
 
@@ -116,6 +119,9 @@ def generate_launch_description():
             default_value='false',
             description='Opt-in read-only VESC telemetry: true or false',
         ),
+        DeclareLaunchArgument(
+            'enable_slam_loop_closing', default_value='false',
+            description='Enable SLAM loop closure for physically pushed map-only rehearsal; false by default.'),
         DeclareLaunchArgument(
             'vesc_port',
             default_value=VESC_BY_ID,
