@@ -94,3 +94,28 @@ Fast read-only angle localization while the launch remains running:
     python3 tools/diagnostics/physical_near_return_probe.py
 
 The new probe subscribes to /scan and /exploration/drive ONLY, never /drive, and reports 0.111m beam angle, physical-frame x/y, closest five blocking returns, and whether each is inside nominal body. It requires no ROS rebuild/restart, no motor command, and no repeated calibration test. Do not mask the return until angle/geometry and physical nearby obstacle are checked. If confirmed self-return, preferable remedy is physically eliminate the LiDAR line-of-sight obstruction with verified mounting and update TF, rather than blindly ignoring close distances.
+
+## 2026-11-05 update: side self-return cleared; angle-specific unknown sector now the blocker
+
+The operator removed or repositioned an obstruction (exact physical change not yet stated). New live status has nearest_obstacle_m=null, blocking_return_count=0, front nearest=1.206m, swept_known_fraction=0.8174, max_unknown_run_deg=2.0, and the live 8-scan probe shows missing streaks of 1.75..2.75 degrees. The software threshold is 1.5 degrees. All eight report SWEEP_CONTIGUOUS_UNKNOWN_SECTOR and none has a blocking finite return inside the swept path.
+
+IMPORTANT: This is not evidence that the unknown rays are unobstructed; a narrow/dark object may be unobserved. At 0.8m, 2.75 degrees spans about 0.038m, and farther path intersections have larger transverse blind widths. Do NOT simply increase the 1.5-degree threshold or declare driving safe.
+
+The new guard status now includes largest_unknown_sectors: each interval's start/end angles, number of consecutive rays, its farthest sampled intersection distance with the predicted vehicle footprint and an approximate unobserved transverse width there. This is informational only; the vehicle guard's cutoff remains unchanged. It distinguishes a missing sector near the body side from one that intersects the distant forward trajectory.
+
+One disarmed read after code update, without any AUTO/hold re-tests:
+
+    cd ~/f1tenth_uj
+    git pull --ff-only origin zaq/hardware-integration
+    python3 src/f1tenth_bringup/scripts/test_physical_path_guard.py
+    source /opt/ros/humble/setup.bash
+    colcon build --symlink-install --packages-select f1tenth_bringup
+    source install/local_setup.bash
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    ros2 launch f1tenth_bringup real_integrated.launch.py enable_real_actuation:=false enable_autonomous_actuation:=true enable_joystick:=false
+
+In second sourced terminal:
+    ros2 topic echo /control/status --once --field data
+
+Check largest_unknown_sectors. If unknown gaps are lateral and only intersect near the body, assess angular mask/hardware LiDAR FOV and actual obstruction geometry. If gaps are central, look at reflectivity/target visibility and consider sensor fusion, a missing-data conservative policy or an explicit hazard-class assumption; do not mask arbitrarily. Still no motor actuation until hardware VESC current limits/timeout, independent cutoff, steering direction and braking behavior verified.
