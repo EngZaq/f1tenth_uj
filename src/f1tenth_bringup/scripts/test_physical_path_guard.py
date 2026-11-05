@@ -47,6 +47,22 @@ def check():
     obs=swept_path_guard(scan,.075,0.)
     assert not obs['ready'],obs
 
+    # Real Jetson evidence: a 0.111m return in a lateral direction may
+    # be the bumper, tire or an external obstacle. Surface this geometry
+    # without automatically treating it as safe or dropping the reading.
+    scan=Scan(3.)
+    scan.ranges[scan.i(60.)]=.111
+    self_candidate=swept_path_guard(scan,.075,-.1)
+    assert not self_candidate['ready'],self_candidate
+    assert self_candidate['nearest_obstacle_detail']['angle_deg']==60.0,self_candidate
+    assert self_candidate['nearest_obstacle_detail']['inside_uninflated_body_rectangle'],self_candidate
+
+    scan=Scan(3.)
+    scan.ranges[scan.i(0.)]=.111
+    external=swept_path_guard(scan,.075,0.)
+    assert not external['ready'],external
+    assert not external['nearest_obstacle_detail']['inside_uninflated_body_rectangle'],external
+
     scan=Scan(3.)
     scan.ranges=[3.]*900  # incomplete frame: conservative
     assert not swept_path_guard(scan,.075,0.)['ready']
