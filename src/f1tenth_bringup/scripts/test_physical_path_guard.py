@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ROS-free swept vehicle guard tests. Does NOT drive a robot."""
 import math
+import time
 from physical_path_guard import swept_path_guard
 
 
@@ -54,6 +55,14 @@ def check():
     print('      contiguous unknown gap, forward + side obstacles,')
     print('      incomplete scan. Software-only; NO actuation.')
     print('Sparse no-return sample:',sparse)
+    scan=Scan(3.)
+    started=time.perf_counter()
+    for _ in range(20):
+        swept_path_guard(scan,.075,-.1)
+    mean_ms=1000*(time.perf_counter()-started)/20
+    print('Mean one-guard compute time: %.1f ms (20Hz mux target is 50ms)' % mean_ms)
+    if mean_ms>=40:
+        print('WARNING: CPU time approaches 20Hz deadline; do NOT enable motor actuation')
 
 
 if __name__=='__main__':
