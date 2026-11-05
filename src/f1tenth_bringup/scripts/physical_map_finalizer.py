@@ -91,6 +91,7 @@ def main():
         def on_done(self, msg):
             if msg.data:
                 self.complete = True
+    watcher_started_at = time.time()
     rclpy.init()
     node = CompletionWatcher()
     try:
@@ -105,10 +106,13 @@ def main():
     # stage does not issue drive commands or attempt to arm the car.
     lap_file = evidence/'physical_first_lap.json'
     deadline = time.monotonic()+3.0
-    while not lap_file.is_file() and time.monotonic() < deadline:
+    # Never consume stale completion evidence from a previous run.
+    while time.monotonic() < deadline:
+        if lap_file.is_file() and lap_file.stat().st_mtime >= watcher_started_at:
+            break
         time.sleep(.1)
-    if not lap_file.is_file():
-        raise RuntimeError('first-lap evidence missing; cannot save/plan')
+    if not lap_file.is_file() or lap_file.stat().st_mtime < watcher_started_at:
+        raise RuntimeError('fresh first-lap evidence missing; refusing to use a previous run')
     try:
         finalize(args.workspace,out,lap_file)
     except Exception as exc:
