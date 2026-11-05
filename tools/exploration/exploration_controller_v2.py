@@ -7,7 +7,7 @@ import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from front_scan_guard import front_scan_guard
+from front_scan_guard import proposal_front_guard
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 from ackermann_msgs.msg import AckermannDriveStamped
@@ -27,7 +27,9 @@ class ExplorationController(Node):
         self.declare_parameter('scan_timeout', 0.25)
         self.declare_parameter('front_fov_deg', 160.0)
         self.declare_parameter('safety_bubble_m', 0.34)
-        self.declare_parameter('min_front_valid_fraction', 0.90)  # physical shadow only
+        # Narrow finite evidence for NON-ACTUATING hardware proposal only.
+        # The real actuator mux retains its own wider conservative stop gate.
+        self.declare_parameter('min_front_valid_fraction', 0.90)
         self.scan = None
         self.scan_received = None
         self.collision = False
@@ -63,16 +65,17 @@ class ExplorationController(Node):
         if not np.any(mask):
             return 0.0, 0.0, 'no forward beams'
         a, r = a[mask], r[mask]
-        # On the physical platform, reject missing/unknown forward rays.
-        # Previous code checked only >=3 returns and used the 15th percentile,
-        # potentially allowing motion with most of the front sector invalid.
+        # The physical proposal stage checks reliable central observations
+        # and rejects ANY measured near obstacle across +/-20 degrees.
+        # This is NOT a full vehicle swept-path authorization.
         stop = float(self.get_parameter('stop_distance').value)
         if self.platform == 'physical':
-            gate = front_scan_guard(
+            gate = proposal_front_guard(
                 m.angle_min, m.angle_increment, m.ranges,
                 m.range_min, m.range_max,
                 stop_distance=stop,
-                valid_fraction_min=float(
+                core_half_angle_deg=5.0, outer_half_angle_deg=20.0,
+                core_valid_fraction_min=float(
                     self.get_parameter('min_front_valid_fraction').value),
             )
             if not gate['ready']:
