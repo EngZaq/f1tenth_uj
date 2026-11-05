@@ -26,9 +26,8 @@ MIN_SWEPT_KNOWN_FRACTION = .72
 
 
 def _in_body_envelope(x, y, pose, margin):
-    cx,cy,yaw = pose
+    cx,cy,co,si = pose
     dx,dy=x-cx,y-cy
-    co,si=math.cos(yaw),math.sin(yaw)
     local_x=co*dx+si*dy
     local_y=-si*dx+co*dy
     return (REAR_BODY_X_M-margin <= local_x <= FRONT_BODY_X_M+margin
@@ -42,11 +41,11 @@ def _trajectory(steer, travel, spacing=.04):
     for i in range(count):
         s=travel*i/(count-1)
         if abs(k)<1e-8:
-            result.append((s,0.,0.))
+            result.append((s,0.,1.,0.))
         else:
-            result.append((math.sin(k*s)/k,
-                           (1.-math.cos(k*s))/k,
-                           k*s))
+            theta=k*s
+            co,si=math.cos(theta),math.sin(theta)
+            result.append((si/k,(1.-co)/k,co,si))
     return result
 
 
@@ -98,9 +97,7 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
             run=0
             continue
         co,si=math.cos(a),math.sin(a)
-        if si > 1 or si < -1:
-            run=0
-            continue
+        # Do not consider the sensor's own origin a swept-path obstacle.
         # A missing beam is relevant if it could intersect the future swept
         # footprint in the first ~1.2m, not just if it lies in a fixed 20deg.
         ray_relevant=any(
