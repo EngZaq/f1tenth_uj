@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import time
+from physical_path_guard import swept_path_guard
 
 MAX_SPEED = 0.15
 MAX_STEER = 0.10
@@ -317,6 +318,26 @@ def run_ros():
             scan_ok, scan_reason, fraction, nearest = front_evidence(
                 self.scan if scan_fresh else None,
                 min_fraction=fraction_req, stop_m=.80)
+            # Independently evaluate the requested AUTO trajectory against
+            # the full physical car footprint, even while the motor is
+            # disarmed, so commissioning gets actionable path evidence.
+            # Never infer free distance from +inf.
+            if self.auto_cmd is not None and scan_fresh:
+                path = swept_path_guard(
+                    self.scan, max(0.0, self.auto_cmd[0]), self.auto_cmd[1])
+            else:
+                path = {
+                    'ready': False,
+                    'reason': 'NO_FRESH_SCAN_OR_AUTO_PROPOSAL',
+                    'nearest_obstacle_m': None,
+                    'swept_known_fraction': 0.0,
+                }
+            # MANUAL retains the original conservative front LiDAR gate.
+            # AUTO uses the swept-vehicle geometry and bounded unknown-run
+            # policy, NOT the blanket 90% of the +/-20deg sector rule.
+            request_scan_ok = (
+                scan_ok if self.mode.startswith('MANUAL')
+                else bool(path['ready']))
             odom_fresh = self.fresh(self.odom_at, ODOM_TTL, now)
             map_fresh = self.fresh(self.map_at, MAP_TTL, now)
 
@@ -325,7 +346,7 @@ def run_ros():
                 active_hold, (joy_fresh if self.mode.startswith('MANUAL')
                               else auto_hold_fresh), cmd,
                 self.fresh(received, COMMAND_TTL, now),
-                scan_ok, odom_fresh, map_fresh)
+                request_scan_ok, odom_fresh, map_fresh)
 
             if self.first_lap_completed:
                 self.mode = 'STOP'
@@ -388,6 +409,7 @@ def run_ros():
                 'scan_reason': scan_reason,
                 'front_valid_fraction': round(fraction, 4),
                 'nearest_front_m': round(nearest, 3) if nearest is not None else None,
+                'swept_path': path,
                 'odom_fresh': odom_fresh,
                 'map_fresh': map_fresh,
                 'speed_mps': round(speed, 4),
