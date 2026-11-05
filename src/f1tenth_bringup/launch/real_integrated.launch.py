@@ -15,8 +15,11 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, ExecuteProcess
+    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, ExecuteProcess,
+    RegisterEventHandler, EmitEvent
 )
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -45,6 +48,22 @@ def generate_launch_description():
         name='vesc_driver',
         output='screen',
         parameters=[os.path.join(cfg, 'vesc_real_integration.yaml')],
+    )
+
+    # Fail closed if the actual serial VESC driver crashes/disconnects.
+    # An absent motor-speed subscriber was observed on the Jetson with
+    # one Ackermann publisher and no /vesc_driver node. Continuing a
+    # ROS mission graph would be misleading and unsafe.
+    vesc_exit_shutdown = RegisterEventHandler(
+        OnProcessExit(
+            target_action=vesc_driver,
+            on_exit=[
+                LogInfo(msg='FATAL: Real VESC driver exited. '
+                            'Stopping integrated mission; inspect the launch log '
+                            'and serial port before restarting.'),
+                EmitEvent(event=Shutdown(reason='Real VESC driver exited')),
+            ],
+        ),
     )
 
     # The same converter previously used by RC -> Jetson -> VESC.
@@ -147,6 +166,7 @@ def generate_launch_description():
                 'With actuation disabled it publishes zero. '
                 'No software-only mechanism substitutes for physical cutoff.'
         ),
+        vesc_exit_shutdown,
         observation, vesc_driver, ackermann_to_vesc,
         joystick, manual_teleop, explorer, mux, lap_watcher, map_finalizer
     ])
