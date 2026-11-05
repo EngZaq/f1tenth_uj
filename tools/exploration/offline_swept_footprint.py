@@ -130,7 +130,12 @@ def self_test():
     assert abs(bicycle_pose(.3, .15)[1]) > .005
     m = Dummy()
     good = analyze_candidate(m, pts)
-    assert good['no_unmeasured_sampled_points'], good
+    # Even a perfect synthetic 360-degree 3 m scan cannot resolve a sample
+    # located within the 2 cm LiDAR-origin exclusion disk. Such points must
+    # remain UNKNOWN rather than being incorrectly counted as clear.
+    assert good['fraction_observed'] > 0.99, good
+    assert good['counts']['unknown_ray'] >= 1, good
+    assert not good['no_unmeasured_sampled_points'], good
     assert good['no_observed_close_samples'], good
     assert good['counts']['already_under_body'] > 0, good
     m.ranges = [float('inf')] * 1440
