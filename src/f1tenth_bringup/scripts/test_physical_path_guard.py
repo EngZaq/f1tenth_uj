@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""ROS-free swept vehicle guard tests. Does NOT drive a robot."""
+import math
+from physical_path_guard import swept_path_guard
+
+
+class Scan:
+    angle_min = -math.pi
+    angle_increment = 2*math.pi/1440
+    range_min = 0.
+    range_max = 100.
+    def __init__(self, distance=3.):
+        self.ranges=[distance]*1440
+    def i(self, angle):
+        return round((math.radians(angle)-self.angle_min)/self.angle_increment)
+
+
+def check():
+    scan=Scan(3.)
+    baseline=swept_path_guard(scan,.075,-.1)
+    assert baseline['ready'],baseline
+
+    scan=Scan(float('inf'))
+    assert not swept_path_guard(scan,.075,0.)['ready']
+
+    scan=Scan(3.)
+    for i in range(0,1440,4):
+        scan.ranges[i]=float('inf')
+    sparse=swept_path_guard(scan,.075,0.)
+    assert sparse['ready'],sparse
+
+    scan=Scan(3.)
+    for angle in range(-3,4):
+        for j in range(4):
+            scan.ranges[scan.i(angle+j*.25)]=float('inf')
+    gap=swept_path_guard(scan,.075,0.)
+    assert not gap['ready'] and gap['reason']=='SWEEP_CONTIGUOUS_UNKNOWN_SECTOR',gap
+
+    scan=Scan(3.)
+    scan.ranges[scan.i(0.)]=.36
+    obs=swept_path_guard(scan,.075,0.)
+    assert not obs['ready'] and obs['reason']=='MEASURED_OBSTACLE_IN_SWEPT_PATH',obs
+
+    scan=Scan(3.)
+    scan.ranges[scan.i(-15.)]=.40
+    obs=swept_path_guard(scan,.075,0.)
+    assert not obs['ready'],obs
+
+    scan=Scan(3.)
+    scan.ranges=[3.]*900  # incomplete frame: conservative
+    assert not swept_path_guard(scan,.075,0.)['ready']
+
+    print('PASS: clear, entirely unknown, intermittent no-return,')
+    print('      contiguous unknown gap, forward + side obstacles,')
+    print('      incomplete scan. Software-only; NO actuation.')
+    print('Sparse no-return sample:',sparse)
+
+
+if __name__=='__main__':
+    check()
