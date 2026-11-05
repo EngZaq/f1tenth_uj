@@ -8,14 +8,16 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
-# Real physical integrated command selector and existing hardware-shadow explorer.
-# Install the explorer and its ROS-free guard adjacent to preserve Python imports.
+# GitHub-created scripts are mode 100644, and --symlink-install may preserve
+# source file permissions: launch_ros Node requires executable bit and fails.
+# Install as data, then start via explicit Python interpreter in launch.
+# Keep front_scan_guard in the same folder as the explorer for Python imports.
 install(
-  PROGRAMS
+  FILES
     scripts/physical_drive_mux.py
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/exploration_controller_v2.py
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/front_scan_guard.py
-  DESTINATION lib/${PROJECT_NAME}
+  DESTINATION share/${PROJECT_NAME}/python_nodes
 )
 
 ament_package()
