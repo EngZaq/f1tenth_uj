@@ -96,6 +96,7 @@ def run_ros(args):
             self.last_scan_at = None
             self.issues = {}
             self.speeds = []
+            self.moving_proposal_count = 0
             self.steering = []
             self.nearest = []
             self.front_valid_fraction_samples = []
@@ -153,6 +154,8 @@ def run_ros(args):
             speed = float(msg.drive.speed)
             steer = float(msg.drive.steering_angle)
             self.speeds.append(speed)
+            if math.isfinite(speed) and abs(speed) > 1e-5:
+                self.moving_proposal_count += 1
             self.steering.append(steer)
             scan = self.last_scan
             if (self.last_scan_at is None or
@@ -211,6 +214,8 @@ def run_ros(args):
                 'median_observed_front_nearest_m': statistics.median(self.nearest)
                                                    if self.nearest else None,
                 'proposal_violations': self.issues,
+                'moving_proposals': self.moving_proposal_count,
+                'any_unblocked_exploration_proposals': self.moving_proposal_count > 0,
                 'front_scan_validity': front_fraction_stats,
                 'front_scan_reason_counts': self.front_scan_reasons,
                 'forward_sector_beam_tallies': self.forward_beam_tallies,
@@ -222,6 +227,12 @@ def run_ros(args):
                 'rf2o_net_xy_m': moved,
                 'transport_pass': pass_transport,
                 'strict_shadow_acceptance_pass': pass_transport and not self.issues,
+                'decision_availability_note': (
+                    'ZERO proposed motion: fail-closed behavior may be correct, '
+                    'but no autonomous progress is demonstrated.'
+                    if self.moving_proposal_count == 0 else
+                    'Some nonzero motion proposals observed; no real driving tested.'
+                ),
                 'caveat': 'No physical motion, emergency stop, or real obstacle avoidance certified.',
             }
 
