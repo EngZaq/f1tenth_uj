@@ -93,3 +93,20 @@ Retain raw /scan and preserve unknown returns as UNKNOWN. Only after confirming 
 Replace global 90% finite percentage with a validated swept-path reliability policy based on angular dropout streaks, temporal measured evidence and calibrated vehicle footprint, only after controlled obstacle checks. Use multiple sensing sources for low/black/transparent obstacles. Keep stale-scan and near-obstacle stop conditions. Set speed-dependent clearance using measured braking/coasting plus hardware independent E-stop. Firmware motor current limits remain separately unverified.
 
 Current progress: public manufacturer code and manual analyzed; diagnostic committed. The reason for this exact car's +inf sector remains UNDETERMINED until actual device GET status plus known target test. Full autonomous actuation not authorized by this diagnosis.
+
+
+## Optional white-wall quantitative calibration
+
+After the same read-only audit command has succeeded, use a broad matte white wall 1.0m perpendicular to physical vehicle forward, measured from the optical origin, with the laser plane intersecting the wall:
+
+    python3 tools/diagnostics/lakibeam_reliability_audit.py --seconds 10 \
+      --front-wall-m 1.0 --out ~/f1tenth_hw_evidence/lidar_white_wall_1m.json
+
+The script reports +inf frequency per half-degree, per-angle mean finite distance, mean strongest-echo RSSI, and the center +/-10-degree wall distance residual relative to 1.0/cos(angle) metres. This tests actual scan orientation as well as intensity and ranging precision. No motion or device settings change. The +/-10° residual assumes the wall is genuinely perpendicular to laser frame 0°, so a large residual is not necessarily a sensor hardware defect.
+
+A second white-wall 2m run is useful:
+
+    python3 tools/diagnostics/lakibeam_reliability_audit.py --seconds 10 \
+      --front-wall-m 2.0 --out ~/f1tenth_hw_evidence/lidar_white_wall_2m.json
+
+Do NOT run this known-wall calibration with the vehicle driving toward the wall. If center returns disappear or the wall appears at a wrong bearing, inspect physical sensor yaw / ROS angle indexing and firmware scan window before changing explorer code.
