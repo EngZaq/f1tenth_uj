@@ -35,13 +35,26 @@ def check():
         for j in range(4):
             scan.ranges[scan.i(angle+j*.25)]=float('inf')
     gap=swept_path_guard(scan,.075,0.)
-    assert not gap['ready'] and gap['reason']=='SWEEP_CONTIGUOUS_UNKNOWN_SECTOR',gap
+    assert not gap['ready'] and gap['reason']=='SWEEP_UNKNOWN_CORRIDOR_TOO_WIDE',gap
     assert gap['largest_unknown_sectors'],gap
     biggest=gap['largest_unknown_sectors'][0]
     assert biggest['start_angle_deg']<=-2.75,biggest
     assert biggest['end_angle_deg']>=2.75,biggest
     assert biggest['ray_count']>=20,biggest
-    assert biggest['unobserved_width_at_farthest_sample_m']>0,biggest
+    assert biggest['unobserved_width_at_farthest_sample_m']>=.020,biggest
+
+    # Replay the largest real gaps from the 2026-11-05 Jetson log:
+    # left side +70.75..73deg near 0.18m, +62..63.75deg near 0.18m,
+    # plus +19..20.5deg intersecting near 0.5m. Side-only gaps must
+    # not incur a fictitious large global angular veto; width matters.
+    scan=Scan(3.)
+    for start,count in ((70.75,10),(62.0,8),(19.0,7)):
+        for j in range(count):
+            scan.ranges[scan.i(start+j*.25)] = float('inf')
+    lateral=swept_path_guard(scan,.146,-.0053)
+    assert lateral['ready'],lateral
+    assert lateral['max_unknown_run_deg'] >= 2.5,lateral
+    assert lateral['max_unknown_path_width_m'] < .020,lateral
 
     scan=Scan(3.)
     scan.ranges[scan.i(0.)]=.36
@@ -76,7 +89,14 @@ def check():
     print('PASS: clear, entirely unknown, intermittent no-return,')
     print('      contiguous unknown gap, forward + side obstacles,')
     print('      incomplete scan. Software-only; NO actuation.')
-    print('Sparse no-return sample:',sparse)
+    print('Sparse no-return sample:', {
+        'ready':sparse['ready'],
+        'swept_known_fraction':sparse['swept_known_fraction'],
+        'max_unknown_path_width_m':sparse['max_unknown_path_width_m']})
+    print('Jetson-like lateral gap replay:', {
+        'ready':lateral['ready'],
+        'max_unknown_run_deg':lateral['max_unknown_run_deg'],
+        'max_unknown_path_width_m':lateral['max_unknown_path_width_m']})
     scan=Scan(3.)
     started=time.perf_counter()
     for _ in range(20):
@@ -84,7 +104,7 @@ def check():
     mean_ms=1000*(time.perf_counter()-started)/20
     print('Mean one-guard compute time: %.1f ms (20Hz mux target is 50ms)' % mean_ms)
     if mean_ms>=40:
-        print('WARNING: CPU time approaches 20Hz deadline; do NOT enable motor actuation')
+        raise SystemExit('FAIL: guard CPU time approaches 20Hz deadline; do NOT enable motor actuation')
 
 
 if __name__=='__main__':
