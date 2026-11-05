@@ -4,9 +4,10 @@
 This program CAN publish to the REAL /drive actuator chain. It is not an E-stop,
 not a replacement for independent hardware motor cutoff or VESC firmware limits.
 
-Start DISARMED. Use /control/request_mode to select MANUAL or AUTO when joystick
-deadman button 5 is released; hold button 5 to authorize driving. Releasing the
-deadman latches STOP and requires an explicit new mode selection.
+Start DISARMED. MANUAL uses joystick button 5. AUTO uses a separately
+supervised /control/auto_hold Bool heartbeat (no RC remote required); loss of
+hold latches STOP. A ROS hold is NOT a physical motor cutoff or emergency stop.
+AUTO remains separately disabled unless explicitly configured at launch.
 
 Only this node should publish to /drive. Other publishers to /drive and the VESC
 motor topic are detected and inhibit *this* node, but cannot be physically
@@ -24,6 +25,7 @@ JOY_TTL = 0.20
 SCAN_TTL = 0.22
 ODOM_TTL = 0.30
 MAP_TTL = 8.0
+AUTO_HOLD_TTL = 0.20  # supervised input, NOT a safety-rated physical switch
 
 
 def evaluate_request(mode, allow_real, allow_auto, deadman, deadman_fresh,
@@ -127,11 +129,11 @@ def self_test():
 def run_ros():
     import rclpy
     from rclpy.node import Node
-    from rclpy.qos import qos_profile_sensor_data
+    from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from sensor_msgs.msg import Joy, LaserScan
     from nav_msgs.msg import Odometry, OccupancyGrid
     from ackermann_msgs.msg import AckermannDriveStamped
-    from std_msgs.msg import String
+    from std_msgs.msg import String, Bool
 
     class PhysicalMux(Node):
         def __init__(self):
@@ -155,6 +157,9 @@ def run_ros():
             self.auto_at = None
             self.joy_at = None
             self.deadman = False
+            self.auto_hold = False
+            self.auto_hold_at = None
+            self.first_lap_completed = False
             self.scan = None
             self.scan_at = None
             self.odom_at = None
@@ -175,6 +180,13 @@ def run_ros():
                     Joy, '/joy', self.joy_cb, qos_profile_sensor_data),
                 self.create_subscription(
                     String, '/control/request_mode', self.mode_cb, 10),
+                self.create_subscription(
+                    Bool, '/control/auto_hold', self.auto_hold_cb, 10),
+                self.create_subscription(
+                    Bool, '/mission/first_lap_complete',
+                    self.lap_cb, QoSProfile(depth=1,
+                        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                        reliability=ReliabilityPolicy.RELIABLE)),
                 self.create_subscription(
                     LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data),
                 self.create_subscription(
@@ -204,6 +216,17 @@ def run_ros():
             self.joy_at = time.monotonic()
             self.deadman = len(msg.buttons) > 5 and msg.buttons[5] == 1
 
+        def auto_hold_cb(self, msg):
+            self.auto_hold = bool(msg.data)
+            self.auto_hold_at = time.monotonic()
+
+        def lap_cb(self, msg):
+            if msg.data:
+                self.first_lap_completed = True
+                self.mode = 'STOP'
+                self.get_logger().warn(
+                    'Physical first lap completed: STOP latched for map saving.')
+
         def scan_cb(self, msg):
             self.scan = msg
             self.scan_at = time.monotonic()
@@ -224,9 +247,17 @@ def run_ros():
             if m not in ('MANUAL', 'AUTO'):
                 self.get_logger().warn('Invalid mode; use STOP, MANUAL or AUTO')
                 return
-            # Require joystick button released before operator selects mode.
-            if self.deadman:
-                self.get_logger().warn('Release joystick deadman before selecting a mode')
+            if self.first_lap_completed:
+                self.get_logger().warn('Mission complete: restart after map handoff')
+                return
+            # Manual uses joystick button 5. AUTO uses independent supervised
+            # hold topic so a remote is NOT required for mission preparation.
+            # This ROS topic is NOT a physical emergency stop.
+            if m == 'MANUAL' and self.deadman:
+                self.get_logger().warn('Release joystick deadman before MANUAL selection')
+                return
+            if m == 'AUTO' and self.auto_hold:
+                self.get_logger().warn('Release /control/auto_hold before AUTO selection')
                 return
             if m == 'AUTO' and not self.allow_auto:
                 self.get_logger().warn('AUTO is locked at launch; no automatic actuation')
@@ -245,11 +276,14 @@ def run_ros():
             now = time.monotonic()
             joy_fresh = self.fresh(self.joy_at, JOY_TTL, now)
             joy_held = joy_fresh and self.deadman
-            # A rising press engages the selected ready state, not automatic arming.
-            if self.mode in ('MANUAL_READY', 'AUTO_READY') and joy_held:
+            auto_hold_fresh = self.fresh(self.auto_hold_at, AUTO_HOLD_TTL, now)
+            auto_hold_held = auto_hold_fresh and self.auto_hold
+            active_hold = (joy_held if self.mode.startswith('MANUAL')
+                           else auto_hold_held)
+            # AUTO uses a live supervised ROS hold signal, NOT a joystick.
+            if self.mode in ('MANUAL_READY', 'AUTO_READY') and active_hold:
                 self.mode = self.mode.replace('READY', 'ACTIVE')
-            # Deadman loss requires explicit mode re-selection (latching STOP).
-            if self.mode in ('MANUAL_ACTIVE', 'AUTO_ACTIVE') and not joy_held:
+            if self.mode in ('MANUAL_ACTIVE', 'AUTO_ACTIVE') and not active_hold:
                 self.mode = 'STOP'
 
             if self.mode.startswith('MANUAL'):
@@ -268,9 +302,15 @@ def run_ros():
 
             speed, steer, reason = evaluate_request(
                 self.mode, self.allow_real, self.allow_auto,
-                joy_held, joy_fresh, cmd,
+                active_hold, (joy_fresh if self.mode.startswith('MANUAL')
+                              else auto_hold_fresh), cmd,
                 self.fresh(received, COMMAND_TTL, now),
                 scan_ok, odom_fresh, map_fresh)
+
+            if self.first_lap_completed:
+                self.mode = 'STOP'
+                speed, steer = 0.0, 0.0
+                reason = 'FIRST_LAP_COMPLETE'
 
             # If an active mode loses a required input, latch STOP rather
             # than resuming motion uncommanded when the data reappears.
@@ -301,6 +341,8 @@ def run_ros():
                 'real_actuation_enabled': self.allow_real,
                 'autonomous_actuation_enabled': self.allow_auto,
                 'deadman_button_5_held': joy_held,
+                'auto_hold_held_and_fresh': auto_hold_held,
+                'first_lap_completed': self.first_lap_completed,
                 'scan_fresh': scan_fresh,
                 'scan_reason': scan_reason,
                 'front_valid_fraction': round(fraction, 4),
