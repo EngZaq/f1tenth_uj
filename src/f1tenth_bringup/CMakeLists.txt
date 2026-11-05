@@ -15,6 +15,9 @@ install(
 install(
   FILES
     scripts/physical_drive_mux.py
+    scripts/physical_first_lap.py
+    scripts/physical_map_finalizer.py
+    scripts/map_coverage.py
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/exploration_controller_v2.py
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/front_scan_guard.py
   DESTINATION share/${PROJECT_NAME}/python_nodes
