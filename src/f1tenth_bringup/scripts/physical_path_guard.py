@@ -92,23 +92,57 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
     nearest_hit=None
     obstacle_count=0
     obstacle_examples=[]
+    unknown_sectors=[]
+    unknown_start=None
+    unknown_last=None
+    unknown_far_r=0.0
+
+    def finish_unknown_sector():
+        if unknown_start is None:
+            return
+        n=unknown_last-unknown_start+1
+        span_rad=n*da
+        start_deg=math.degrees(amin+unknown_start*da)
+        end_deg=math.degrees(amin+unknown_last*da)
+        unknown_sectors.append({
+            'start_angle_deg':round(start_deg,2),
+            'end_angle_deg':round(end_deg,2),
+            'angle_span_deg':round(math.degrees(span_rad),3),
+            'ray_count':n,
+            # An approximation from path-intersecting sample ranges;
+            # does not imply adjacent returns confirm that this gap is free.
+            'farthest_path_intersection_sample_m':round(unknown_far_r,3),
+            'unobserved_width_at_farthest_sample_m':round(
+                2*unknown_far_r*math.sin(span_rad/2),4),
+        })
 
     for i, raw in enumerate(ranges):
         a=amin+i*da
         # Sensor rear-side scan is excluded from forward navigation.
         if abs(a)>math.pi/2:
+            if unknown_start is not None:
+                finish_unknown_sector()
+                unknown_start,unknown_last,unknown_far_r=None,None,0.0
             run=0
             continue
         co,si=math.cos(a),math.sin(a)
         # Do not consider the sensor's own origin a swept-path obstacle.
         # A missing beam is relevant if it could intersect the future swept
         # footprint in the first ~1.2m, not just if it lies in a fixed 20deg.
-        ray_relevant=any(
-            any(_in_body_envelope(LIDAR_X_M+r*co,LIDAR_Y_M+r*si,
-                                  p,margin_m) for p in poses)
-            for r in UNKNOWN_SAMPLE_RADIUS_M
-        )
-        if not ray_relevant:
+        # Track the farthest range sample where this beam could intersect
+        # the vehicle's future swept body. A far-side no-return may have a
+        # much narrower geometric uncertainty than one straight ahead.
+        farthest_relevant_r=0.0
+        for sample_r in reversed(UNKNOWN_SAMPLE_RADIUS_M):
+            if any(_in_body_envelope(
+                    LIDAR_X_M+sample_r*co, LIDAR_Y_M+sample_r*si,
+                    p, margin_m) for p in poses):
+                farthest_relevant_r=sample_r
+                break
+        if farthest_relevant_r==0.0:
+            if unknown_start is not None:
+                finish_unknown_sector()
+                unknown_start,unknown_last,unknown_far_r=None,None,0.0
             run=0
             continue
         used+=1
@@ -118,7 +152,14 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
             unknown+=1
             run+=1
             max_run=max(max_run,run)
+            if unknown_start is None:
+                unknown_start=i
+            unknown_last=i
+            unknown_far_r=max(unknown_far_r,farthest_relevant_r)
             continue
+        if unknown_start is not None:
+            finish_unknown_sector()
+            unknown_start,unknown_last,unknown_far_r=None,None,0.0
         run=0
         near=min(near,d)
         x,y=LIDAR_X_M+d*co,LIDAR_Y_M+d*si
@@ -145,6 +186,8 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
                 nearest_obstacle=d
                 nearest_hit=hit
 
+    if unknown_start is not None:
+        finish_unknown_sector()
     if used<30:
         return dict(failure,reason='NO_RELEVANT_FORWARD_RAYS')
     known_fraction=(used-unknown)/used
@@ -157,6 +200,9 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
         'nearest_measured_m':round(near,3) if near<1e6 else None,
         'swept_known_fraction':round(known_fraction,4),
         'max_unknown_run_deg':round(missing_deg,3),
+        'largest_unknown_sectors': sorted(
+            unknown_sectors, key=lambda v:v['angle_span_deg'],
+            reverse=True)[:5],
         'relevant_ray_count':used,
         'unknown_relevant_ray_count':unknown,
         'steer_rad':round(float(steer_rad),4),
