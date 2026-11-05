@@ -168,3 +168,34 @@ AUTO should advance READY → ACTIVE, but `real_actuation_enabled=false` MUST ke
 
 **Also:** simulator `main` accepts mapping + nominal planning only. The physical route's orientation/AMCL/Pure Pursuit racing handoff has NOT been ported or validated. Focus next on (1) first integrated graph PASS; (2) independent power/stop commissioning; (3) real map progress and first lap; (4) save/plan; (5) localization and tracking.
 
+
+## Hardware integration graph fault observed: 2026-11-05
+
+Actual Jetson output confirmed `/scan` about **29.93–29.95 Hz**, `/odom_rf2o` about **20 Hz**, `nav2_map_server` installed. The launch package and main sensors are now running.
+
+But the ROS graph had **three separate `ackermann_to_vesc_node` instances**, three subscriptions to `/drive`, and three publishers to `/commands/motor/speed`. It also had duplicate `laser_static_tf`, `rf2o_laser_odometry`, `joy` and `joy_teleop` names, even though the new launch configured `enable_joystick:=false`. This strongly indicates multiple launch/process instances remained running. A single VESC driver may accept commands from three converters and cannot distinguish ownership.
+
+The `physical_drive_mux` correctly remained STOP with `UNEXPECTED_ACTUATOR_PUBLISHER_COUNTS`. Commit `993c13c` expands its check to all FOUR publisher/subscriber counts and changes the latching reason to `ACTUATOR_GRAPH_OWNERSHIP_FAULT`; it reports all four counts. This is a software precaution, **not** protection against an independently running rogue node or process after a computer crash.
+
+### Recovery without touching firmware or commanding motion
+
+1. **Physically isolate drive power / keep the car raised.** Stop **every** former launch session using Ctrl+C, including observe-only, integrated, stand-alone RF2O/SLAM and any joystick teleop; stop VESC Tool.
+2. In a separate terminal, inspect living processes:
+   ```bash
+   ps -eo pid,ppid,args | grep -E '(ackermann_to_vesc|rf2o_laser_odometry|static_transform_publisher|joy_teleop|joy_node|real_integrated.launch|observe_only.launch|teleop.launch)' | grep -v grep
+   ```
+   If any process remains after Ctrl+C, inspect its PID and parent launch, then terminate that **specific** stale process using `kill -INT PID`. Do not blindly kill unrelated ROS processes.
+3. Reinitialize graph discovery if needed with `ros2 daemon stop; ros2 daemon start`.
+4. Pull `zaq/hardware-integration`, build `f1tenth_bringup` and start **one** real integrated launch with `enable_real_actuation:=false enable_autonomous_actuation:=true enable_joystick:=false`.
+5. Check ownership:
+   ```bash
+   ros2 topic info /drive
+   ros2 topic info /commands/motor/speed
+   ros2 node list | sort | uniq -c | grep -E 'ackermann_to_vesc|rf2o_laser_odometry|laser_static_tf|joy'
+   ros2 topic echo /control/status --once --field data
+   ```
+   Expect **exactly 1 publisher + 1 subscriber** at each actuator link. Exactly one Ackermann converter, one RF2O and one LiDAR static TF; zero joystick nodes when disabled. If still duplicated, capture `ps` plus complete launch-terminal logs before making any actuation change.
+
+### Readiness
+
+Passing ownership + ROS transport is a real integration milestone, not physical motion clearance. The vehicle still lacks a verified independent motor stop, confirmed safe firmware motor/battery/regen limits and tested stopping distance; VESC startup drew 7.93 A on the earlier bench pulse. The live physical explorer also rejects most scans with ~88% finite forward measurements against its 90% acceptance floor. These issues must be solved to run powered autonomous exploration reliably without merely disabling the checks.
