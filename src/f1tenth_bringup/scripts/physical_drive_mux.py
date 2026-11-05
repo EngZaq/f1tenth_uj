@@ -323,14 +323,22 @@ def run_ros():
             # disarmed, so commissioning gets actionable path evidence.
             # Never infer free distance from +inf.
             if self.auto_cmd is not None and scan_fresh:
+                guard_started = time.perf_counter()
                 path = swept_path_guard(
                     self.scan, max(0.0, self.auto_cmd[0]), self.auto_cmd[1])
+                guard_ms = (time.perf_counter()-guard_started)*1000.
+                path['compute_ms'] = round(guard_ms,2)
+                if guard_ms >= 40.:
+                    # No stale positive clearance on a starved control loop.
+                    path['ready'] = False
+                    path['reason'] = 'SWEEP_COMPUTE_DEADLINE_EXCEEDED'
             else:
                 path = {
                     'ready': False,
                     'reason': 'NO_FRESH_SCAN_OR_AUTO_PROPOSAL',
                     'nearest_obstacle_m': None,
                     'swept_known_fraction': 0.0,
+                    'compute_ms': None,
                 }
             # MANUAL retains the original conservative front LiDAR gate.
             # AUTO uses the swept-vehicle geometry and bounded unknown-run
