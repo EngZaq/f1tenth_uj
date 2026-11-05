@@ -199,3 +199,43 @@ The `physical_drive_mux` correctly remained STOP with `UNEXPECTED_ACTUATOR_PUBLI
 ### Readiness
 
 Passing ownership + ROS transport is a real integration milestone, not physical motion clearance. The vehicle still lacks a verified independent motor stop, confirmed safe firmware motor/battery/regen limits and tested stopping distance; VESC startup drew 7.93 A on the earlier bench pulse. The live physical explorer also rejects most scans with ~88% finite forward measurements against its 90% acceptance floor. These issues must be solved to run powered autonomous exploration reliably without merely disabling the checks.
+
+## 2026-11-05 AUTO software-state handshake fix
+
+Hardware evidence:
+- /exploration/drive published steering -0.10 rad, speed 0.075m/s.
+- /drive stayed at zero with enable_real_actuation=false.
+- /control/status showed mode STOP, real disabled, hold_held_and_fresh=true.
+- Repeating a one-shot hold false followed immediately by one-shot AUTO then continuous hold true did NOT enter AUTO_READY/AUTO_ACTIVE.
+
+Exact cause visible in physical_drive_mux.py: mode_cb explicitly rejects AUTO while self.auto_hold is true. The release is sent as a transient ROS one-shot with no acknowledgement, and AUTO is a second one-shot with no acknowledgement. A missed or unordered message makes AUTO stay STOP. The state reported REAL_ACTUATION_DISABLED regardless of the actual mode request outcome, hiding this defect. The actuator chain is functioning normally.
+
+Fix: physical_drive_mux now exports last_mode_request, mode_request_result, auto_hold_raw_value, mode_request_age_s in /control/status. It labels successful AUTO_READY_ACCEPTED and rejection REJECT_AUTO_HOLD_HELD / REJECT_AUTO_DISABLED_AT_LAUNCH. It still refuses selecting a mode with the hold asserted. **No actuation gate changed.**
+
+Added tools/diagnostics/disarmed_auto_handshake.py:
+- Checks a live /control/status publisher and requires real_actuation_enabled=false, and verifies /drive zero.
+- Refuses to run if another hold publisher still exists or another request source is active.
+- Streams hold false and waits until reported false.
+- Streams AUTO requests while false until receives READY acknowledgment.
+- Streams true and waits until reports AUTO_ACTIVE, with drive zero.
+- Reports PASS per state; sends STOP and hold false on cleanup.
+
+To run: STOP any old continuous ROS hold publisher (Ctrl+C); STOP old integrated launch (Ctrl+C). Then:
+
+    cd ~/f1tenth_uj
+    git pull --ff-only origin zaq/hardware-integration
+    source /opt/ros/humble/setup.bash
+    colcon build --symlink-install --packages-select f1tenth_bringup
+    source install/local_setup.bash
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    ros2 launch f1tenth_bringup real_integrated.launch.py enable_real_actuation:=false enable_autonomous_actuation:=true enable_joystick:=false
+
+In another sourced terminal (without any old hold publisher):
+
+    cd ~/f1tenth_uj
+    python3 tools/diagnostics/disarmed_auto_handshake.py
+
+Expected: PASS hold released, PASS AUTO_READY, PASS AUTO_ACTIVE, PASS stabilized and cleanup STOP. All with real disabled. If test aborts because stale publisher exists, do not forcibly enable real power; kill the identified old /control/auto_hold CLI before retesting. If it times out, print full last /control/status and mode_request_result. This is a ROS mode-state test only, not evidence that real driving is safe.
+
+Physical motor commissioning (firmware limits + independent power cutoff) remains unverified.
