@@ -98,6 +98,11 @@ def self_test():
                             True, True, (.12, 0), True, False, True, True)[0] == 0
     assert evaluate_request('AUTO_ACTIVE', True, False,
                             True, True, (.12, 0), True, True, True, True)[0] == 0
+    # AUTO may use a fresh supervisor hold rather than a joystick: the pure
+    # gate accepts any independently validated held input, not button 5.
+    assert evaluate_request('AUTO_ACTIVE', True, True,
+                            True, True, (.12, .04), True, True, True, True) == (
+                                .12, .04, 'PASS')
     assert evaluate_request('AUTO_ACTIVE', True, True,
                             True, True, (.12, 0), True, True, False, True)[0] == 0
     assert evaluate_request('MANUAL_ACTIVE', True, False,
@@ -314,7 +319,8 @@ def run_ros():
 
             # If an active mode loses a required input, latch STOP rather
             # than resuming motion uncommanded when the data reappears.
-            if self.mode.endswith('ACTIVE') and reason not in ('PASS', 'ZERO_REQUEST'):
+            if self.mode.endswith('ACTIVE') and reason not in (
+                    'PASS', 'ZERO_REQUEST', 'REAL_ACTUATION_DISABLED'):
                 self.mode = 'STOP'
                 speed, steer = 0.0, 0.0
                 reason = 'LATCH_STOP_' + reason
