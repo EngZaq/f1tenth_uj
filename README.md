@@ -205,3 +205,8 @@ python3 tools/exploration/offline_footprint_replay.py \
 ```
 
 **Important:** All output is diagnostic. A single laser plane, sampled leading edge and uncompensated frame cannot certify pedestrian/obstacle avoidance. No physical VESC actuation is enabled by this code. The independent hardware stop, safe controller timeout, battery limits, steering calibration and Jetson power reliability remain open.
+
+
+### Fast physical commissioning (2026-11-05)
+
+See [physical first-motion readiness](docs/PHYSICAL_FIRST_MOTION_READINESS_2026-11-05.md) for one disarmed Jetson verification, Ackermann swept-footprint guard tests, ROS steering/ERPM calibration report, and the required VESC firmware/independent-stop checks. The physical `/control/status` reports `swept_path` evidence. Real actuation is DISABLED by default and the new guard has not been validated on the Jetson yet.
