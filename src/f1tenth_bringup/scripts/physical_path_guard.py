@@ -89,6 +89,9 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
     run=0
     near=1e6
     nearest_obstacle=None
+    nearest_hit=None
+    obstacle_count=0
+    obstacle_examples=[]
 
     for i, raw in enumerate(ranges):
         a=amin+i*da
@@ -120,8 +123,27 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
         near=min(near,d)
         x,y=LIDAR_X_M+d*co,LIDAR_Y_M+d*si
         if any(_in_body_envelope(x,y,p,margin_m) for p in poses):
+            obstacle_count+=1
+            hit={
+                'distance_m':round(d,4),
+                'angle_deg':round(math.degrees(a),2),
+                'rear_axle_frame_x_m':round(x,4),
+                'rear_axle_frame_y_m':round(y,4),
+                'inside_uninflated_body_rectangle': (
+                    REAR_BODY_X_M<=x<=FRONT_BODY_X_M and
+                    abs(y)<=BODY_HALF_WIDTH_M),
+                'inside_vehicle_body_plus_2cm': (
+                    REAR_BODY_X_M-.02<=x<=FRONT_BODY_X_M+.02 and
+                    abs(y)<=BODY_HALF_WIDTH_M+.02),
+            }
+            # Display the five closest blocking returns, not merely the
+            # farthest obstacle or the average; no points are filtered out.
+            obstacle_examples.append(hit)
+            obstacle_examples.sort(key=lambda h:h['distance_m'])
+            del obstacle_examples[5:]
             if nearest_obstacle is None or d<nearest_obstacle:
                 nearest_obstacle=d
+                nearest_hit=hit
 
     if used<30:
         return dict(failure,reason='NO_RELEVANT_FORWARD_RAYS')
@@ -129,6 +151,9 @@ def swept_path_guard(scan, speed_mps, steer_rad, lookahead_travel_m=LOOKAHEAD_TR
     missing_deg=max_run*math.degrees(da)
     details={
         'nearest_obstacle_m':round(nearest_obstacle,3) if nearest_obstacle is not None else None,
+        'nearest_obstacle_detail': nearest_hit,
+        'blocking_return_count': obstacle_count,
+        'closest_blocking_returns': obstacle_examples,
         'nearest_measured_m':round(near,3) if near<1e6 else None,
         'swept_known_fraction':round(known_fraction,4),
         'max_unknown_run_deg':round(missing_deg,3),
