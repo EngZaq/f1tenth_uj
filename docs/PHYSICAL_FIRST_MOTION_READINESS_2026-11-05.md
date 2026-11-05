@@ -119,3 +119,30 @@ In second sourced terminal:
     ros2 topic echo /control/status --once --field data
 
 Check largest_unknown_sectors. If unknown gaps are lateral and only intersect near the body, assess angular mask/hardware LiDAR FOV and actual obstruction geometry. If gaps are central, look at reflectivity/target visibility and consider sensor fusion, a missing-data conservative policy or an explicit hazard-class assumption; do not mask arbitrarily. Still no motor actuation until hardware VESC current limits/timeout, independent cutoff, steering direction and braking behavior verified.
+
+## Fast fix after 78.2ms runtime and 70-73 degree near-side unknown (2026-11-05)
+
+User's newest live disarmed status has ZERO blocking measured points, swept_known_fraction 0.8081, steering -0.0053rad, speed proposal .146m/s; missing angular runs at +70.75..73.0deg at near-body 0.18m (0.0079m approximate blind width), +62..63.75 at 0.18m (0.0063m), and +19..20.5 at 0.45m (0.0137m). The previous 1.5-degree global rejection overstates distant blind width for a close lateral ray; however an unknown return is NOT evidence of no obstacle.
+
+Previous Python loop guard 78.2ms on Jetson against a 50ms mux tick. Updated physical_path_guard.py:
+- Vectorized exact ray/vehicle inflated rectangle intersections over the full bicycle-model swept path using numpy, eliminating nested Python loops. Local synthetic benchmark ~0.45ms on developer-side x86; NOT a verified Jetson timing.
+- Replaces the crude global 1.5-degree missing-run stop criterion with a **2cm maximum unknown swept-path intersection-width** software commissioning heuristic. The largest unknown sector in the supplied snapshot replay is about 0.0164m according to new continuous geometry. A 2cm blind strip can still conceal a thin/dark obstacle; THIS IS NOT A SAFETY STANDARD, and no automatic permission for physical actuation.
+- Retains complete unknown-scan fail-closed behavior, >=72% relevant measured return fraction, and obstruction veto for measured obstacles anywhere in inflated 0.8m swept footprint; turns and forward barriers are still accounted for.
+- /control/status.swept_path.compute_ms is measured in the actual ROS mux, and any computation >=40ms forces SWEEP_COMPUTE_DEADLINE_EXCEEDED (zero drive).
+- Regression adds a replay of the user's three largest missing-sector clusters and fails if 20 iterations of test guard average >=40ms.
+
+ONE disarmed retest:
+    cd ~/f1tenth_uj
+    git pull --ff-only origin zaq/hardware-integration
+    python3 src/f1tenth_bringup/scripts/test_physical_path_guard.py
+    source /opt/ros/humble/setup.bash
+    colcon build --symlink-install --packages-select f1tenth_bringup
+    source install/local_setup.bash
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    ros2 launch f1tenth_bringup real_integrated.launch.py enable_real_actuation:=false enable_autonomous_actuation:=true enable_joystick:=false
+
+In another sourced terminal:
+    ros2 topic echo /control/status --once --field data
+
+Expected successful *software-only* criterion in unchanged scene: swept_path.ready=true, compute_ms well below 40ms, zero drive, real_actuation_enabled=false. If any other obstacle/unknown is detected it will remain blocked. No further LiDAR reliability tests or AUTO handshake repeats needed; the next hard go/no-go is VESC firmware limits + independent power cutoff + physically validated steering/motor/stopping. A software PASS cannot replace these.
