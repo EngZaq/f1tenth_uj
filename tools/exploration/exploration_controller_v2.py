@@ -7,6 +7,7 @@ import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from front_scan_guard import front_scan_guard
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 from ackermann_msgs.msg import AckermannDriveStamped
@@ -26,6 +27,7 @@ class ExplorationController(Node):
         self.declare_parameter('scan_timeout', 0.25)
         self.declare_parameter('front_fov_deg', 160.0)
         self.declare_parameter('safety_bubble_m', 0.34)
+        self.declare_parameter('min_front_valid_fraction', 0.90)  # physical shadow only
         self.scan = None
         self.scan_received = None
         self.collision = False
@@ -61,15 +63,30 @@ class ExplorationController(Node):
         if not np.any(mask):
             return 0.0, 0.0, 'no forward beams'
         a, r = a[mask], r[mask]
-        # Stop if nearest return in +/-20 degrees is too close.
-        front = r[np.abs(a) < math.radians(20)]
-        front = front[front > 0]
-        if len(front) < 3:
-            return 0.0, 0.0, 'front scan invalid'
-        front_clearance = float(np.percentile(front, 15))
+        # On the physical platform, reject missing/unknown forward rays.
+        # Previous code checked only >=3 returns and used the 15th percentile,
+        # potentially allowing motion with most of the front sector invalid.
         stop = float(self.get_parameter('stop_distance').value)
-        if front_clearance < stop:
-            return 0.0, 0.0, 'front obstacle'
+        if self.platform == 'physical':
+            gate = front_scan_guard(
+                m.angle_min, m.angle_increment, m.ranges,
+                m.range_min, m.range_max,
+                stop_distance=stop,
+                valid_fraction_min=float(
+                    self.get_parameter('min_front_valid_fraction').value),
+            )
+            if not gate['ready']:
+                return 0.0, 0.0, gate['reason']
+            front_clearance = gate['nearest_m']
+        else:
+            # Preserve existing SIM behavior until a separate regression run.
+            front = r[np.abs(a) < math.radians(20)]
+            front = front[front > 0]
+            if len(front) < 3:
+                return 0.0, 0.0, 'front scan invalid'
+            front_clearance = float(np.percentile(front, 15))
+            if front_clearance < stop:
+                return 0.0, 0.0, 'front obstacle'
         # Disparity-aware bubble: exclude angles within a vehicle-width safety
         # bubble around short obstacle returns. Filtered range is conservative.
         inflated = r.copy()
