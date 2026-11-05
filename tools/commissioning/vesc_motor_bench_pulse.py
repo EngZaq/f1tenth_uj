@@ -14,11 +14,11 @@ import sys
 import time
 
 BENCH_TOPIC = '/bench_test/motor_erpm'
-ERPM = 500.0
+ERPM = 1000.0  # above confirmed firmware minimum of 900 ERPM
 PULSE_SECONDS = 0.50
 STOP_SECONDS = 2.0
 ABS_MOTOR_CURRENT_ABORT_A = 3.0
-ABS_SPEED_ABORT_ERPM = 1200.0
+ABS_SPEED_ABORT_ERPM = 1500.0
 MIN_INPUT_VOLTAGE = 10.0
 STALE_TELEMETRY_S = 0.30
 
@@ -27,7 +27,7 @@ def self_test():
     assert BENCH_TOPIC != '/drive'
     assert BENCH_TOPIC != '/commands/motor/speed'
     assert BENCH_TOPIC != '/bench_unused/motor_speed'
-    assert 0 < ERPM <= 600
+    assert 900 < ERPM <= 1100
     assert 0 < PULSE_SECONDS <= .5
     assert STOP_SECONDS >= 2.
     print('PASS: fixed ERPM and duration bounds, isolated bench topic')
@@ -116,7 +116,7 @@ def run():
               (st.voltage_input, st.current_motor, st.speed, st.fault_code))
         if abs(st.speed) > 100.0:
             raise RuntimeError('motor not near stationary; refuse test')
-        print('DANGER: firmware current limits and failure timeout must already be checked.')
+        print('DANGER: firmware motor/battery/regen current limits must already be reduced to verified bench-safe values.\nThe ROS current_max setting does NOT constrain speed-mode motor current.')
         print('Car MUST be firmly secured on a wheel-off-ground stand; no people near drivetrain.')
         print('Independent accessible motor power cutout/stop and spotter REQUIRED.')
         print('Will send fixed %.0f ERPM for %.2f seconds, then publish zero for %.1fs.' %
