@@ -33,6 +33,10 @@ def generate_launch_description():
     allow_auto = LaunchConfiguration('enable_autonomous_actuation')
     enable_joy = LaunchConfiguration('enable_joystick')
     enable_loop = LaunchConfiguration('enable_slam_loop_closing')
+    enable_candidate = LaunchConfiguration('experimental_candidate_planner')
+    min_travel = LaunchConfiguration('minimum_travel_m')
+    min_depart = LaunchConfiguration('minimum_departure_m')
+    min_duration = LaunchConfiguration('minimum_duration_s')
 
     # No second VESC driver from this launch; obs-only provides sensors,
     # RF2O -> TF and SLAM. It is forbidden to launch another instance.
@@ -119,6 +123,7 @@ def generate_launch_description():
             '-p', 'stop_distance:=0.80',
             '-p', 'scan_timeout:=0.22',
             '-p', 'min_front_valid_fraction:=0.90',
+            '-p', ['enable_candidate_planning:=', enable_candidate],
         ],
         output='screen',
     )
@@ -140,7 +145,11 @@ def generate_launch_description():
     # It publishes completion only, never direct actuator commands.
     lap_watcher = ExecuteProcess(
         cmd=['python3', '-u',
-             os.path.join(scripts_dir, 'physical_first_lap.py')],
+             os.path.join(scripts_dir, 'physical_first_lap.py'),
+             '--ros-args',
+             '-p', ['min_travel_m:=', min_travel],
+             '-p', ['min_departure_m:=', min_depart],
+             '-p', ['min_duration_s:=', min_duration]],
         output='screen',
     )
 
@@ -164,6 +173,22 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_slam_loop_closing', default_value='false',
             description='Enable real SLAM loop closure for closed-track mapping; false by default.'
+        ),
+        DeclareLaunchArgument(
+            'experimental_candidate_planner', default_value='false',
+            description='Opt-in longer-lookahead swept-footprint turn selection; validate disarmed first.'
+        ),
+        DeclareLaunchArgument(
+            'minimum_travel_m', default_value='22.0',
+            description='Physical lap odometry travel minimum; set to measured track perimeter minus margin.'
+        ),
+        DeclareLaunchArgument(
+            'minimum_departure_m', default_value='2.5',
+            description='First-lap minimum excursion from starting pose.'
+        ),
+        DeclareLaunchArgument(
+            'minimum_duration_s', default_value='40.0',
+            description='Minimum seconds before allowing closed-corridor first-lap completion.'
         ),
         DeclareLaunchArgument(
             'enable_joystick', default_value='false',
