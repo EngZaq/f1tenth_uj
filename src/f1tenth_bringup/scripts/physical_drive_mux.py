@@ -19,7 +19,7 @@ import math
 import time
 from physical_path_guard import swept_path_guard
 
-MAX_SPEED = 0.15
+MAX_SPEED = 0.35
 MAX_STEER = 0.10
 COMMAND_TTL = 0.22
 JOY_TTL = 0.20
@@ -53,7 +53,7 @@ def evaluate_request(mode, allow_real, allow_auto, deadman, deadman_fresh,
         return 0.0, 0.0, 'AUTO_LOCALIZATION_OR_MAP_STALE'
     if speed <= 1e-5:
         return 0.0, 0.0, 'ZERO_REQUEST'
-    # Truncate joystick excursions to commissioning speed and steering range.
+    # Clamp all requests to the commissioning speed and steering range.
     return min(speed, MAX_SPEED), max(-MAX_STEER, min(MAX_STEER, steer)), 'PASS'
 
 
@@ -108,7 +108,7 @@ def self_test():
                             True, True, (.12, 0), True, True, False, True)[0] == 0
     assert evaluate_request('MANUAL_ACTIVE', True, False,
                             True, True, (.5, .4), True, True, True, True) == (
-                                .15, .10, 'PASS')
+                                .35, .10, 'PASS')
     assert evaluate_request('MANUAL_ACTIVE', True, False,
                             True, True, (-.1, 0), True, True, True, True)[0] == 0
     assert evaluate_request('MANUAL_ACTIVE', True, False,
