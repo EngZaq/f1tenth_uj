@@ -21,6 +21,7 @@ install(
     scripts/map_coverage.py
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/exploration_controller_v2.py
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/front_scan_guard.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/exploration/physical_candidate_planner.py
   DESTINATION share/${PROJECT_NAME}/python_nodes
 )
 
