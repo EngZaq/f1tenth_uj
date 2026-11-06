@@ -4,12 +4,15 @@
 Hardware driving is intentionally blocked in this prototype.
 """
 import math
+import json
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from front_scan_guard import proposal_front_guard
+from physical_candidate_planner import select_steering
+from physical_path_guard import swept_path_guard
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from ackermann_msgs.msg import AckermannDriveStamped
 
 class ExplorationController(Node):
@@ -30,12 +33,20 @@ class ExplorationController(Node):
         # Narrow finite evidence for NON-ACTUATING hardware proposal only.
         # The real actuator mux retains its own wider conservative stop gate.
         self.declare_parameter('min_front_valid_fraction', 0.90)
+        self.declare_parameter('enable_candidate_planning', False)
+        self.declare_parameter('candidate_lookahead_m', 1.05)
         self.scan = None
         self.scan_received = None
         self.collision = False
         self.create_subscription(LaserScan, str(self.get_parameter('scan_topic').value), self.scan_cb, 10)
         self.create_subscription(Bool, '/ego_racecar/collision', self.collision_cb, 10)
         self.proposed = self.create_publisher(AckermannDriveStamped, str(self.get_parameter('proposal_topic').value), 10)
+        self.diagnostics_pub = self.create_publisher(String, '/exploration/diagnostics', 10)
+        self.last_plan_report = {}
+        self.last_candidate_steer = 0.0
+        self.last_plan_at_ns = None
+        self.cached_plan = (0.0, 0.0, 'not_evaluated')
+        self.last_diag_ns = 0
         self.platform = str(self.get_parameter('platform').value)
         if self.platform not in ('sim', 'physical'):
             raise ValueError('platform must be sim or physical')
@@ -112,14 +123,37 @@ class ExplorationController(Node):
         target_idx = chosen[len(chosen)//2]
         angle = float(a[target_idx])
         lookahead = float(self.get_parameter('lookahead').value)
-        steer = math.atan2(2*float(self.get_parameter('wheelbase').value)*math.sin(angle), lookahead)
+        raw_steer = math.atan2(2*float(self.get_parameter('wheelbase').value)*math.sin(angle), lookahead)
         limit = float(self.get_parameter('max_steer').value)
-        steer = max(-limit, min(limit, steer))
+        steer = max(-limit, min(limit, raw_steer))
+        self.last_plan_report = {
+            'target_gap_angle_deg': round(math.degrees(angle), 2),
+            'raw_target_steer_rad': round(raw_steer, 4),
+            'steering_saturated': abs(raw_steer) > limit+1e-5,
+            'max_steer_rad': round(limit, 4),
+            'ideal_min_radius_m': round(float(self.get_parameter('wheelbase').value)/math.tan(limit), 3),
+            'front_clearance_m': round(front_clearance, 3),
+        }
         speed = float(self.get_parameter('speed').value)
         # Approach turns cautiously. This is a starting heuristic, not braking verification.
         speed *= max(0.45, 1.0-0.5*abs(steer)/max(limit,0.01))
         if front_clearance < 1.0:
             speed = min(speed, 0.15)
+        if self.platform == 'physical' and bool(self.get_parameter('enable_candidate_planning').value):
+            # Advisory candidate selection only: the mux independently re-checks
+            # the REAL proposed turn against its 0.8 m swept vehicle envelope.
+            # Never increase the calibrated steering limit or bypass obstacles.
+            candidate_steer, report = select_steering(
+                m, raw_steer, self.last_candidate_steer, limit,
+                speed, swept_path_guard,
+                lookahead_m=float(self.get_parameter('candidate_lookahead_m').value))
+            self.last_plan_report['candidate_planner'] = report
+            if not report['ready']:
+                return 0.0, 0.0, 'no_feasible_physical_turn'
+            steer = candidate_steer
+            self.last_candidate_steer = steer
+            if abs(steer) > 0.75*limit:
+                speed = min(speed, 0.18)
         return steer, speed, 'ok'
 
     def tick(self):
@@ -132,12 +166,28 @@ class ExplorationController(Node):
             elif self.collision:
                 reason = 'collision'
             else:
-                steer, speed, reason = self.compute()
+                if self.platform == 'physical' and bool(self.get_parameter('enable_candidate_planning').value):
+                    # Expensive swept-car candidate search at 10 Hz, command
+                    # proposals still published at 20 Hz. The mux stays 20 Hz.
+                    if (self.last_plan_at_ns is None or
+                            now.nanoseconds-self.last_plan_at_ns >= 100_000_000):
+                        self.cached_plan = self.compute()
+                        self.last_plan_at_ns = now.nanoseconds
+                    steer, speed, reason = self.cached_plan
+                else:
+                    steer, speed, reason = self.compute()
         cmd = AckermannDriveStamped()
         cmd.header.stamp = now.to_msg()
         cmd.drive.steering_angle = float(steer)
         cmd.drive.speed = float(speed)
         self.proposed.publish(cmd)
+        if self.platform == 'physical' and now.nanoseconds-self.last_diag_ns >= 500_000_000:
+            report = {'status':reason, 'proposal_speed_mps':round(speed,4),
+                      'proposal_steer_rad':round(steer,4),
+                      'candidate_planning_enabled':bool(self.get_parameter('enable_candidate_planning').value),
+                      **self.last_plan_report}
+            self.diagnostics_pub.publish(String(data=json.dumps(report,separators=(',',':'))))
+            self.last_diag_ns = now.nanoseconds
         if self.platform == 'sim' and bool(self.get_parameter('enable_drive').value):
             self.drive.publish(cmd)
         if now.nanoseconds - self.last_log_ns >= 1_000_000_000:
