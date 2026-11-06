@@ -114,7 +114,7 @@ def generate_launch_description():
             '-p', 'scan_topic:=/scan',
             '-p', 'proposal_topic:=/exploration/drive',
             '-p', 'wheelbase:=0.260',
-            '-p', 'speed:=0.15',
+            '-p', 'speed:=0.35',
             '-p', 'max_steer:=0.10',
             '-p', 'stop_distance:=0.80',
             '-p', 'scan_timeout:=0.22',
