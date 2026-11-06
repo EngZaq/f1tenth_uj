@@ -30,6 +30,8 @@ Stop all previous launches (duplicate VESC/SLAM/drive nodes are a known blocker)
 ```bash
 cd ~/f1tenth_uj
 git status --short
+git fetch origin zaq/hardware-integration
+git switch zaq/hardware-integration
 git pull --ff-only origin zaq/hardware-integration
 source /opt/ros/humble/setup.bash
 export ROS_DOMAIN_ID=42
