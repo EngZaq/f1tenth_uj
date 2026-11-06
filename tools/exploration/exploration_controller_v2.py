@@ -10,7 +10,6 @@ import rclpy
 from rclpy.node import Node
 from front_scan_guard import proposal_front_guard
 from physical_candidate_planner import select_steering
-from physical_path_guard import swept_path_guard
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 from ackermann_msgs.msg import AckermannDriveStamped
@@ -148,6 +147,9 @@ class ExplorationController(Node):
         elif front_clearance < 1.0:
             speed = min(speed, 0.15)
         if self.platform == 'physical' and bool(self.get_parameter('enable_candidate_planning').value):
+            # Lazy import keeps simulation-only direct script use independent
+            # of the hardware package's installed physical_path_guard module.
+            from physical_path_guard import swept_path_guard
             # Advisory candidate selection only: the mux independently re-checks
             # the REAL proposed turn against its 0.8 m swept vehicle envelope.
             # Never increase the calibrated steering limit or bypass obstacles.
