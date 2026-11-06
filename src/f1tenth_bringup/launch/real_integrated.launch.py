@@ -32,13 +32,17 @@ def generate_launch_description():
     enable_real = LaunchConfiguration('enable_real_actuation')
     allow_auto = LaunchConfiguration('enable_autonomous_actuation')
     enable_joy = LaunchConfiguration('enable_joystick')
+    enable_loop = LaunchConfiguration('enable_slam_loop_closing')
 
     # No second VESC driver from this launch; obs-only provides sensors,
     # RF2O -> TF and SLAM. It is forbidden to launch another instance.
     observation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(share, 'launch', 'observe_only.launch.py')),
-        launch_arguments={'enable_vesc': 'false'}.items(),
+        launch_arguments={
+            'enable_vesc': 'false',
+            'enable_slam_loop_closing': enable_loop,
+        }.items(),
     )
 
     # LIVE, physically connected motor/servo driver.
@@ -156,6 +160,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_autonomous_actuation', default_value='false',
             description='Experimental AUTO mode; dangerous without hardware validation.'
+        ),
+        DeclareLaunchArgument(
+            'enable_slam_loop_closing', default_value='false',
+            description='Enable real SLAM loop closure for closed-track mapping; false by default.'
         ),
         DeclareLaunchArgument(
             'enable_joystick', default_value='false',
