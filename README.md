@@ -4,7 +4,19 @@
 
 Hardware repository for the F1TENTH autonomous racing car running ROS 2 Humble on an NVIDIA Jetson Orin Nano. The project is integrating a real LakiBeam LiDAR, RF2O, SLAM Toolbox, VESC drive interface, measured vehicle geometry, simulator-derived offline planning and staged safety validation.
 
-> **CURRENT STATUS — 2026-11-05: DISARMED PHYSICAL AUTONOMY INTEGRATION VERIFIED; NO POWERED DRIVING AUTHORIZED.** The ROS AUTO hold handshake, real LiDAR exploration proposals and one optimized swept-path precondition all passed on the Jetson with real actuation disabled. The mapping-only real-track rehearsal is running but is waiting for the car to depart the start: **no track has been built, no physical closed loop has been completed, and no real-track centerline has been generated yet**. The VESC Tool settings were deliberately left unchanged. Motor/brake calibration, firmware electrical safeguards and an independent physical stop are unresolved. The experimental §tools/safety/§ prototypes remain bench-only.
+> **CURRENT STATUS — 2026-11-06: FIRST REAL AUTO PROPULSION OBSERVED, FIRST-LAP NAVIGATION NOT YET COMPLETED.** The motor moved under the live Jetson/ROS/VESC command path; the final autonomous attempt latched STOP correctly on an observed front obstacle (0.782 m versus 0.80 m threshold; 72 swept-path blocking returns). SLAM map QoS and AUTO/hold handshaking were fixed, with fresh LiDAR, RF2O and map. Software limits are 0.35 m/s exploration and ±0.10 rad nominal steering (~2.59 m turning radius). Real steering calibration, reliable physical stopping, full first lap and saved-map localization/racing remain unverified. **Read the [Nov 6 engineering analysis and Nov 7 verification plan](docs/PHYSICAL_AUTONOMY_RECOVERY_AND_NEXT_DAY_PLAN_2026-11-06.md).** An optional longer-lookahead candidate planner has been committed but **not Jetson-tested**; it remains opt-in and preserves the independent physical obstacle guard.
+
+## Nov 6 → Nov 7 next tests
+
+- Pull branch `zaq/hardware-integration` and run `python3 tools/exploration/physical_candidate_planner.py`, `python3 tools/diagnostics/test_physical_candidate_geometry.py`, `python3 tools/diagnostics/steering_radius_audit.py`, and mux `--self-test` before attempting to run the updated bringup.
+- Observe candidate turns with `real_integrated.launch.py enable_real_actuation:=false enable_autonomous_actuation:=true enable_slam_loop_closing:=true experimental_candidate_planner:=true` and `ros2 topic echo /exploration/diagnostics --once --field data`. This is a **non-actuating** test.
+- Check actual steering angle / turning radius and stopping behavior before physical ground driving; then attempt a supervised first lap only if the geometry and stopping gate are satisfied. Set `minimum_travel_m` from the measured real track rather than assuming the 22 m default. No physical full lap or AMCL/Pure Pursuit handoff is yet proven.
+
+---
+
+### Previous status — Nov 5
+
+> **HISTORICAL STATUS — 2026-11-05: DISARMED PHYSICAL AUTONOMY INTEGRATION VERIFIED.** The ROS AUTO hold handshake, real LiDAR exploration proposals and one optimized swept-path precondition all passed on the Jetson with real actuation disabled. The mapping-only real-track rehearsal is running but is waiting for the car to depart the start: **no track has been built, no physical closed loop has been completed, and no real-track centerline has been generated yet**. The VESC Tool settings were deliberately left unchanged. Motor/brake calibration, firmware electrical safeguards and an independent physical stop are unresolved. The experimental §tools/safety/§ prototypes remain bench-only.
 
 
 ## End-of-day hardware milestone — 2026-11-05
