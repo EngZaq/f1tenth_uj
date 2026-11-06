@@ -5,8 +5,8 @@
 vesc_driver:
   ros__parameters:
     port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
-    speed_min: -1400.0
-    speed_max: 1400.0
+    speed_min: -3500.0
+    speed_max: 3500.0
     current_min: -2.0
     current_max: 2.0
     brake_min: 0.0
