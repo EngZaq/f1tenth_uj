@@ -41,6 +41,7 @@ python3 -m py_compile \
   tools/diagnostics/steering_radius_audit.py \
   src/f1tenth_bringup/launch/real_integrated.launch.py
 python3 tools/exploration/physical_candidate_planner.py
+python3 tools/diagnostics/test_physical_candidate_geometry.py
 python3 tools/diagnostics/steering_radius_audit.py
 python3 src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
 
