@@ -171,6 +171,8 @@ def run_ros():
             self.odom_at = None
             self.map_at = None
             self.last_reason = None
+            self.last_stop_reason = 'NOT_YET_ACTIVE'
+            self.last_stop_at = None
             self.last_mode_request = None
             self.last_mode_request_at = None
             self.mode_request_result = 'NO_MODE_REQUEST_RECEIVED'
@@ -236,6 +238,8 @@ def run_ros():
             if msg.data:
                 self.first_lap_completed = True
                 self.mode = 'STOP'
+                self.last_stop_reason = 'FIRST_LAP_COMPLETE'
+                self.last_stop_at = time.monotonic()
                 self.get_logger().warn(
                     'Physical first lap completed: STOP latched for map saving.')
 
@@ -308,6 +312,11 @@ def run_ros():
             if self.mode in ('MANUAL_READY', 'AUTO_READY') and active_hold:
                 self.mode = self.mode.replace('READY', 'ACTIVE')
             if self.mode in ('MANUAL_ACTIVE', 'AUTO_ACTIVE') and not active_hold:
+                self.last_stop_reason = (
+                    'AUTO_HOLD_RELEASED_OR_STALE' if self.mode == 'AUTO_ACTIVE'
+                    else 'JOYSTICK_DEADMAN_RELEASED_OR_STALE')
+                self.last_stop_at = now
+                self.get_logger().warn('STOP LATCHED: %s' % self.last_stop_reason)
                 self.mode = 'STOP'
 
             if self.mode.startswith('MANUAL'):
@@ -371,6 +380,9 @@ def run_ros():
                 self.mode = 'STOP'
                 speed, steer = 0.0, 0.0
                 reason = 'LATCH_STOP_' + reason
+                self.last_stop_reason = reason
+                self.last_stop_at = now
+                self.get_logger().warn('STOP LATCHED: %s' % reason)
 
             # Check *both* ends of the real hardware chain. On 2026-11-05
             # three stale Ackermann converter nodes each subscribed to /drive
@@ -390,11 +402,17 @@ def run_ros():
                 speed, steer = 0.0, 0.0
                 self.mode = 'STOP'
                 reason = 'AUTO_DUPLICATE_OR_MISSING_RF2O_ODOMETRY'
+                self.last_stop_reason = reason
+                self.last_stop_at = now
+                self.get_logger().warn('STOP LATCHED: %s' % reason)
             if (drive_publishers != 1 or drive_subscribers != 1
                     or motor_publishers != 1 or motor_subscribers != 1):
                 speed, steer = 0.0, 0.0
                 self.mode = 'STOP'
                 reason = 'ACTUATOR_GRAPH_OWNERSHIP_FAULT'
+                self.last_stop_reason = reason
+                self.last_stop_at = now
+                self.get_logger().warn('STOP LATCHED: %s' % reason)
 
             cmd_out = AckermannDriveStamped()
             cmd_out.header.stamp = self.get_clock().now().to_msg()
@@ -405,6 +423,11 @@ def run_ros():
             status = {
                 'mode': self.mode,
                 'reason': reason,
+                'last_stop_reason': self.last_stop_reason,
+                'last_stop_age_s': (round(now-self.last_stop_at, 3)
+                                    if self.last_stop_at is not None else None),
+                'auto_hold_age_s': (round(now-self.auto_hold_at, 3)
+                                    if self.auto_hold_at is not None else None),
                 'real_actuation_enabled': self.allow_real,
                 'autonomous_actuation_enabled': self.allow_auto,
                 'deadman_button_5_held': joy_held,
