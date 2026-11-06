@@ -201,7 +201,10 @@ def run_ros():
                 self.create_subscription(
                     Odometry, '/odom_rf2o', self.odom_cb, qos_profile_sensor_data),
                 self.create_subscription(
-                    OccupancyGrid, '/map', self.map_cb, qos_profile_sensor_data),
+                    OccupancyGrid, '/map', self.map_cb,
+                    QoSProfile(depth=1,
+                        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                        reliability=ReliabilityPolicy.RELIABLE)),
             ]
             self.create_timer(.05, self.tick)
             self.get_logger().warn(
@@ -420,6 +423,8 @@ def run_ros():
                 'swept_path': path,
                 'odom_fresh': odom_fresh,
                 'map_fresh': map_fresh,
+                'map_age_s': (round(now-self.map_at, 3)
+                              if self.map_at is not None else None),
                 'speed_mps': round(speed, 4),
                 'steer_rad': round(steer, 4),
                 'drive_publisher_count': drive_publishers,
