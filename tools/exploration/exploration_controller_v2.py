@@ -65,6 +65,7 @@ class ExplorationController(Node):
         self.collision = bool(msg.data)
 
     def compute(self):
+        self.last_plan_report = {}
         m = self.scan
         a = m.angle_min + np.arange(len(m.ranges)) * m.angle_increment
         r = np.asarray(m.ranges, dtype=float)
@@ -137,7 +138,14 @@ class ExplorationController(Node):
         speed = float(self.get_parameter('speed').value)
         # Approach turns cautiously. This is a starting heuristic, not braking verification.
         speed *= max(0.45, 1.0-0.5*abs(steer)/max(limit,0.01))
-        if front_clearance < 1.0:
+        if self.platform == 'physical':
+            # Start reducing approach speed BEFORE the hard 0.80 m stop.
+            # This is conservative planning, not validated braking distance.
+            if front_clearance < 1.50:
+                speed = min(speed, 0.20)
+            if front_clearance < 1.10:
+                speed = min(speed, 0.15)
+        elif front_clearance < 1.0:
             speed = min(speed, 0.15)
         if self.platform == 'physical' and bool(self.get_parameter('enable_candidate_planning').value):
             # Advisory candidate selection only: the mux independently re-checks
