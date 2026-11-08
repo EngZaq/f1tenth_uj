@@ -6,6 +6,18 @@ Hardware repository for the F1TENTH autonomous racing car running ROS 2 Humble o
 
 > **CURRENT STATUS — 2026-11-06: FIRST REAL AUTO PROPULSION OBSERVED, FIRST-LAP NAVIGATION NOT YET COMPLETED.** The motor moved under the live Jetson/ROS/VESC command path; the final autonomous attempt latched STOP correctly on an observed front obstacle (0.782 m versus 0.80 m threshold; 72 swept-path blocking returns). SLAM map QoS and AUTO/hold handshaking were fixed, with fresh LiDAR, RF2O and map. Software limits are 0.35 m/s exploration and ±0.10 rad nominal steering (~2.59 m turning radius). Real steering calibration, reliable physical stopping, full first lap and saved-map localization/racing remain unverified. **Read the [Nov 6 engineering analysis and Nov 7 verification plan](docs/PHYSICAL_AUTONOMY_RECOVERY_AND_NEXT_DAY_PLAN_2026-11-06.md).** An optional longer-lookahead candidate planner has been committed but **not Jetson-tested**; it remains opt-in and preserves the independent physical obstacle guard.
 
+## November 8 — Moatasem's newer 21-commit simulation branch, staged physical port
+
+[Simulation findings and physical integration handoff](docs/MOATASEM_SIM_21_COMMITS_PHYSICAL_TRANSFER_2026-11-08.md).
+
+The updated `f1tenth_uj_sim` branch `moatasem/ekf-experiments` includes simulation evidence of two closed-loop AMCL+EKF laps in **5/5 runs** at a simulated 0.8 m/s cap, with ~0.015 m mean true cross-track error. This is on a saved simulated map; it does not certify the end-to-end unknown-track mission or physical car.
+
+The first physical port is a **read-only VESC+IMU Config C shadow EKF** (`config/ekf_moatasem_vesc_imu_shadow.yaml`, `launch/moatasem_ekf_shadow.launch.py`), with `publish_tf=false` so RF2O and SLAM keep their original `odom->base_link` and `map->odom` roles. Its real IMU topic, physical wheel-speed sign/noise, and moving performance remain unverified. A new `tools/validation/physical_mapping_correction_audit.py` checks physical `map->odom` recordings over **2.0 s** gaps after teammate tests demonstrated that the former 0.10 s audit missed loop-closure jumps. All checks are evidence only; map quality requires independent review.
+
+**Do not** auto-merge the sim branch into the physical stack, copy the simulator's 0.1016 m wheel size or noise assumptions, disable RF2O TF until an alternative has been calibrated, or connect the teammate's racing controller directly to the VESC.
+
+---
+
 ## November 8 engineering sprint — steering feasibility, STOP evidence and CI
 
 [Full November 8 steering & STOP verification runbook](docs/NOVEMBER_08_PHYSICAL_STEERING_AND_STOP_SPRINT.md).
