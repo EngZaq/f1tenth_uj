@@ -19,10 +19,14 @@ def report(root):
     geom=yaml.safe_load((root/'src/f1tenth_bringup/config/physical_vehicle.yaml').read_text())
     ack=yaml.safe_load((root/'src/f1tenth_bringup/config/ackermann_to_vesc.yaml').read_text())
     vesc=yaml.safe_load((root/'src/f1tenth_bringup/config/vesc_real_integration.yaml').read_text())
+    odom_cfg=yaml.safe_load((root/'src/f1tenth_bringup/config/vesc_to_odom.yaml').read_text())
     conv=ack['/ackermann_to_vesc_node']['ros__parameters']
+    odom_conv=odom_cfg['/vesc_to_odom_node']['ros__parameters']
     cfg=vesc['vesc_driver']['ros__parameters']
     wheelbase=float(geom['vehicle']['wheelbase_m'])
     gain=float(conv['speed_to_erpm_gain'])
+    odom_gain=float(odom_conv['speed_to_erpm_gain'])
+    gain_ratio=(odom_gain/gain if gain else None)
     motor_min=float(cfg['speed_min'])
     motor_max=float(cfg['speed_max'])
     sgain=float(conv['steering_angle_to_servo_gain'])
@@ -51,6 +55,10 @@ def report(root):
         'lidar_x_m':geom['lidar']['x_m'],
         'front_body_x_m':geom['vehicle']['body_front_x_m'],
         'expected_erpm_per_mps':gain,
+        'inverse_vesc_odom_gain_erpm_per_mps':odom_gain,
+        'vesc_odom_to_actuation_gain_ratio':gain_ratio,
+        'vesc_gain_sign_consistent':bool(gain*odom_gain>0),
+        'vesc_odom_gain_physically_verified':False,
         'vesc_speed_clamp_erpm':[motor_min,motor_max],
         'speed_examples':[check_speed(x) for x in speeds],
         'steering_examples':[check_steer(x) for x in steering],
@@ -66,6 +74,12 @@ def report(root):
         'physical_braking_distance':'NOT MEASURED',
         'driving_clearance':'NOT GRANTED',
     }
+    if gain*odom_gain < 0:
+        checks['IMPORTANT_velocity_sign_warning']=(
+            'Ackermann-to-VESC gain and VESC-to-odometry gain have OPPOSITE signs. '
+            'Real forward wheel rotation and measured telemetry MUST determine the '
+            'correct pair before any EKF velocity or racing controller can be trusted; '
+            'do not automatically flip either sign.')
     if any(x['software_clamp_violated'] for x in checks['speed_examples']):
         checks['software_calibration_warning']='One of the tested speeds would exceed driver ERPM clamps'
     if any(x['software_servo_clamp_violated'] for x in checks['steering_examples']):
