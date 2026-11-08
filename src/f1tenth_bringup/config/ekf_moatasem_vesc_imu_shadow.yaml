@@ -1,0 +1,115 @@
+# IMPORTANT (PHYSICAL):
+# - Q matrix, 0.2 s timeout and 0.5 s lag window are SIM-derived experimental values, NOT tuned physical values.
+# - IMU angular velocity Z sign/axes, timestamp, bias, and covariance MUST be verified on the Jetson.
+# - VESC speed_to_ERPM polarity is currently inconsistent across the original physical YAML files; DO NOT
+#   use this shadow output for driving until measured speed sign/scale are reconciled.
+# - Existing RF2O odom -> base_link and SLAM map -> odom TF publishers must remain the sole authorities.
+# - Only compare /odometry/filtered_moatasem_shadow against measured ground truth, not just RF2O agreement.
+# - Do not use simulated sensor noise values (0.0009 / 2.5e-5) as physical measurement covariances.
+#
+# PHYSICAL F1TENTH — Moatasem simulation Config C ported to NON-AUTHORITATIVE SHADOW EKF.
+# rf2o is an OPTION: config/fusion_ekf_moatasem_rf2o.yaml (+ config/cov_relay_rf2o.yaml).
+# Original: EngZaq/f1tenth_uj_sim @ moatasem/ekf-experiments, config/fusion_ekf_moatasem.yaml
+# Physical wiring: real VESC odom through existing PROVISIONAL covariance adapter; real IMU requires verification.
+# No fusion pose, speed, or heading is authorized to control actuators. No TF publication.
+#
+# State order for every *_config vector (15 values):
+#   x  y  z | roll pitch yaw | vx vy vz | vroll vpitch vyaw | ax ay az
+#
+# Where each Kalman matrix comes from:
+#   H  -> the *_config vectors below
+#   R  -> the covariance INSIDE each sensor message
+#         (VESC + IMU: sim_vesc_imu.py on the sim, the real drivers on the car)
+#   Q  -> process_noise_covariance below (template defaults except vx=0.05; a RATE: P += Q*dt)
+#   P0 -> initial_estimate_covariance: not set -> template default 1e-9 (car starts still)
+
+ekf_moatasem_shadow:
+  ros__parameters:
+    # ---------------- basics ----------------
+    frequency: 30.0
+    sensor_timeout: 0.2          # predict-only if no data for this long
+    two_d_mode: true             # flat floor: z, roll, pitch forced to 0
+    publish_tf: false            # HARDWARE: RF2O remains only odom -> base_link TF owner
+    publish_acceleration: false
+    print_diagnostics: true      # shows rejected measurements, missing TFs, etc.
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link   # physical car rear axle
+    world_frame: odom            # RF2O + SLAM remain authoritative TF
+
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+
+    # ---------------- late measurements ----------------
+    # Kept identical to the rf2o variant so both files behave the same. Without rf2o
+    # nothing arrives late (VESC + IMU are stamped on arrival), so it costs nothing here.
+    # (Lag test with rf2o: accuracy neutral, no CPU cost, 423 reverts for 422 messages.)
+    smooth_lagged_data: true
+    history_length: 0.5          # s
+
+    # ---------------- rejection gates: none ----------------
+    # No *_twist_rejection_threshold lines -> robot_localization default (no gating).
+    # In simulation tests a 3-sigma gate locked out good VESC/gyro data for up to 2 s
+    # after fast transients (small Q -> small S -> long rejection streaks), doubling
+    # the error. Proven F1TENTH stacks (ForzaETH) also run this velocity-only EKF
+    # without gates. Revisit only once R and Q are measured on the real car.
+    # ---------------- sensor 1: VESC wheel speed -> vx ----------------
+    odom0: /shadow_inputs/odom_vesc  # physical VESC odom via shadow_covariance_adapter.py
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # ---------------- sensor 2: IMU gyro -> vyaw ----------------
+    imu0: /imu/data_raw          # MUST be a real sensor_msgs/Imu angular_velocity.z, NOT simulator
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 20
+    imu0_remove_gravitational_acceleration: false
+
+    # ---------------- rf2o: NOT fused in the main config ----------------
+    # AMCL shadow test (sim, new_track map, 5 runs each, rear-axle grading): AMCL + this
+    # two-sensor EKF ("C") vs AMCL + three-sensor EKF ("B"): position RMSE 0.048 vs 0.045 m,
+    # heading mean 0.87 vs 0.86 deg, largest correction 2.7 vs 2.4 cm - no difference beyond
+    # the run-to-run spread (|t| < 2). rf2o costs ~42 % of a CPU core. Without AMCL it did
+    # help the EKF (~0.02-0.04 m over one lap), so it stays available as an option:
+    # config/fusion_ekf_moatasem_rf2o.yaml.
+
+    # ---------------- Q: process noise ----------------
+    # Diagonal: x y z roll pitch yaw vx vy vz vroll vpitch vyaw ax ay az
+    #           0.05 0.05 0.06 0.03 0.03 0.06 | 0.05  0.025 0.04 | 0.01 0.01 0.02 | 0.01 0.01 0.015
+    # Template defaults except vx (index 6) = 0.05. Tune ONLY vx and vyaw (index 11).
+    # Why (NIS check in simulation, gates off, three sensors; same Q kept for two sensors):
+    #   vx:   Q_vx 0.5 (ForzaETH value) gave VESC mean NIS 0.13 (expected 1): P_vx grew
+    #         0.5*0.02 = 0.01 between VESC samples, ~85 % of S. Q_vx 0.05 together with
+    #         the true VESC R (0.0009) gave mean NIS 0.62; RMSE unchanged.
+    #   vyaw: 0.02 (template) gave IMU mean NIS ~1.0 -> kept.
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.05,  0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.025, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.04, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.015]
+
+    # ---------------- P0 ----------------
+    # initial_estimate_covariance not set -> template default 1e-9 on every state.
+    # OK because the odom frame starts at the car and the car starts still.
