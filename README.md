@@ -6,6 +6,12 @@ Hardware repository for the F1TENTH autonomous racing car running ROS 2 Humble o
 
 > **CURRENT STATUS — 2026-11-06: FIRST REAL AUTO PROPULSION OBSERVED, FIRST-LAP NAVIGATION NOT YET COMPLETED.** The motor moved under the live Jetson/ROS/VESC command path; the final autonomous attempt latched STOP correctly on an observed front obstacle (0.782 m versus 0.80 m threshold; 72 swept-path blocking returns). SLAM map QoS and AUTO/hold handshaking were fixed, with fresh LiDAR, RF2O and map. Software limits are 0.35 m/s exploration and ±0.10 rad nominal steering (~2.59 m turning radius). Real steering calibration, reliable physical stopping, full first lap and saved-map localization/racing remain unverified. **Read the [Nov 6 engineering analysis and Nov 7 verification plan](docs/PHYSICAL_AUTONOMY_RECOVERY_AND_NEXT_DAY_PLAN_2026-11-06.md).** An optional longer-lookahead candidate planner has been committed but **not Jetson-tested**; it remains opt-in and preserves the independent physical obstacle guard.
 
+## Fast physical mapping fallback (Nov 8)
+
+[No-loop-closure mapping, map-saver commands, lap-blocker diagnostics and failure decision tree](docs/PHYSICAL_MAPPING_FAST_FALLBACK_2026-11-08.md). Physical `real_integrated.launch.py` and `observe_only.launch.py` already default `enable_slam_loop_closing:=false`. Keep it OFF for initial map-quality trials; prior simulator loop-on tests suffered severe erroneous graph corrections. The first-lap monitor now publishes exact `completion_blockers` rather than only a Boolean. A saved partial map is diagnostic, never automatically an accepted racing route. Do not move car with damaged steering ball joint.
+
+---
+
 ## November 8 — Moatasem's newer 21-commit simulation branch, staged physical port
 
 [Simulation findings and physical integration handoff](docs/MOATASEM_SIM_21_COMMITS_PHYSICAL_TRANSFER_2026-11-08.md).
