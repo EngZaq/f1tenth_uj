@@ -6,6 +6,15 @@ Hardware repository for the F1TENTH autonomous racing car running ROS 2 Humble o
 
 > **CURRENT STATUS — 2026-11-06: FIRST REAL AUTO PROPULSION OBSERVED, FIRST-LAP NAVIGATION NOT YET COMPLETED.** The motor moved under the live Jetson/ROS/VESC command path; the final autonomous attempt latched STOP correctly on an observed front obstacle (0.782 m versus 0.80 m threshold; 72 swept-path blocking returns). SLAM map QoS and AUTO/hold handshaking were fixed, with fresh LiDAR, RF2O and map. Software limits are 0.35 m/s exploration and ±0.10 rad nominal steering (~2.59 m turning radius). Real steering calibration, reliable physical stopping, full first lap and saved-map localization/racing remain unverified. **Read the [Nov 6 engineering analysis and Nov 7 verification plan](docs/PHYSICAL_AUTONOMY_RECOVERY_AND_NEXT_DAY_PLAN_2026-11-06.md).** An optional longer-lookahead candidate planner has been committed but **not Jetson-tested**; it remains opt-in and preserves the independent physical obstacle guard.
 
+## November 8 engineering sprint — steering feasibility, STOP evidence and CI
+
+[Full November 8 steering & STOP verification runbook](docs/NOVEMBER_08_PHYSICAL_STEERING_AND_STOP_SPRINT.md).
+
+- New fault-time `last_stop_snapshot` is retained in `/control/status` and in `~/f1tenth_hw_evidence/last_physical_stop.json`, with the actual proposed steering and obstacle geometry. Stop output is published before evidence file I/O.
+- New read-only `tools/diagnostics/fit_steering_measurements.py` fits the steering mapping from left/right front wheel angle measurements; it never changes active VESC parameters.
+- Experimental path candidate selector now detects CPU overrun and fails closed. It still requires non-actuating shadow testing on the Jetson and physical wheel/track geometry calibration before actual autonomous ground motion.
+- Added `.github/workflows/physical-offline-regression.yml` for ROS-free source checks; a commit alone is not proof CI or Jetson tests passed.
+
 ## Nov 6 → Nov 7 next tests
 
 - Pull branch `zaq/hardware-integration` and run `python3 tools/exploration/physical_candidate_planner.py`, `python3 tools/diagnostics/test_physical_candidate_geometry.py`, `python3 tools/diagnostics/steering_radius_audit.py`, and mux `--self-test` before attempting to run the updated bringup.
