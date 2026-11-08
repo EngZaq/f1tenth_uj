@@ -18,6 +18,7 @@ import json
 import math
 import time
 from physical_path_guard import swept_path_guard
+from physical_stop_evidence import make_snapshot, save_snapshot
 
 MAX_SPEED = 0.35
 MAX_STEER = 0.10
@@ -173,6 +174,8 @@ def run_ros():
             self.last_reason = None
             self.last_stop_reason = 'NOT_YET_ACTIVE'
             self.last_stop_at = None
+            self.last_stop_snapshot = None
+            self.last_stop_persisted_at = None
             self.last_mode_request = None
             self.last_mode_request_at = None
             self.mode_request_result = 'NO_MODE_REQUEST_RECEIVED'
@@ -259,6 +262,9 @@ def run_ros():
             self.last_mode_request = m
             self.last_mode_request_at = time.monotonic()
             if m == 'STOP':
+                if self.mode != 'STOP':
+                    self.last_stop_reason = 'OPERATOR_STOP_REQUESTED'
+                    self.last_stop_at = time.monotonic()
                 self.mode = 'STOP'
                 self.mode_request_result = 'STOP_ACCEPTED'
                 self.get_logger().warn('Operator STOP requested; reselect mode to re-arm')
@@ -302,6 +308,7 @@ def run_ros():
 
         def tick(self):
             now = time.monotonic()
+            mode_before_tick = self.mode
             joy_fresh = self.fresh(self.joy_at, JOY_TTL, now)
             joy_held = joy_fresh and self.deadman
             auto_hold_fresh = self.fresh(self.auto_hold_at, AUTO_HOLD_TTL, now)
@@ -420,10 +427,32 @@ def run_ros():
             cmd_out.drive.steering_angle = float(steer)
             self.drive_pub.publish(cmd_out)
 
+            # Snapshot a stop exactly once at its first STOP control tick,
+            # not from a later scan after the obstacle may have disappeared.
+            # Always publish the zero-speed command BEFORE any file I/O.
+            if (self.mode == 'STOP' and self.last_stop_at is not None
+                    and self.last_stop_at != self.last_stop_persisted_at):
+                self.last_stop_persisted_at = self.last_stop_at
+                self.last_stop_snapshot = make_snapshot(
+                    self.last_stop_reason, mode_before_tick, cmd, path,
+                    scan_reason=scan_reason, nearest_front_m=nearest,
+                    scan_fresh=scan_fresh, odom_fresh=odom_fresh,
+                    map_fresh=map_fresh,
+                    hold_age_s=(now-self.auto_hold_at if self.auto_hold_at is not None else None),
+                    drive_publishers=drive_publishers, drive_subscribers=drive_subscribers,
+                    motor_publishers=motor_publishers, motor_subscribers=motor_subscribers,
+                    rf2o_publishers=rf2o_publishers)
+                try:
+                    filename = save_snapshot(self.last_stop_snapshot)
+                    self.get_logger().warn('STOP EVIDENCE: %s' % filename)
+                except OSError as exc:
+                    self.get_logger().error('Could not persist STOP snapshot: %s' % exc)
+
             status = {
                 'mode': self.mode,
                 'reason': reason,
                 'last_stop_reason': self.last_stop_reason,
+                'last_stop_snapshot': self.last_stop_snapshot,
                 'last_stop_age_s': (round(now-self.last_stop_at, 3)
                                     if self.last_stop_at is not None else None),
                 'auto_hold_age_s': (round(now-self.auto_hold_at, 3)
