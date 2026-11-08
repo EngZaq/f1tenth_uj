@@ -99,6 +99,24 @@ def main():
             self.left_start |= radius > self.thresholds['min_departure_m']
             heading_error=abs(math.degrees(wrap(state[2]-self.first[2])))
             elapsed=t-self.start_time
+            map_age_s=(t-self.last_map) if self.last_map>0 else None
+            # Pure observation diagnostics: do NOT relax any lap completion
+            # condition or declare incomplete maps valid for trajectory planning.
+            completion_blockers=[]
+            if not self.left_start:
+                completion_blockers.append('NOT_LEFT_START_AREA')
+            if self.travel < self.thresholds['min_travel_m']:
+                completion_blockers.append('INSUFFICIENT_TRAVEL')
+            if elapsed < self.thresholds['min_duration_s']:
+                completion_blockers.append('INSUFFICIENT_DURATION')
+            if radius > self.thresholds['return_radius_m']:
+                completion_blockers.append('NOT_RETURNED_TO_START')
+            if heading_error > self.thresholds['heading_tolerance_deg']:
+                completion_blockers.append('HEADING_NOT_ALIGNED_AT_START')
+            if not self.coverage.get('closed',False):
+                completion_blockers.append('OBSERVED_CORRIDOR_NOT_CLOSED')
+            if map_age_s is None or not (0<=map_age_s<=8.0):
+                completion_blockers.append('NO_FRESH_MAP')
             progress={
                 'phase':'AWAITING_MAP_CLOSURE' if self.left_start else 'AWAITING_DEPARTURE',
                 'motion_source':'RF2O odometry; no wheel command',
@@ -110,26 +128,16 @@ def main():
                 'observed_corridor_closed':bool(self.coverage.get('closed',False)),
                 'observed_map':self.coverage,
                 'thresholds':self.thresholds,
-                'map_age_s':round(t-self.last_map,1) if self.last_map>0 else None,
-                'eligible_for_completion':bool(
-                    self.left_start and self.travel>=self.thresholds['min_travel_m']
-                    and elapsed>=self.thresholds['min_duration_s']
-                    and radius<=self.thresholds['return_radius_m']
-                    and heading_error<=self.thresholds['heading_tolerance_deg']
-                    and self.coverage.get('closed',False)
-                    and 0<=t-self.last_map<=8.0),
+                'map_age_s':round(map_age_s,1) if map_age_s is not None else None,
+                'completion_blockers':completion_blockers,
+                'eligible_for_completion':not completion_blockers,
             }
             if t-self.last_progress_at>=1.0:
                 self.last_progress_at=t
                 self.progress_pub.publish(String(data=json.dumps(progress,separators=(',',':'))))
                 self.progress_file.parent.mkdir(parents=True,exist_ok=True)
                 self.progress_file.write_text(json.dumps(progress,indent=2)+'\n')
-            if not (self.left_start and self.travel >= self.thresholds['min_travel_m']
-                    and elapsed >= self.thresholds['min_duration_s']
-                    and radius <= self.thresholds['return_radius_m']
-                    and heading_error <= self.thresholds['heading_tolerance_deg']
-                    and self.coverage.get('closed', False)
-                    and 0 <= t-self.last_map <= 8.0):
+            if completion_blockers:
                 return
             try:
                 tf = self.tf.lookup_transform('map', 'base_link', Time())
