@@ -41,5 +41,9 @@ jobs:
         run: |
           python tools/diagnostics/fit_steering_measurements.py --self-test
           python tools/diagnostics/steering_radius_audit.py --radius 2.6
+      - name: Test teammate EKF physical shadow TF and sensor contract
+        run: python tools/diagnostics/test_moatasem_physical_shadow_contract.py
+      - name: Test SLAM correction audit including 0.6s optimizer gap
+        run: python tools/validation/test_physical_mapping_correction_audit.py
       - name: Check current read-only source calibration
         run: python tools/diagnostics/physical_calibration_precheck.py
