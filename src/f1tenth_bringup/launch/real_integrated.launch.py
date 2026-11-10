@@ -31,6 +31,8 @@ def generate_launch_description():
     cfg = os.path.join(share, 'config')
     enable_real = LaunchConfiguration('enable_real_actuation')
     allow_auto = LaunchConfiguration('enable_autonomous_actuation')
+    manual_min_fraction = LaunchConfiguration('manual_min_front_valid')
+    manual_low_visibility = LaunchConfiguration('manual_allow_reduced_visibility')
     enable_joy = LaunchConfiguration('enable_joystick')
     enable_loop = LaunchConfiguration('enable_slam_loop_closing')
     enable_candidate = LaunchConfiguration('experimental_candidate_planner')
@@ -135,7 +137,8 @@ def generate_launch_description():
             '--ros-args',
             '-p', ['enable_real_actuation:=', enable_real],
             '-p', ['enable_autonomous_actuation:=', allow_auto],
-            '-p', 'manual_min_front_valid:=0.75',
+            '-p', ['manual_min_front_valid:=', manual_min_fraction],
+            '-p', ['manual_allow_reduced_visibility:=', manual_low_visibility],
             '-p', 'auto_min_front_valid:=0.90',
         ],
         output='screen',
@@ -169,6 +172,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_autonomous_actuation', default_value='false',
             description='Experimental AUTO mode; dangerous without hardware validation.'
+        ),
+        DeclareLaunchArgument(
+            'manual_min_front_valid', default_value='0.75',
+            description='Manual front finite-LiDAR fraction; below 0.75 requires explicit manual_allow_reduced_visibility=true.'
+        ),
+        DeclareLaunchArgument(
+            'manual_allow_reduced_visibility', default_value='false',
+            description='Experimental supervised manual-only low-visibility override; keep physical cutoff accessible.'
         ),
         DeclareLaunchArgument(
             'enable_slam_loop_closing', default_value='false',
