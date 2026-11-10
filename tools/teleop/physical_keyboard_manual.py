@@ -41,7 +41,7 @@ class KeyboardManual(Node):
         self.pulse_end = 0.0
         self.steer = 0.0
         self.active_seen = False
-        self.last_output = 0.0
+        self.needs_reset = False  # a held, auto-repeating key cannot rearm motion
 
     def say(self, message):
         sys.stdout.write('\r\n' + message + '\r\n')
@@ -102,6 +102,7 @@ class KeyboardManual(Node):
         self.request_mode('STOP')
         self.state = 'IDLE'
         self.active_seen = False
+        self.needs_reset = True
         if reason:
             self.say('STOP: ' + reason)
 
@@ -112,8 +113,14 @@ class KeyboardManual(Node):
         if key in (' ', 'x'):
             self.stop('Operator key')
             return True
-        if key not in 'wad':
+        if key == 'r' and self.state == 'IDLE':
+            self.needs_reset = False
+            self.say('Reset accepted: press W/A/D for one short pulse')
             return True
+        if key not in ('w', 'a', 'd'):
+            return True
+        if self.needs_reset:
+            return True  # require distinct R before another pulse
         if self.state != 'IDLE':
             return True  # never extend an existing movement pulse
         error = self.valid_environment(require_stop=True)
@@ -175,7 +182,7 @@ def main():
     original = termios.tcgetattr(fd)
     try:
         tty.setcbreak(fd)
-        node.say('W=short forward pulse, A=short left pulse, D=short right pulse')
+        node.say('W=forward pulse, A=left pulse, D=right pulse, R=reset after STOP')
         node.say('SPACE/X=STOP, Q=STOP and quit. No reverse. Focus this terminal.')
         node.say('Independent physical motor cutoff MUST be within reach.')
         while rclpy.ok():
