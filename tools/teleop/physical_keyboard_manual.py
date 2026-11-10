@@ -81,8 +81,9 @@ class KeyboardManual(Node):
             return 'Real actuation is disabled at launch'
         if not s.get('scan_fresh'):
             return 'LiDAR stale'
-        if s.get('scan_reason') != 'FRONT_MEASURED':
-            return 'Front LiDAR not clear (%s)' % s.get('scan_reason')
+        # While STOP, the mux reports the AUTO 90% scan criterion;
+        # MANUAL uses its own 75% threshold. Trust fresh numeric evidence
+        # and the measured distance instead of STOP-mode scan_reason.
         if s.get('front_valid_fraction', 0) < 0.75:
             return 'Insufficient front LiDAR returns'
         distance = s.get('nearest_front_m')
