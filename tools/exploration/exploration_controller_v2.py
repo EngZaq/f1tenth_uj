@@ -5,6 +5,17 @@ Hardware driving is intentionally blocked in this prototype.
 """
 import math
 import json
+import os
+import sys
+
+# With colcon --symlink-install, Python can resolve this script to its source
+# directory even when it is invoked via install/.../python_nodes. Add the
+# invocation directory so its installed sibling modules remain importable.
+# Do this before importing front_scan_guard and physical_path_guard.
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir not in sys.path:
+    sys.path.insert(0, _script_dir)
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
