@@ -19,7 +19,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from sensor_msgs.msg import Joy
 from std_msgs.msg import String
 
-PULSE_SEC = 0.80
+PULSE_SEC = 1.00
 SPEED_MPS = 0.12
 STEER_RAD = 0.06
 LOOP_SEC = 0.04
@@ -41,6 +41,9 @@ class KeyboardManual(Node):
         self.pulse_end = 0.0
         self.steer = 0.0
         self.active_seen = False
+        self.max_mux_speed_mps = 0.0
+        self.pulse_start = 0.0
+        self.command_speed = SPEED_MPS
         self.needs_reset = False  # a held, auto-repeating key cannot rearm motion
 
     def say(self, message):
@@ -84,8 +87,10 @@ class KeyboardManual(Node):
         # While STOP, the mux reports the AUTO 90% scan criterion;
         # MANUAL uses its own 75% threshold. Trust fresh numeric evidence
         # and the measured distance instead of STOP-mode scan_reason.
-        if s.get('front_valid_fraction', 0) < 0.75:
-            return 'Insufficient front LiDAR returns'
+        threshold = s.get('manual_min_front_valid_fraction', 0.75)
+        if s.get('front_valid_fraction', 0) < threshold:
+            return 'Insufficient front LiDAR returns (%.1f%% < %.1f%%)' % (
+                100*s.get('front_valid_fraction', 0), 100*threshold)
         distance = s.get('nearest_front_m')
         if distance is None or distance < 0.80:
             return 'Measured front obstacle or unknown range'
@@ -118,6 +123,14 @@ class KeyboardManual(Node):
             self.needs_reset = False
             self.say('Reset accepted: press W/A/D for one short pulse')
             return True
+        if key in ('+', '=') and self.state == 'IDLE':
+            self.command_speed = min(0.24, round(self.command_speed + .02, 2))
+            self.say('Selected manual pulse speed: %.2f m/s' % self.command_speed)
+            return True
+        if key in ('-', '_') and self.state == 'IDLE':
+            self.command_speed = max(0.10, round(self.command_speed - .02, 2))
+            self.say('Selected manual pulse speed: %.2f m/s' % self.command_speed)
+            return True
         if key not in ('w', 'a', 'd'):
             return True
         if self.needs_reset:
@@ -133,7 +146,7 @@ class KeyboardManual(Node):
         self.arm_start = time.monotonic()
         self.arm_sent = False
         self.say('Arming one %.2fs pulse: %.2fm/s, steer %+.3frad'
-                 % (PULSE_SEC, SPEED_MPS, self.steer))
+                 % (PULSE_SEC, self.command_speed, self.steer))
         return True
 
     def tick(self):
@@ -149,9 +162,11 @@ class KeyboardManual(Node):
             if (self.arm_sent and self.status is not None
                     and self.status.get('mode') == 'MANUAL_READY'):
                 self.state = 'PULSE'
+                self.pulse_start = now
                 self.pulse_end = now + PULSE_SEC
                 self.active_seen = False
-                self.say('Pulse started; SPACE/X stops, physical cutoff for emergency')
+                self.max_mux_speed_mps = 0.0
+                self.say('MANUAL_READY accepted; attempting pulse, awaiting mux confirmation')
                 return
             if now - self.arm_start > ARM_TIMEOUT_SEC:
                 self.stop('MANUAL_READY not confirmed')
@@ -161,17 +176,29 @@ class KeyboardManual(Node):
             if error:
                 self.stop(error)
                 return
-            if self.status and self.status.get('mode') == 'MANUAL_ACTIVE':
+            mux_mode = (self.status or {}).get('mode')
+            if mux_mode == 'STOP':
+                self.stop('Mux stopped: %s; last_stop=%s' % (
+                    (self.status or {}).get('reason'),
+                    (self.status or {}).get('last_stop_reason')))
+                return
+            if mux_mode == 'MANUAL_ACTIVE':
+                if not self.active_seen:
+                    self.say('CONFIRMED: mux entered MANUAL_ACTIVE')
                 self.active_seen = True
-            if self.active_seen and self.status and self.status.get('mode') == 'STOP':
-                self.stop('Mux latched STOP: ' +
-                          str(self.status.get('last_stop_reason')))
+                self.max_mux_speed_mps = max(
+                    self.max_mux_speed_mps,
+                    float((self.status or {}).get('speed_mps', 0)))
+            if now - self.pulse_start > .45 and not self.active_seen:
+                self.stop('Mux never entered MANUAL_ACTIVE (mode=%s; result=%s)' % (
+                    mux_mode, (self.status or {}).get('mode_request_result')))
                 return
             if now >= self.pulse_end:
-                self.stop('Pulse complete')
+                self.stop('Pulse complete; mux_active_seen=%s; peak_mux_speed=%.3f m/s' % (
+                    self.active_seen, self.max_mux_speed_mps))
                 return
+            self.publish_drive(self.command_speed, self.steer)
             self.publish_joy(True)
-            self.publish_drive(SPEED_MPS, self.steer)
 
 
 def main():
@@ -184,6 +211,7 @@ def main():
     try:
         tty.setcbreak(fd)
         node.say('W=forward pulse, A=left pulse, D=right pulse, R=reset after STOP')
+        node.say('+=increase pulse speed, -=decrease (0.10 to 0.24 m/s)')
         node.say('SPACE/X=STOP, Q=STOP and quit. No reverse. Focus this terminal.')
         node.say('Independent physical motor cutoff MUST be within reach.')
         while rclpy.ok():
