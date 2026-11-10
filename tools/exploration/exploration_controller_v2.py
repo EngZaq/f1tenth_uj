@@ -10,6 +10,16 @@ import rclpy
 from rclpy.node import Node
 from front_scan_guard import proposal_front_guard
 from physical_candidate_planner import select_steering
+
+# Candidate planning depends on an installed sibling module. If a stale
+# f1tenth_bringup install omits it, fail CLOSED without crashing the explorer
+# or silently disabling the actuator mux's swept-path gate.
+try:
+    from physical_path_guard import swept_path_guard
+    SWEPT_GUARD_IMPORT_ERROR = None
+except ImportError as exc:
+    swept_path_guard = None
+    SWEPT_GUARD_IMPORT_ERROR = str(exc)
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 from ackermann_msgs.msg import AckermannDriveStamped
@@ -55,6 +65,13 @@ class ExplorationController(Node):
         self.create_timer(0.05, self.tick)
         self.last_log_ns = 0
         self.get_logger().info('Explorer started; drive=%s' % self.get_parameter('enable_drive').value)
+        if (self.platform == 'physical'
+                and bool(self.get_parameter('enable_candidate_planning').value)
+                and swept_path_guard is None):
+            self.get_logger().error(
+                'Physical candidate planner DISABLED (fail-closed): %s. '
+                'Rebuild f1tenth_bringup and check python_nodes/physical_path_guard.py'
+                % SWEPT_GUARD_IMPORT_ERROR)
 
     def scan_cb(self, msg):
         self.scan = msg
@@ -97,7 +114,10 @@ class ExplorationController(Node):
                 # Never override a measured near obstacle or bad geometry.
                 if (bool(self.get_parameter('enable_candidate_planning').value)
                         and gate['reason'] == 'central_front_insufficient_valid_returns'):
-                    from physical_path_guard import swept_path_guard
+                    if swept_path_guard is None:
+                        self.last_plan_report = {
+                            'guard_import_error': SWEPT_GUARD_IMPORT_ERROR}
+                        return 0.0, 0.0, 'physical_path_guard_missing'
                     limit = float(self.get_parameter('max_steer').value)
                     requested_speed = min(
                         float(self.get_parameter('speed').value), 0.10)
@@ -174,7 +194,9 @@ class ExplorationController(Node):
         if self.platform == 'physical' and bool(self.get_parameter('enable_candidate_planning').value):
             # Lazy import keeps simulation-only direct script use independent
             # of the hardware package's installed physical_path_guard module.
-            from physical_path_guard import swept_path_guard
+            if swept_path_guard is None:
+                self.last_plan_report['guard_import_error'] = SWEPT_GUARD_IMPORT_ERROR
+                return 0.0, 0.0, 'physical_path_guard_missing'
             # Advisory candidate selection only: the mux independently re-checks
             # the REAL proposed turn against its 0.8 m swept vehicle envelope.
             # Never increase the calibrated steering limit or bypass obstacles.
