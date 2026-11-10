@@ -148,13 +148,20 @@ def run_ros():
             self.declare_parameter('enable_real_actuation', False)
             self.declare_parameter('enable_autonomous_actuation', False)
             self.declare_parameter('manual_min_front_valid', .75)
+            # Explicit, supervised manual-only low-visibility mode. Does not
+            # affect AUTO, 0.80m obstacle stop, actuator ownership or deadman.
+            self.declare_parameter('manual_allow_reduced_visibility', False)
             self.declare_parameter('auto_min_front_valid', .90)
             self.allow_real = bool(self.get_parameter('enable_real_actuation').value)
             self.allow_auto = bool(self.get_parameter('enable_autonomous_actuation').value)
             self.manual_fraction = float(self.get_parameter('manual_min_front_valid').value)
+            self.manual_low_visibility = bool(self.get_parameter('manual_allow_reduced_visibility').value)
             self.auto_fraction = float(self.get_parameter('auto_min_front_valid').value)
-            if not .75 <= self.manual_fraction <= 1.0:
-                raise ValueError('manual_min_front_valid must be >=0.75')
+            manual_floor = .35 if self.manual_low_visibility else .75
+            if not manual_floor <= self.manual_fraction <= 1.0:
+                raise ValueError('manual_min_front_valid must be >=%.2f' % manual_floor)
+            if self.manual_low_visibility:
+                self.get_logger().warn('EXPERIMENTAL MANUAL LINE-OF-SIGHT LOW-VISIBILITY MODE: front finite fraction >= %.2f; independent cutoff required; AUTO unchanged' % self.manual_fraction)
             if not .90 <= self.auto_fraction <= 1.0:
                 raise ValueError('auto_min_front_valid must be >=0.90')
             self.mode = 'STOP'
@@ -459,6 +466,8 @@ def run_ros():
                                     if self.auto_hold_at is not None else None),
                 'real_actuation_enabled': self.allow_real,
                 'autonomous_actuation_enabled': self.allow_auto,
+                'manual_min_front_valid_fraction': self.manual_fraction,
+                'manual_low_visibility_enabled': self.manual_low_visibility,
                 'deadman_button_5_held': joy_held,
                 'auto_hold_held_and_fresh': auto_hold_held,
                 'auto_hold_raw_value': self.auto_hold,
