@@ -90,6 +90,31 @@ class ExplorationController(Node):
                     self.get_parameter('min_front_valid_fraction').value),
             )
             if not gate['ready']:
+                # An open or poorly reflective straight-ahead sector can
+                # invalidate the narrow front-gate even though a different
+                # swept steering path might be fully observed. Only the
+                # explicit, opt-in candidate mode may consider recovery.
+                # Never override a measured near obstacle or bad geometry.
+                if (bool(self.get_parameter('enable_candidate_planning').value)
+                        and gate['reason'] == 'central_front_insufficient_valid_returns'):
+                    from physical_path_guard import swept_path_guard
+                    limit = float(self.get_parameter('max_steer').value)
+                    requested_speed = min(
+                        float(self.get_parameter('speed').value), 0.10)
+                    candidate_steer, report = select_steering(
+                        m, 0.0, self.last_candidate_steer, limit,
+                        requested_speed, swept_path_guard,
+                        lookahead_m=float(
+                            self.get_parameter('candidate_lookahead_m').value))
+                    self.last_plan_report = {
+                        'front_gate': gate,
+                        'candidate_planner': report,
+                        'recovery_speed_cap_mps': 0.10,
+                    }
+                    if report['ready']:
+                        self.last_candidate_steer = candidate_steer
+                        return candidate_steer, requested_speed, 'swept_only_observed_candidate'
+                    return 0.0, 0.0, 'central_front_invalid_and_no_observed_candidate'
                 return 0.0, 0.0, gate['reason']
             front_clearance = gate['nearest_m']
         else:
