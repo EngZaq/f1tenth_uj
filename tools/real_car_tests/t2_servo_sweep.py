@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""T2 servo sweep (F-02, F-06, F-17): servo value -> wheel angles, range, backlash, linear fit.
+
+Stack: t2_servo_only.launch.py (vesc_driver alone). Motor phases DISCONNECTED; the tool also
+reads back that every vesc_driver motor limit is 0 and that no mux / converter is running.
+The tool is the only /commands/servo/position publisher. Line input (both hands are free to
+measure); servo commands are slew-limited at 50 Hz.
+
+Rules (Moatasem, 14 Nov; two servos already burned on this car), values in vehicle_params.yaml t2:
+- Start inside the approved range 0.22-0.455 in 0.02 steps from the centre 0.320, then 0.01 steps.
+- Every new outward point is first visited for at most pulse_s (< 1 s) and the operator answers
+  "binding / noise?". Yes -> that side ends at the previous point and the tool never goes back.
+  No -> the point is confirmed and may be held for measuring (back to centre after max_hold_s).
+- A point outside the vesc_driver hard clip needs a relaunch with a clip just outside it
+  (that relaunch is the approval); the tool saves and prints the command, then --resume.
+- Any exit (q, Ctrl+C, SSH loss, error) slews back to the centre first.
+
+Wheel angles in degrees, + = wheel turned LEFT (servo below 0.320 steers left: gain -0.50).
+
+  t2_servo_sweep.py                  new sweep
+  t2_servo_sweep.py --resume DIR     continue after relaunching with a wider clip
+  t2_servo_sweep.py --fit DIR        fit only (offline)
+  t2_servo_sweep.py --self-test
+"""
+import argparse
+import csv
+import json
+import math
+import os
+import select
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import params as vp  # noqa: E402
+
+FIELDS = ['wall', 'kind', 'side', 'servo', 'servo_seen', 'left_deg', 'right_deg', 'binding', 'note']
+FORBIDDEN_NODES = {'physical_drive_mux', 'ackermann_to_vesc_node', 't1b_stop_converter',
+                   'real_car_test_runner'}
+ZERO_LIMITS = ['speed_min', 'speed_max', 'current_min', 'current_max', 'brake_min', 'brake_max',
+               'duty_cycle_min', 'duty_cycle_max', 'position_min', 'position_max']
+RATE_HZ = 50.0
+
+
+# ---------------------------------------------------------------- pure logic
+
+def next_point(side, edge, rules):
+    """Next outward servo value after the confirmed edge. side 'left' = decreasing servo."""
+    lo, hi = rules['approved_servo_min'], rules['approved_servo_max']
+    inside, outside = rules['inside_step'], rules['outside_step']
+    if side == 'left':
+        if edge - inside >= lo - 1e-9:
+            return round(edge - inside, 3)
+        return round(lo, 3) if edge > lo + 1e-9 else round(edge - outside, 3)
+    if edge + inside <= hi + 1e-9:
+        return round(edge + inside, 3)
+    return round(hi, 3) if edge < hi - 1e-9 else round(edge + outside, 3)
+
+
+def clip_needed(target, clip_lo, clip_hi, margin):
+    """None if the driver clip already allows target, else the clip pair to relaunch with."""
+    if clip_lo - 1e-9 <= target <= clip_hi + 1e-9:
+        return None
+    if target < clip_lo:
+        return round(target - margin, 3), clip_hi
+    return clip_lo, round(target + margin, 3)
+
+
+def equivalent_angle(left_deg, right_deg):
+    """Bicycle-model angle (rad) from the two front wheels: cot d = (cot dL + cot dR) / 2."""
+    a, b = math.radians(left_deg), math.radians(right_deg)
+    if a * b > 0 and abs(a) > 1e-3 and abs(b) > 1e-3:
+        return math.atan(2.0 / (1.0 / math.tan(a) + 1.0 / math.tan(b)))
+    return 0.5 * (a + b)
+
+
+def linear_fit(xs, ys):
+    """ys = offset + gain * xs; returns (offset, gain, rms residual in ys units)."""
+    n = len(xs)
+    if n < 2:
+        return None
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    gain = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    offset = my - gain * mx
+    rms = math.sqrt(sum((y - offset - gain * x) ** 2 for x, y in zip(xs, ys)) / n)
+    return offset, gain, rms
+
+
+def fit_rows(rows, centre):
+    """Servo -> angle results from measured rows (binding rows excluded)."""
+    meas = [r for r in rows if r['kind'] == 'measure' and r['left_deg'] not in ('', None)]
+    pts = [(float(r['servo']), equivalent_angle(float(r['left_deg']), float(r['right_deg'])), r)
+           for r in meas]
+    out = {'points': len(pts)}
+    if len(pts) < 3:
+        out['error'] = 'need >= 3 measured points'
+        return out
+    full = linear_fit([d for _, d, _ in pts], [s for s, _, _ in pts])
+    if full:
+        off, g, rms = full
+        out.update(offset=round(off, 4), gain=round(g, 4), rms_servo=round(rms, 5),
+                   rms_deg=round(math.degrees(rms / abs(g)), 3) if g else None,
+                   offset_disagrees_with_0320=abs(off - centre) > 0.005)
+    for name, sel in (('left', lambda d: d >= -1e-3), ('right', lambda d: d <= 1e-3)):
+        sub = [(s, d) for s, d, _ in pts if sel(d)]
+        f = linear_fit([d for _, d in sub], [s for s, _ in sub])
+        if f:
+            out['%s_offset' % name], out['%s_gain' % name] = round(f[0], 4), round(f[1], 4)
+            out['%s_rms_servo' % name] = round(f[2], 5)
+    angles = [d for _, d, _ in pts]
+    out['max_left_rad'] = round(max(angles), 4)
+    out['max_right_rad'] = round(min(angles), 4)
+    out['max_left_servo'] = min((s for s, d, _ in pts if d == max(angles)), default=None)
+    out['max_right_servo'] = max((s for s, d, _ in pts if d == min(angles)), default=None)
+    c = {r['note']: equivalent_angle(float(r['left_deg']), float(r['right_deg']))
+         for r in meas if r['note'] in ('centre_from_left', 'centre_from_right')}
+    if len(c) == 2:
+        dd = c['centre_from_left'] - c['centre_from_right']
+        out['backlash_deg'] = round(math.degrees(dd), 3)
+        if full and full[1]:
+            out['backlash_servo'] = round(abs(dd * full[1]), 4)
+    out['binding'] = [dict(servo=float(r['servo']), side=r['side'], note=r['note'])
+                      for r in rows if r['kind'] == 'pulse' and r['binding'] == 'yes']
+    return out
+
+
+def edges_from_rows(rows, centre):
+    """Resume: confirmed outward edge and done flag per side from earlier rows."""
+    state = {'left': [centre, False], 'right': [centre, False]}
+    for r in rows:
+        side = r['side']
+        if side not in state:
+            continue
+        s = float(r['servo'])
+        if r['kind'] == 'pulse' and r['binding'] == 'yes':
+            state[side][1] = True
+        elif r['kind'] == 'pulse' and r['binding'] == 'no':
+            if (side == 'left' and s < state[side][0]) or (side == 'right' and s > state[side][0]):
+                state[side][0] = s
+    return state
+
+
+def self_test():
+    p = vp.load()
+    rules = vp.get(p, 't2')
+    centre = float(vp.get(p, 'steering.servo_offset'))
+    left, e = [], centre
+    for _ in range(7):
+        e = next_point('left', e, rules)
+        left.append(e)
+    assert left == [0.30, 0.28, 0.26, 0.24, 0.22, 0.21, 0.20], left
+    right, e = [], centre
+    for _ in range(9):
+        e = next_point('right', e, rules)
+        right.append(e)
+    assert right == [0.34, 0.36, 0.38, 0.40, 0.42, 0.44, 0.455, 0.465, 0.475], right
+    assert clip_needed(0.22, 0.215, 0.46, 0.005) is None
+    assert clip_needed(0.21, 0.215, 0.46, 0.005) == (0.205, 0.46)
+    assert clip_needed(0.465, 0.215, 0.46, 0.005) == (0.215, 0.47)
+    assert abs(equivalent_angle(10, 10) - math.radians(10)) < 1e-9
+    assert abs(equivalent_angle(-5, -5) + math.radians(5)) < 1e-9
+    assert equivalent_angle(0.0, 0.0) == 0.0
+    d = equivalent_angle(22.0, 18.0)   # Ackermann: inner wheel turns more
+    assert math.radians(18) < d < math.radians(22)
+    # Fit recovers servo = 0.320 - 0.50 d on the right and -0.45 d on the left
+    rows = []
+    for s in (0.30, 0.28, 0.26, 0.34, 0.36, 0.38):
+        g = -0.45 if s < centre else -0.50
+        deg = math.degrees((s - centre) / g)
+        rows.append(dict(kind='measure', side='left' if s < centre else 'right', servo=s,
+                         left_deg=deg, right_deg=deg, binding='', note=''))
+    rows.append(dict(kind='measure', side='centre', servo=centre, left_deg=0.3, right_deg=0.3,
+                     binding='', note='centre_from_left'))
+    rows.append(dict(kind='measure', side='centre', servo=centre, left_deg=-0.2, right_deg=-0.2,
+                     binding='', note='centre_from_right'))
+    rows.append(dict(kind='pulse', side='left', servo=0.24, left_deg='', right_deg='',
+                     binding='yes', note=''))
+    f = fit_rows(rows, centre)
+    assert abs(f['left_gain'] + 0.45) < 0.02 and abs(f['right_gain'] + 0.50) < 0.02, f
+    assert abs(f['backlash_deg'] - 0.5) < 1e-6 and f['binding'][0]['servo'] == 0.24
+    assert f['max_left_servo'] == 0.26 and f['max_right_servo'] == 0.38
+    pulses = [dict(kind='pulse', side='left', servo=0.30, binding='no'),
+              dict(kind='pulse', side='left', servo=0.28, binding='no'),
+              dict(kind='pulse', side='right', servo=0.34, binding='no'),
+              dict(kind='pulse', side='right', servo=0.36, binding='yes')]
+    st = edges_from_rows(pulses, centre)
+    assert st == {'left': [0.28, False], 'right': [0.34, True]}, st
+    print('PASS: sweep order (0.02 inside 0.22-0.455, then 0.01), clip relaunch values,')
+    print('      equivalent Ackermann angle, linear + per-side fit, backlash, binding record,')
+    print('      resume edges. No ROS imported; nothing published.')
+
+
+# ---------------------------------------------------------------- operator I/O
+
+class Abort(Exception):
+    pass
+
+
+def ask(prompt, timeout):
+    """Line input with a timeout; None on timeout. Abort on EOF (SSH lost) or 'q'."""
+    print(prompt, end=' ', flush=True)
+    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    if not ready:
+        print('(timeout)')
+        return None
+    line = sys.stdin.readline()
+    if not line:
+        raise Abort('terminal closed')
+    line = line.strip()
+    if line.lower() == 'q':
+        raise Abort('operator quit')
+    return line
+
+
+# ---------------------------------------------------------------- ROS
+
+def run(args):
+    from run_test import RosSession, get_node_params
+    from rclpy.node import Node
+    from std_msgs.msg import Float64
+
+    p = vp.load()
+    rules = vp.get(p, 't2')
+    centre = float(vp.get(p, 'steering.servo_offset'))
+    slew = float(rules['slew_per_s']) / RATE_HZ
+
+    class Servo(Node):
+        def __init__(self):
+            super().__init__('t2_servo_sweep')
+            self.pub = self.create_publisher(Float64, '/commands/servo/position', 10)
+            self.create_subscription(Float64, '/sensors/servo_position_command', self.on_seen, 10)
+            self.lock = threading.Lock()
+            self.cmd = None          # nothing published until the checks pass
+            self.target = centre
+            self.seen = None
+            self.running = True
+            threading.Thread(target=self.loop, daemon=True).start()
+
+        def on_seen(self, msg):
+            self.seen = msg.data
+
+        def loop(self):
+            while self.running:
+                with self.lock:
+                    if self.cmd is not None:
+                        step = max(-slew, min(slew, self.target - self.cmd))
+                        self.cmd += step
+                        self.pub.publish(Float64(data=self.cmd))
+                time.sleep(1.0 / RATE_HZ)
+
+        def go(self, value, timeout=5.0):
+            """Slew to value and wait until the command is there."""
+            with self.lock:
+                self.target = value
+                if self.cmd is None:
+                    self.cmd = centre
+            t_end = time.monotonic() + timeout
+            while time.monotonic() < t_end:
+                with self.lock:
+                    if abs(self.cmd - value) < 1e-6:
+                        return
+                time.sleep(0.01)
+            raise Abort('servo command did not reach %.3f' % value)
+
+    with RosSession(Servo) as node:
+        try:
+            sweep(args, node, p, rules, centre, get_node_params)
+        finally:
+            try:
+                node.go(centre)
+                print('Servo back at centre %.3f.' % centre)
+            except Abort as exc:
+                print('WARNING: %s' % exc)
+            node.running = False
+            time.sleep(0.1)
+
+
+def sweep(args, node, p, rules, centre, get_node_params):
+    time.sleep(1.0)  # discovery
+    names = set(node.get_node_names())
+    if 'vesc_driver' not in names:
+        raise SystemExit('No /vesc_driver: start t2_servo_only.launch.py first.')
+    if names & FORBIDDEN_NODES:
+        raise SystemExit('T2 needs the servo-only stack; found %s.' % sorted(names & FORBIDDEN_NODES))
+    lim = get_node_params(node, 'vesc_driver', ZERO_LIMITS + ['servo_min', 'servo_max'])
+    nonzero = {k: lim.get(k) for k in ZERO_LIMITS if lim.get(k) != 0.0}
+    if nonzero:
+        raise SystemExit('vesc_driver motor limits must all be 0 for T2: %s' % nonzero)
+    clip_lo, clip_hi = float(lim['servo_min']), float(lim['servo_max'])
+    servo_pubs = len(node.get_publishers_info_by_topic('/commands/servo/position'))
+    motor_pubs = {t: len(node.get_publishers_info_by_topic(t)) for t in (
+        '/commands/motor/speed', '/commands/motor/current', '/commands/motor/brake',
+        '/commands/motor/duty_cycle', '/commands/motor/position')}
+    if servo_pubs != 1 or any(motor_pubs.values()):
+        raise SystemExit('Other command sources: servo publishers %d, motor %s' % (servo_pubs, motor_pubs))
+    print('vesc_driver: motor limits 0, servo clip %.3f..%.3f. Approved range %.3f..%.3f.' % (
+        clip_lo, clip_hi, rules['approved_servo_min'], rules['approved_servo_max']))
+    if ask('Motor phase wires disconnected? Type "disconnected":', 120) != 'disconnected':
+        raise SystemExit('Not confirmed.')
+
+    if args.resume:
+        out = Path(args.resume).expanduser()
+        with open(out / 'points.csv') as fp:
+            rows = list(csv.DictReader(fp))
+    else:
+        out = vp.evidence_root() / ('%s_t2_servo_sweep' % datetime.now().strftime('%Y%m%d_%H%M%S'))
+        out.mkdir(parents=True)
+        rows = []
+        with open(out / 'points.csv', 'w', newline='') as fp:
+            csv.DictWriter(fp, FIELDS).writeheader()
+    print('Results: %s' % out)
+
+    def record(**kw):
+        row = dict(wall=time.time(), servo_seen=node.seen, **kw)
+        row = {k: row.get(k, '') for k in FIELDS}
+        rows.append(row)
+        with open(out / 'points.csv', 'a', newline='') as fp:
+            csv.DictWriter(fp, FIELDS).writerow(row)
+
+    def measure(servo, side, note=''):
+        while True:
+            node.go(servo)
+            ans = ask('servo %.3f: left_deg right_deg [binding? b] (+ = left; s = skip):' % servo,
+                      float(rules['max_hold_s']))
+            if ans is None:
+                node.go(centre)
+                ask('Hold time over, servo at centre. Enter to go back to %.3f:' % servo, 3600)
+                continue
+            if ans.lower() == 's':
+                return
+            parts = ans.split()
+            try:
+                left, right = float(parts[0]), float(parts[1])
+            except (IndexError, ValueError):
+                print('Type two numbers, e.g. "12.5 10.0", or s / q.')
+                continue
+            record(kind='measure', side=side, servo=servo, left_deg=left, right_deg=right,
+                   binding='yes' if 'b' in parts[2:] else '', note=note)
+            return
+
+    node.go(centre)
+    if not args.resume:
+        measure(centre, 'centre', 'centre_start')
+    edges = edges_from_rows(rows, centre)
+    relaunch = None
+    for side in ('left', 'right'):
+        edge, done = edges[side]
+        while not done:
+            target = next_point(side, edge, rules)
+            need = clip_needed(target, clip_lo, clip_hi, float(rules['clip_margin']))
+            if need:
+                relaunch = need
+                print('%s side: next point %.3f is outside the driver clip %.3f..%.3f.' % (
+                    side, target, clip_lo, clip_hi))
+                break
+            # First visit: at most pulse_s at the new point, then back to the confirmed edge.
+            node.go(target)
+            time.sleep(float(rules['pulse_s']))
+            node.go(edge)
+            ans = None
+            while ans not in ('y', 'n'):
+                ans = (ask('Binding, end stop or noise at %.3f? [y/n]:' % target, 300) or '').lower()
+            record(kind='pulse', side=side, servo=target, binding='yes' if ans == 'y' else 'no')
+            if ans == 'y':
+                done = True
+                print('%s side ends at %.3f (binding at %.3f).' % (side, edge, target))
+                break
+            edge = target
+            measure(edge, side)
+        # Approach the centre from this side for the backlash pair.
+        node.go(centre)
+        measure(centre, 'centre', 'centre_from_%s' % side)
+        if relaunch:
+            break
+
+    fit = fit_rows(rows, centre)
+    (out / 'fit.json').write_text(json.dumps(fit, indent=2))
+    lines = ['# T2 servo sweep', '', 'Driver clip %.3f..%.3f; approved %.3f..%.3f.' % (
+        clip_lo, clip_hi, rules['approved_servo_min'], rules['approved_servo_max']), '',
+        '```', json.dumps(fit, indent=2), '```']
+    if relaunch:
+        lines += ['', 'Paused for a wider clip: %.3f..%.3f' % relaunch]
+    (out / 'README.md').write_text('\n'.join(lines) + '\n')
+    print(json.dumps(fit, indent=2))
+    if relaunch:
+        print('\nTo approve the next point: stop the launch, then relaunch with\n'
+              '  ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py '
+              'servo_min:=%.3f servo_max:=%.3f\nand continue with\n'
+              '  python3 %s --resume %s' % (relaunch[0], relaunch[1], os.path.realpath(__file__), out))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--resume', help='results folder of an earlier sweep')
+    ap.add_argument('--fit', help='fit an existing results folder (offline)')
+    ap.add_argument('--self-test', action='store_true')
+    args = ap.parse_args()
+    if args.self_test:
+        self_test()
+        return
+    if args.fit:
+        folder = Path(args.fit).expanduser()
+        with open(folder / 'points.csv') as fp:
+            rows = list(csv.DictReader(fp))
+        fit = fit_rows(rows, float(vp.get(vp.load(), 'steering.servo_offset')))
+        (folder / 'fit.json').write_text(json.dumps(fit, indent=2))
+        print(json.dumps(fit, indent=2))
+        return
+    if not sys.stdin.isatty():
+        raise SystemExit('T2 needs an interactive terminal.')
+    try:
+        run(args)
+    except Abort as exc:
+        print('Stopped: %s' % exc)
+
+
+if __name__ == '__main__':
+    main()

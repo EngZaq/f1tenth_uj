@@ -82,6 +82,16 @@ runner:                             # tools/real_car_tests/run_test.py
   min_post_stop_zero_s: 1.0         # zero is sent at least this long after every stop
   arm_timeout_s: 1.5                # MANUAL_READY must arrive within this
 
+t2:                                 # servo sweep rules (Moatasem, 14 Nov; two servos already burned)
+  approved_servo_min: 0.22          # start inside this range (trial yaml range)
+  approved_servo_max: 0.455
+  inside_step: 0.02                 # steps inside the approved range
+  outside_step: 0.01                # beyond it: one step per confirmation, clip relaunch each time
+  clip_margin: 0.005                # vesc_driver servo_min/max = last approved value -/+ this
+  pulse_s: 0.8                      # first visit of a new outward point: at most this long (< 1 s incl. servo travel)
+  max_hold_s: 120.0                 # any hold for measuring: back to centre after this
+  slew_per_s: 0.25                  # servo command rate limit (servo units / s)
+
 ground_check:                       # needed = v^2/(2*ramp) + steady + v^2/(2*decel) + margin + (bumper - lidar x)
   steady_length_m: 1.0
   margin_m: 0.5

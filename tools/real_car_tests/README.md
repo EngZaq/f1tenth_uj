@@ -60,6 +60,19 @@ T1b (stop-method comparison) uses `converter:=t1b stop_method:=speed0|brake|curr
 (`brake_current_a`, `brake_hold_s`) with `vesc_t1b_erpm4630.yaml` (brake_max 10 A) and
 `run_test.py --test t1b_stop`. The step gate is per stop method.
 
+Before T1b: fill in `docs/real_car/T1_VESC_TOOL_CHECKLIST.md`.
+
+## T2: servo sweep (servo-only stack)
+
+Motor phase wires disconnected. `t2_servo_only.launch.py servo_min:=.. servo_max:=..` starts only
+`vesc_driver` with every motor limit 0 (`vesc_t2_servo_only.yaml`) and the servo clip just outside
+the approved range. `t2_servo_sweep.py` (or `run_test.py --test t2_servo_sweep`) checks that, then
+sweeps from 0.320: 0.02 steps inside 0.22-0.455, 0.01 beyond. Each new outward point is visited
+for <= 0.8 s, then you answer "binding?"; only then is it held for measuring. A point outside
+the clip pauses the sweep and prints the relaunch command (the relaunch is your approval), then
+`--resume <folder>`. Results: `points.csv`, `fit.json` (gain, offset, residual, per-side fits,
+max angles, backlash).
+
 Offline checks (no ROS graph, nothing published): `run_test.py --self-test` (its shutdown probe
 uses an isolated domain 77, localhost only, no publishers), `analyze.py --self-test`,
-`t1b_stop_converter.py --self-test`.
+`t1b_stop_converter.py --self-test`, `t2_servo_sweep.py --self-test`.

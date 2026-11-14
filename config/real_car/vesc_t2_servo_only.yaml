@@ -1,0 +1,20 @@
+# vesc_driver for T2 servo sweep ONLY (tools/real_car_tests/t2_servo_only.launch.py).
+# Motor phase wires PHYSICALLY DISCONNECTED; in addition every motor command clips to 0
+# (speed, current, brake, duty, position: min = max = 0). t2_servo_sweep.py reads these back.
+# Servo clip: just outside the last range Moatasem approved. Start: approved 0.22-0.455.
+# A wider clip only by relaunching with servo_min:= / servo_max:= (vesc_driver reads limits at start).
+vesc_driver:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
+    speed_min: 0.0
+    speed_max: 0.0
+    current_min: 0.0
+    current_max: 0.0
+    brake_min: 0.0
+    brake_max: 0.0
+    duty_cycle_min: 0.0
+    duty_cycle_max: 0.0
+    position_min: 0.0
+    position_max: 0.0
+    servo_min: 0.215
+    servo_max: 0.46

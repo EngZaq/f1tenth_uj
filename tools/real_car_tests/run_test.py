@@ -672,6 +672,27 @@ class RosSession:
         return False
 
 
+def get_node_params(node, node_name, names):
+    """{name: value} read from a running node (bool/int/double/string); {} if unreachable.
+    Needs `node` spinning in another thread (RosSession)."""
+    from rcl_interfaces.srv import GetParameters
+    cli = node.create_client(GetParameters, '/%s/get_parameters' % node_name)
+    try:
+        if not cli.wait_for_service(timeout_sec=2.0):
+            return {}
+        fut = cli.call_async(GetParameters.Request(names=list(names)))
+        t_end = time.monotonic() + 2.0
+        while not fut.done() and time.monotonic() < t_end:
+            time.sleep(0.02)
+        if not fut.done() or fut.result() is None:
+            return {}
+        return {name: {1: v.bool_value, 2: v.integer_value, 3: v.double_value,
+                       4: v.string_value}.get(v.type)
+                for name, v in zip(names, fut.result().values)}
+    finally:
+        node.destroy_client(cli)
+
+
 def shutdown_probe(mode):
     """Self-test helper, run in a child process on an isolated domain. No publishers.
     Starts a session and a process group like the bag, then leaves through `mode`."""
@@ -772,7 +793,6 @@ def run(args):
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from ackermann_msgs.msg import AckermannDriveStamped
-    from rcl_interfaces.srv import GetParameters
     from sensor_msgs.msg import Joy, LaserScan
     from std_msgs.msg import String
     try:
@@ -864,21 +884,7 @@ def run(args):
             return w
 
         def get_params(self, node_name, names):
-            """{name: value} read from a running node (double/string/bool/int); {} if unreachable."""
-            cli = self.create_client(GetParameters, '/%s/get_parameters' % node_name)
-            if not cli.wait_for_service(timeout_sec=2.0):
-                return {}
-            fut = cli.call_async(GetParameters.Request(names=list(names)))
-            t_end = time.monotonic() + 2.0
-            while not fut.done() and time.monotonic() < t_end:
-                time.sleep(0.02)
-            if not fut.done() or fut.result() is None:
-                return {}
-            out = {}
-            for name, v in zip(names, fut.result().values):
-                out[name] = {1: v.bool_value, 2: v.integer_value, 3: v.double_value,
-                             4: v.string_value}.get(v.type)
-            return out
+            return get_node_params(self, node_name, names)
 
         def vesc_speed_max(self):
             return self.get_params('vesc_driver', ['speed_max']).get('speed_max')
