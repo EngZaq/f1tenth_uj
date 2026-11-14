@@ -22,6 +22,9 @@ from physical_stop_evidence import make_snapshot, save_snapshot
 
 MAX_SPEED = 0.35
 MAX_STEER = 0.10
+# Per-test caps (parameters max_speed_mps / max_steer_rad) can never exceed these.
+MAX_SPEED_CEILING = 1.5
+MAX_STEER_CEILING = 0.40
 COMMAND_TTL = 0.22
 JOY_TTL = 0.20
 SCAN_TTL = 0.22
@@ -31,7 +34,8 @@ AUTO_HOLD_TTL = 0.20  # supervised input, NOT a safety-rated physical switch
 
 
 def evaluate_request(mode, allow_real, allow_auto, deadman, deadman_fresh,
-                     cmd, cmd_fresh, scan_ok, odom_fresh, map_fresh):
+                     cmd, cmd_fresh, scan_ok, odom_fresh, map_fresh,
+                     max_speed=MAX_SPEED, max_steer=MAX_STEER):
     """Pure deterministic gate; returns speed, angle, explanation."""
     if not allow_real:
         return 0.0, 0.0, 'REAL_ACTUATION_DISABLED'
@@ -55,7 +59,16 @@ def evaluate_request(mode, allow_real, allow_auto, deadman, deadman_fresh,
     if speed <= 1e-5:
         return 0.0, 0.0, 'ZERO_REQUEST'
     # Clamp all requests to the commissioning speed and steering range.
-    return min(speed, MAX_SPEED), max(-MAX_STEER, min(MAX_STEER, steer)), 'PASS'
+    return min(speed, max_speed), max(-max_steer, min(max_steer, steer)), 'PASS'
+
+
+def validate_caps(max_speed, max_steer):
+    """Per-test caps: finite, > 0 and never above the hard ceilings."""
+    if not (math.isfinite(max_speed) and 0. < max_speed <= MAX_SPEED_CEILING):
+        raise ValueError('max_speed_mps must be in (0, %.2f]' % MAX_SPEED_CEILING)
+    if not (math.isfinite(max_steer) and 0. < max_steer <= MAX_STEER_CEILING):
+        raise ValueError('max_steer_rad must be in (0, %.2f]' % MAX_STEER_CEILING)
+    return max_speed, max_steer
 
 
 def front_evidence(scan, min_fraction=0.75, stop_m=0.80):
@@ -110,6 +123,20 @@ def self_test():
     assert evaluate_request('MANUAL_ACTIVE', True, False,
                             True, True, (.5, .4), True, True, True, True) == (
                                 .35, .10, 'PASS')
+    # Per-test caps clamp the same way; defaults above are unchanged.
+    assert evaluate_request('MANUAL_ACTIVE', True, False,
+                            True, True, (2.0, -.5), True, True, True, True,
+                            max_speed=1.0, max_steer=.30) == (1.0, -.30, 'PASS')
+    assert evaluate_request('MANUAL_ACTIVE', False, False,
+                            True, True, (1.0, 0), True, True, True, True,
+                            max_speed=1.5, max_steer=.40)[0] == 0
+    assert validate_caps(MAX_SPEED, MAX_STEER) == (MAX_SPEED, MAX_STEER)
+    for bad in ((1.6, .1), (.35, .41), (0., .1), (.35, 0.), (float('nan'), .1)):
+        try:
+            validate_caps(*bad)
+        except ValueError:
+            continue
+        raise AssertionError('cap accepted: %r' % (bad,))
     assert evaluate_request('MANUAL_ACTIVE', True, False,
                             True, True, (-.1, 0), True, True, True, True)[0] == 0
     assert evaluate_request('MANUAL_ACTIVE', True, False,
@@ -152,11 +179,20 @@ def run_ros():
             # affect AUTO, 0.80m obstacle stop, actuator ownership or deadman.
             self.declare_parameter('manual_allow_reduced_visibility', False)
             self.declare_parameter('auto_min_front_valid', .90)
+            # Per-test caps, set only by the real-car test launch; defaults unchanged.
+            self.declare_parameter('max_speed_mps', MAX_SPEED)
+            self.declare_parameter('max_steer_rad', MAX_STEER)
             self.allow_real = bool(self.get_parameter('enable_real_actuation').value)
             self.allow_auto = bool(self.get_parameter('enable_autonomous_actuation').value)
             self.manual_fraction = float(self.get_parameter('manual_min_front_valid').value)
             self.manual_low_visibility = bool(self.get_parameter('manual_allow_reduced_visibility').value)
             self.auto_fraction = float(self.get_parameter('auto_min_front_valid').value)
+            self.max_speed, self.max_steer = validate_caps(
+                float(self.get_parameter('max_speed_mps').value),
+                float(self.get_parameter('max_steer_rad').value))
+            if (self.max_speed, self.max_steer) != (MAX_SPEED, MAX_STEER):
+                self.get_logger().warn('TEST CAPS: max_speed_mps=%.2f max_steer_rad=%.2f (defaults %.2f / %.2f)' % (
+                    self.max_speed, self.max_steer, MAX_SPEED, MAX_STEER))
             manual_floor = .35 if self.manual_low_visibility else .75
             if not manual_floor <= self.manual_fraction <= 1.0:
                 raise ValueError('manual_min_front_valid must be >=%.2f' % manual_floor)
@@ -380,7 +416,8 @@ def run_ros():
                 active_hold, (joy_fresh if self.mode.startswith('MANUAL')
                               else auto_hold_fresh), cmd,
                 self.fresh(received, COMMAND_TTL, now),
-                request_scan_ok, odom_fresh, map_fresh)
+                request_scan_ok, odom_fresh, map_fresh,
+                max_speed=self.max_speed, max_steer=self.max_steer)
 
             if self.first_lap_completed:
                 self.mode = 'STOP'
@@ -466,6 +503,8 @@ def run_ros():
                                     if self.auto_hold_at is not None else None),
                 'real_actuation_enabled': self.allow_real,
                 'autonomous_actuation_enabled': self.allow_auto,
+                'max_speed_mps': self.max_speed,
+                'max_steer_rad': self.max_steer,
                 'manual_min_front_valid_fraction': self.manual_fraction,
                 'manual_low_visibility_enabled': self.manual_low_visibility,
                 'deadman_button_5_held': joy_held,
