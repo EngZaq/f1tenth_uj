@@ -81,6 +81,7 @@ def is_protected(topic):
 OWN_TOPICS = ['/manual/drive', '/joy', '/control/request_mode']
 FORBIDDEN_PUBLISHED = ['/commands/motor/brake', '/commands/motor/current',
                        '/commands/motor/duty_cycle', '/commands/motor/position']
+T1B_ONLY_TOPICS = ('/commands/motor/brake', '/commands/motor/current')  # t1b_stop_converter only
 
 
 # ---------------------------------------------------------------- pure logic
@@ -192,14 +193,17 @@ def step_gate(root, test, method, speed, steps, repeats):
         s = json.loads(summary.read_text())
         stops = s.get('stops', {})
         items = [x for x in stops.get('items', []) if x.get('samples')]
-        passed = [x for x in items if x.get('pass_no_rebound_over_300')]
-        ok = (len(items) >= repeats and len(passed) == len(items)
+        # Only stops from >= 80 % of the step ERPM count (analyze.py reached_steady); a rebound
+        # on ANY stop fails the run.
+        steady = [x for x in items if x.get('reached_steady')]
+        rebounds = [x for x in items if not x.get('pass_no_rebound_over_300')]
+        ok = (len(steady) >= repeats and not rebounds
               and s.get('vesc', {}).get('faults') == [0]
               and not str(stops.get('source', '')).startswith('runner_events'))
         if ok:
             return True, 'step %.2f m/s passed in %s' % (prev, folder.name)
-        seen.append('%s: %d/%d stops pass, faults %s' % (folder.name, len(passed), len(items),
-                                                          s.get('vesc', {}).get('faults')))
+        seen.append('%s: %d steady stops (need %d), %d rebound > 300, faults %s' % (
+            folder.name, len(steady), repeats, len(rebounds), s.get('vesc', {}).get('faults')))
     return False, 'step %.2f m/s (%s) has no passed run: %s' % (prev, method, '; '.join(seen) or 'none found')
 
 
@@ -517,13 +521,15 @@ def self_test():
         assert step_gate(root, 't1_stop', 'speed0', 0.5, steps, 5)[0]
         assert not step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)[0]
 
-        def fake(name, speed, live, method, n_pass, n_items, faults=(0,), analysed=True):
+        def fake(name, speed, live, method, n_pass, n_items, faults=(0,), analysed=True, n_steady=None):
             d = Path(root) / name
             d.mkdir()
             (d / 'run_info.json').write_text(json.dumps(dict(
                 live=live, stop_method=method, profile=dict(speed=speed))))
             if analysed:
-                items = [dict(samples=50, pass_no_rebound_over_300=k < n_pass) for k in range(n_items)]
+                steady = n_items if n_steady is None else n_steady
+                items = [dict(samples=50, pass_no_rebound_over_300=k < n_pass, reached_steady=k < steady)
+                         for k in range(n_items)]
                 (d / 'summary.json').write_text(json.dumps(dict(
                     stops=dict(source='vesc_speed_audit.log (sent_erpm)', items=items),
                     vesc=dict(faults=list(faults)))))
@@ -533,7 +539,10 @@ def self_test():
         fake('4_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 3, 3)       # too few
         fake('5_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 5, 5, faults=(0, 4))
         ok, why = step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)
-        assert not ok and 'not analysed' in why and '4/5' in why, why
+        assert not ok and 'not analysed' in why and '1 rebound' in why, why
+        fake('4b_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 5, 5, n_steady=3)  # short
+        ok, why = step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)
+        assert not ok and '3 steady stops' in why, why
         fake('6_t1b_stop_v0.50_brake5A_erpmmax4630_armed', 0.5, True, 'brake5A', 5, 5)    # other test
         assert not step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)[0]
         fake('7_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 5, 5)
@@ -558,7 +567,7 @@ def self_test():
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
     print('      no protected topic in the bag list, audit-log parsing, step resolution,')
-    print('      step/yaml/cap match, step gate (rebound, unanalysed, too few, fault, method), live rebound.')
+    print('      step/yaml/cap match, step gate (rebound, unanalysed, too few, not steady, fault, method), live rebound.')
     # Clean shutdown on every exit path, in child processes on an isolated domain
     # (ROS_DOMAIN_ID 77, localhost only). The probe node has no publishers.
     env = dict(os.environ, ROS_DOMAIN_ID='77', ROS_LOCALHOST_ONLY='1')
@@ -867,9 +876,11 @@ def run(args):
                 if n != 1:
                     return 'EXTRA_PUBLISHER(%s=%d)' % (t, n)
             for t in FORBIDDEN_PUBLISHED:
-                n = len(self.get_publishers_info_by_topic(t))
-                if n:
-                    return 'EXTRA_PUBLISHER(%s=%d)' % (t, n)
+                pubs = [i.node_name for i in self.get_publishers_info_by_topic(t)]
+                # T1b only: the t1b converter, alone, may publish brake and current.
+                allowed = t in T1B_ONLY_TOPICS and prof['converter'] == 't1b_stop_converter'
+                if pubs and not (allowed and pubs == ['t1b_stop_converter']):
+                    return 'EXTRA_PUBLISHER(%s=%s)' % (t, pubs)
             return None
 
         def world(self, now, half_width):

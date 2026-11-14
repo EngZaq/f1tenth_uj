@@ -28,6 +28,8 @@ from run_test import interval_stats, parse_audit_line  # noqa: E402
 UNDER_ERPM = 100.0
 REBOUND_FAIL_ERPM = 300.0   # T1 pass: no rebound > 300 ERPM
 STOP_WINDOW_S = 3.0
+STEADY_FRACTION = 0.8       # a stop counts for the step gate only from >= 80 % of the step ERPM
+REASON_MATCH_S = 0.5        # runner ZERO_COMMAND event <-> measured zero time
 JOY_TTL_S, COMMAND_TTL_S = 0.20, 0.22   # physical_drive_mux.py
 EXPECTED_HZ = {'/scan': 29.6, '/odom_rf2o': 20.0, '/imu/data_raw': 100.0,
                '/control/status': 20.0, '/manual/drive': 50.0, '/joy': 50.0}
@@ -45,11 +47,12 @@ def stop_metrics(t, erpm, current, tach, t0, t_end):
     if not idx:
         return {'samples': 0}
     a = [abs(erpm[i]) for i in idx]
-    running_min, rise, rise_at, peak_after_min = a[0], 0.0, None, 0.0
+    running_min, min_at, rise, rise_at, rise_from, peak_after_min = a[0], t[idx[0]], 0.0, None, None, 0.0
     for k, i in enumerate(idx):
-        running_min = min(running_min, a[k])
+        if a[k] < running_min:
+            running_min, min_at = a[k], t[i]
         if a[k] - running_min > rise:
-            rise, rise_at = a[k] - running_min, t[i] - t0
+            rise, rise_at, rise_from = a[k] - running_min, t[i] - t0, min_at - t0
             peak_after_min = a[k]
     under = next((t[i] - t0 for k, i in enumerate(idx) if a[k] < UNDER_ERPM), None)
     before = [i for i, x in enumerate(t) if x < t0]
@@ -59,6 +62,7 @@ def stop_metrics(t, erpm, current, tach, t0, t_end):
                rebound_rise_erpm=round(rise, 1),
                rebound_peak_erpm=round(peak_after_min, 1),
                rebound_at_s=None if rise_at is None else round(rise_at, 3),
+               rebound_from_s=None if rise_from is None else round(rise_from, 3),  # the dip it rises from
                max_abs_current_after_zero_a=round(max(abs(current[i]) for i in idx), 2),
                pass_no_rebound_over_300=rise <= REBOUND_FAIL_ERPM)
     if tach:
@@ -132,6 +136,7 @@ def self_test():
     assert not m['pass_no_rebound_over_300'] and 3600 < m['rebound_rise_erpm'] < 3800, m
     assert m['rebound_peak_erpm'] > 3800 and m['max_abs_current_after_zero_a'] == 18.0
     assert m['tach_counts_after_zero'] > 0 and m['time_to_under_100_erpm_s'] > 0.4
+    assert abs(m['rebound_from_s'] - 0.2) < 0.03 and abs(m['rebound_at_s'] - 0.4) < 0.03, m
     clean = [4200.0 if x < 1.0 else max(0.0, 4200 - (x - 1.0) * 8000) for x in t]
     m = stop_metrics(t, clean, cur, None, 1.0, 4.0)
     assert m['pass_no_rebound_over_300'] and abs(m['time_to_under_100_erpm_s'] - 0.52) < 0.03, m
@@ -192,6 +197,7 @@ def analyze(folder):
     data = read_bag(bag_dir)
     summary = {'folder': str(folder)}
     run_info = folder / 'run_info.json'
+    info = {}
     if run_info.exists():
         info = json.loads(run_info.read_text())
         summary['run'] = {k: info.get(k) for k in (
@@ -300,15 +306,27 @@ def analyze(folder):
          [float(e['wall']) for e in events if e['event'] == 'ZERO_COMMAND']),
     ]
     source, zeros = next(((s, z) for s, z in candidates if z), (None, []))
-    reasons = [e['detail'] for e in events if e['event'] == 'ZERO_COMMAND']
+    # Reasons by time, not by order: a repeat latched before it moved has no zero transition.
+    zero_events = [(float(e['wall']), e['detail']) for e in events if e['event'] == 'ZERO_COMMAND']
+    speed = (info.get('profile') or {}).get('speed')
+    target_erpm = float(speed) * gain if speed else None
     stops = []
     for k, t0 in enumerate(zeros):
         m = stop_metrics(ct, erpm, cur, tach, t0, t0 + STOP_WINDOW_S) if core else {'samples': 0}
-        m.update(index=k, t0=t0)
-        if k < len(reasons) and not str(source).startswith('runner_events'):
-            m['runner_reason'] = reasons[k]
+        m.update(index=k, t0=t0, stop_method=info.get('stop_method'))
+        near = sorted((abs(t - t0), d) for t, d in zero_events if abs(t - t0) <= REASON_MATCH_S)
+        if near:
+            m['runner_reason'] = near[0][1]
+        after = [s for t, s in t1b if t >= t0]
+        if after:  # what the T1b converter actually sent at this stop
+            m['t1b_action'] = '%s %s (%s)' % (after[0].get('out'), after[0].get('value'), after[0].get('phase'))
+        if target_erpm and m.get('samples'):
+            # Only a stop from (near) the step speed counts for the step gate.
+            m['target_erpm'] = round(target_erpm)
+            m['reached_steady'] = m['erpm_at_zero'] >= STEADY_FRACTION * target_erpm
         stops.append(m)
-    summary['stops'] = dict(source=source, count=len(stops), items=stops)
+    summary['stops'] = dict(source=source, count=len(stops), items=stops,
+                            steady_stops=sum(1 for s in stops if s.get('reached_steady')))
     if stops and any(s.get('samples') for s in stops):
         summary['stops']['all_pass_no_rebound_over_300'] = all(
             s.get('pass_no_rebound_over_300', True) for s in stops)
@@ -385,6 +403,47 @@ def make_plots(folder, ct, erpm, cur, mt, mv, zeros, pub, data):
     return made
 
 
+def plot_stop_detail(folder, n, before_s=0.5, after_s=1.5):
+    """stop<n>_detail.png from core.csv, motor_cmd.csv, summary.json (no bag read):
+    measured and sent ERPM, motor current, duty around stop n (1-based)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    folder = Path(folder).expanduser()
+    s = json.loads((folder / 'summary.json').read_text())
+    item = s['stops']['items'][n - 1]
+    t0 = float(item['t0'])
+    core = [r for r in read_csv(folder / 'core.csv') if -before_s <= float(r['t']) - t0 <= after_s]
+    cmd = [r for r in read_csv(folder / 'motor_cmd.csv') if -before_s - 0.2 <= float(r['t']) - t0 <= after_s]
+    tc = [float(r['t']) - t0 for r in core]
+    fig, axes = plt.subplots(3, 1, figsize=(9, 7.5), sharex=True)
+    a1, a2, a3 = axes
+    a1.plot(tc, [float(r['erpm']) for r in core], color=BLUE, lw=2, label='measured ERPM (/sensors/core)')
+    if cmd:
+        a1.step([float(r['t']) - t0 for r in cmd], [float(r['erpm_cmd']) for r in cmd], where='post',
+                color=ORANGE, lw=2, label='sent ERPM (%s)' % cmd[0]['source'].split(' ')[0])
+    if item.get('rebound_at_s') is not None:
+        a1.annotate('peak %.0f ERPM at +%.3f s' % (item['rebound_peak_erpm'], item['rebound_at_s']),
+                    xy=(item['rebound_at_s'], item['rebound_peak_erpm']),
+                    xytext=(item['rebound_at_s'] + 0.15, item['rebound_peak_erpm']),
+                    color=INK, fontsize=8, arrowprops=dict(arrowstyle='-', color=MUTED, lw=1))
+    a2.plot(tc, [float(r['current_motor_a']) for r in core], color=BLUE, lw=2)
+    a3.plot(tc, [float(r['duty']) for r in core], color=BLUE, lw=2)
+    for a in axes:
+        a.axvline(0, color=MUTED, lw=1, ls='--')
+    a1.text(0, a1.get_ylim()[1], ' zero sent', color=MUTED, fontsize=8, va='top')
+    style(a1, 'Stop %d (%s): ERPM, measured and sent' % (n, item.get('stop_method')), 'ERPM')
+    style(a2, 'Motor current', 'A')
+    style(a3, 'Duty cycle', 'duty')
+    a3.set_xlabel('time from zero command [s]', color=MUTED, fontsize=9)
+    a1.legend(frameon=False, fontsize=8, loc='upper right')
+    fig.tight_layout()
+    out = folder / ('stop%d_detail.png' % n)
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    return out, item
+
+
 def write_readme(folder, s):
     lines = ['## Analysis (analyze.py)', '']
     rp = s.get('runner_publish_intervals')
@@ -404,15 +463,19 @@ def write_readme(folder, s):
         lines.append('- Disarmed: mux output always zero = %s; vesc_driver sent ERPM always zero = %s' % (
             s['disarmed_mux_output_all_zero'], s['disarmed_vesc_sent_all_zero']))
     st = s['stops']
-    lines.append('- Stops: %d (from %s)' % (st['count'], st['source']))
+    lines.append('- Stops: %d (from %s), %d from >= 80 %% of the step ERPM (count for the step gate)' % (
+        st['count'], st['source'], st.get('steady_stops', 0)))
     for x in st['items']:
         if x.get('samples'):
-            lines.append('  - stop %d: at zero %.0f ERPM, < 100 ERPM after %s s, rebound +%.0f ERPM '
-                         '(peak %.0f), max current %.1f A, tach %s, pass=%s' % (
-                             x['index'] + 1, x['erpm_at_zero'], x['time_to_under_100_erpm_s'],
-                             x['rebound_rise_erpm'], x['rebound_peak_erpm'],
+            lines.append('  - stop %d [%s%s]: at zero %.0f ERPM%s, < 100 ERPM after %s s, rebound +%.0f ERPM '
+                         '(peak %.0f, dip +%s s, peak +%s s), max current %.1f A, tach %s, pass=%s, reason %s' % (
+                             x['index'] + 1, x.get('stop_method'),
+                             ', ' + x['t1b_action'] if x.get('t1b_action') else '',
+                             x['erpm_at_zero'], '' if x.get('reached_steady', True) else ' (NOT steady)',
+                             x['time_to_under_100_erpm_s'], x['rebound_rise_erpm'], x['rebound_peak_erpm'],
+                             x.get('rebound_from_s'), x.get('rebound_at_s'),
                              x['max_abs_current_after_zero_a'], x.get('tach_counts_after_zero'),
-                             x['pass_no_rebound_over_300']))
+                             x['pass_no_rebound_over_300'], x.get('runner_reason')))
     readme = folder / 'README.md'
     text = readme.read_text() if readme.exists() else ''
     text = text.split('## Analysis (analyze.py)')[0].rstrip() + '\n\n' + '\n'.join(lines) + '\n'
@@ -423,9 +486,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('folder', nargs='?')
     ap.add_argument('--self-test', action='store_true')
+    ap.add_argument('--stop-plot', type=int, metavar='N',
+                    help='after analysis: stopN_detail.png, -0.5..+1.5 s around stop N (1-based)')
     args = ap.parse_args()
     if args.self_test:
         self_test()
+    elif args.folder and args.stop_plot and (Path(args.folder).expanduser() / 'summary.json').exists():
+        out, item = plot_stop_detail(args.folder, args.stop_plot)
+        print('%s\n%s' % (out, json.dumps(item, indent=1)))
     elif args.folder:
         s = analyze(args.folder)
         print((Path(args.folder).expanduser() / 'README.md').read_text().split('## Analysis (analyze.py)')[-1])

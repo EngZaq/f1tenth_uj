@@ -2,6 +2,7 @@
 # Read-only preflight for real-car tests. Publishes nothing, starts no node.
 #   preflight.sh clean    before launching: no ROS process may be running (ros2 daemon allowed)
 #   preflight.sh stack    test stack running, runner NOT yet started
+#   preflight.sh stack t1b   same, with converter:=t1b (it alone publishes brake and current)
 # Exit code 0 = OK, 1 = mismatch (do not continue).
 source /opt/ros/humble/setup.bash
 source "$HOME/f1tenth_uj/install/setup.bash"
@@ -21,7 +22,9 @@ if [ "$mode" = "clean" ]; then
     if [ -n "$procs" ]; then echo "FAIL: ROS processes still running"; exit 1; fi
     echo "OK: clean"; exit 0
 fi
-[ "$mode" = "stack" ] || { echo "usage: $0 clean|stack"; exit 2; }
+[ "$mode" = "stack" ] || { echo "usage: $0 clean|stack [t1b]"; exit 2; }
+variant="${2:-}"
+want_bc=0; [ "$variant" = "t1b" ] && want_bc=1
 
 echo "== nodes"
 nodes=$(ros2 node list -a 2>/dev/null)
@@ -57,8 +60,8 @@ echo "== actuator chain"
 check /drive                       1 1
 check /commands/motor/speed        1 1
 check /commands/servo/position     1 1
-check /commands/motor/brake        0 1
-check /commands/motor/current      0 1
+check /commands/motor/brake        $want_bc 1
+check /commands/motor/current      $want_bc 1
 check /commands/motor/duty_cycle   0 1
 check /commands/motor/position     0 1
 echo "== mux inputs (runner not started yet: nobody publishes)"
