@@ -45,11 +45,13 @@ PROFILES = {
         live_allowed=False, converter='ackermann_to_vesc_node',
         note='Disarmed end-to-end check: keyboard deadman, mux handshake, bag, analysis.'),
     't1_stop': dict(
-        place='stand', steps=[0.5, 1.0, 1.5], steer=0.0, steady_s=3.0, repeats=5, post_zero_s=4.0,
+        place='stand', steps=[0.5, 1.0, 1.5], steer=0.0, steady_s=3.0, repeats=5, extra_repeats=3,
+        post_zero_s=4.0,
         live_allowed=True, converter='ackermann_to_vesc_node',
         note='T1a (F-01), wheels off the ground: ramp, 3 s steady, standard stop (speed 0). 5 repeats per step.'),
     't1b_stop': dict(
-        place='stand', steps=[0.5, 1.0, 1.5], steer=0.0, steady_s=3.0, repeats=5, post_zero_s=4.0,
+        place='stand', steps=[0.5, 1.0, 1.5], steer=0.0, steady_s=3.0, repeats=5, extra_repeats=3,
+        post_zero_s=4.0,
         live_allowed=True, converter='t1b_stop_converter',
         note='T1b (F-01), wheels off the ground: as T1a, stop method from t1b_stop_converter.'),
     't2_servo_sweep': dict(
@@ -261,6 +263,11 @@ class Machine:
         self.hard_s = self.ramp_s + self.steady_s + 0.5
         self.state = 'IDLE'
         self.repeat = 0
+        # Stepped profiles: a repeat that ended before steady speed does not count; up to
+        # extra_repeats more are offered (the step gate itself still needs 5 steady stops).
+        self.steady_count = 0
+        self.max_repeats = prof['repeats'] + prof.get('extra_repeats', 0)
+        self.stop_steady = False
         self.quit = False
         self.events = []
         self.repeats = []
@@ -301,7 +308,14 @@ class Machine:
         have = w.get('front_m', float('nan'))
         return (math.isfinite(have) and have >= need), need, have
 
+    def finished(self):
+        if 'extra_repeats' not in self.prof:
+            return self.quit or self.repeat >= self.prof['repeats']
+        return (self.quit or self.steady_count >= self.prof['repeats']
+                or self.repeat >= self.max_repeats)
+
     def stop(self, now, reason):
+        self.stop_steady = self.state == 'DRIVING' and getattr(self, 'steady_logged', False)
         self.state = 'STOPPING'
         self.t_stop = now
         self.tracker = ReboundTracker(self.last_erpm)  # ERPM at the zero = the latest telemetry
@@ -324,7 +338,7 @@ class Machine:
             if key == 's':
                 self.log(now, 'SKIP')
                 self.repeat += 1
-                if self.repeat >= self.prof['repeats']:
+                if self.finished():
                     self.state = 'DONE'
             elif key == 'n':
                 reason = self.fault(w)
@@ -424,11 +438,18 @@ class Machine:
                     ' > 300: STEP FAILS' if tr.rise > REBOUND_FAIL_ERPM else '')
             if self.repeats and self.repeats[-1]['repeat'] == self.repeat:
                 self.repeats[-1]['live_rebound_rise_erpm'] = round(tr.rise, 1)
+            if self.stop_steady:
+                self.steady_count += 1
+            elif 'extra_repeats' in self.prof:
+                detail += ' | ended before steady speed: NOT counted'
             self.log(now, 'REPEAT_END', detail)
             self.repeat += 1
             self.reset_deadman = True
-            self.state = 'DONE' if (self.quit or self.repeat >= self.prof['repeats']) else 'IDLE'
-            if self.state == 'IDLE':
+            self.state = 'DONE' if self.finished() else 'IDLE'
+            if self.state == 'IDLE' and 'extra_repeats' in self.prof:
+                self.message = '%s | steady stops %d/%d, repeat %d of max %d: release SPACE, press n.' % (
+                    detail, self.steady_count, self.prof['repeats'], self.repeat + 1, self.max_repeats)
+            elif self.state == 'IDLE':
                 self.message = '%s | Repeat %d/%d: release SPACE, press n to arm.' % (
                     detail, self.repeat + 1, self.prof['repeats'])
             return 0.0, 0.0, 0, 'STOP'
@@ -599,6 +620,37 @@ def self_test():
         m.step(t, None, False, world(telemetry_age=0.02, erpm=e, **live))
     m.step(5.0, None, False, world(telemetry_age=0.02, erpm=0.0, **live))
     assert m.repeats[-1]['live_rebound_rise_erpm'] == 3761.0 and 'STEP FAILS' in m.events[-1]['detail']
+    # Stepped profile: a repeat released during the ramp is not counted; DONE after 5 steady stops
+    m = Machine(dict(PROFILES['t1b_stop'], speed=1.0), p, live=True)
+    t = 0.0
+
+    def one_repeat(t, hold_s):
+        rdy = dict(real_actuation_enabled=True, mode='MANUAL_READY', last_mode_request='MANUAL')
+        m.step(t, 'n', False, world(telemetry_age=0.02, st=dict(real_actuation_enabled=True)))
+        m.step(t + 0.05, None, False, world(telemetry_age=0.02, st=rdy))
+        m.step(t + 0.1, None, True, world(telemetry_age=0.02, st=rdy))     # mux sees the deadman next tick
+        k = 0.15
+        while k < hold_s:
+            m.step(t + k, None, True, world(telemetry_age=0.02, erpm=8000.0, st=dict(rdy, mode='MANUAL_ACTIVE')))
+            k += 0.05
+            if m.state != 'DRIVING':
+                break
+        m.step(t + k, None, False, world(telemetry_age=0.02, erpm=8000.0, st=dict(rdy, mode='MANUAL_ACTIVE')))
+        m.step(t + k + 0.1, None, False, world(telemetry_age=0.02, erpm=0.0, st=dict(rdy, mode='STOP')))
+        m.step(t + k + 10.0, None, False, world(telemetry_age=0.02, erpm=0.0, st=dict(rdy, mode='STOP')))
+        return t + k + 11.0
+    t = one_repeat(t, 1.0)                                                # released in the ramp
+    assert m.steady_count == 0 and m.state == 'IDLE' and 'NOT counted' in m.events[-1]['detail']
+    for _ in range(4):
+        t = one_repeat(t, 9.0)                                            # PROFILE_DONE each
+    assert m.steady_count == 4 and m.state == 'IDLE'
+    t = one_repeat(t, 9.0)
+    assert m.steady_count == 5 and m.state == 'DONE' and m.repeat == 6, (m.steady_count, m.state, m.repeat)
+    m = Machine(dict(PROFILES['t1b_stop'], speed=1.0), p, live=True)
+    t = 0.0
+    for _ in range(8):
+        t = one_repeat(t, 1.0)
+    assert m.state == 'DONE' and m.steady_count == 0 and m.repeat == 8     # cap: 5 + 3 extra
     # T1b brake 5 A stop 5: a wobble at speed before the brake acts (3930 -> 4128) is not a rebound
     tr = ReboundTracker(3930.0)
     for t, e in ((0.02, 4128.0), (0.04, 3000.0), (0.06, 1500.0), (0.08, 150.0), (0.10, 83.0), (0.3, 0.0)):
@@ -612,7 +664,8 @@ def self_test():
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
     print('      no protected topic in the bag list, audit-log parsing, step resolution,')
-    print('      step/yaml/cap match, step gate (rebound, unanalysed, too few, not steady, fault, method), live rebound.')
+    print('      step/yaml/cap match, step gate (rebound, unanalysed, too few, not steady, fault, method), live rebound,')
+    print('      unsteady repeats not counted (extra repeats, capped).')
     # Clean shutdown on every exit path, in child processes on an isolated domain
     # (ROS_DOMAIN_ID 77, localhost only). The probe node has no publishers.
     env = dict(os.environ, ROS_DOMAIN_ID='77', ROS_LOCALHOST_ONLY='1')
