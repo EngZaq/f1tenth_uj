@@ -26,8 +26,19 @@ fi
 echo "== nodes"
 nodes=$(ros2 node list -a 2>/dev/null)
 echo "$nodes"
-dups=$(echo "$nodes" | sort | uniq -d)
-if [ -n "$dups" ]; then echo "FAIL: duplicate node names:"; echo "$dups"; fail=1; fi
+# F-14 (resolved 14 Nov): rf2o's CLaserOdometry2DNode holds a CLaserOdometry2D member that is
+# itself an rclcpp::Node, and the launch remap __node:=rf2o_laser_odometry renames both. So ONE
+# rf2o process shows the name twice. Allowed only in exactly that case; any other duplicate fails.
+rf2o_procs=$(pgrep -fc "rf2o_laser_odometry/rf2o_laser_odometry_node")
+dups=$(echo "$nodes" | sort | uniq -c | awk '$1 > 1 {print $1, $2}')
+while read -r count name; do
+    [ -z "$name" ] && continue
+    if [ "$name" = "/rf2o_laser_odometry" ] && [ "$count" = 2 ] && [ "$rf2o_procs" = 1 ]; then
+        echo "OK   duplicate $name x2 from one rf2o process (inner CLaserOdometry2D node, F-14)"
+    else
+        echo "FAIL duplicate node name: $name x$count (rf2o processes: $rf2o_procs)"; fail=1
+    fi
+done <<< "$dups"
 
 # topic  expected_publishers  expected_subscribers ("-" = do not check)
 check() {
@@ -56,10 +67,13 @@ check /joy                         0 1
 check /control/request_mode        0 1
 check /exploration/drive           0 -
 echo "== mux status"
-timeout 3 ros2 topic echo --once /control/status 2>/dev/null \
-    | python3 -c "import sys,json,yaml; s=json.loads(yaml.safe_load(sys.stdin.read())['data']); \
+# `ros2 topic echo` truncates strings at 128 chars unless --full-length, and --once ends
+# with a '---' document separator: take the first YAML document.
+timeout 3 ros2 topic echo --once --full-length /control/status 2>/dev/null \
+    | python3 -c "import sys,json,yaml; doc=next(yaml.safe_load_all(sys.stdin.read())); \
+s=json.loads(doc['data']); \
 print({k: s.get(k) for k in ('mode','reason','real_actuation_enabled','max_speed_mps','max_steer_rad', \
-'front_valid_fraction','nearest_front_m','scan_reason')})" \
+'front_valid_fraction','nearest_front_m','scan_reason','drive_subscriber_count','motor_subscriber_count')})" \
     || { echo "FAIL: no /control/status"; fail=1; }
 
 [ $fail = 0 ] && echo "OK: stack" || echo "FAIL: fix the above before running"

@@ -10,6 +10,8 @@ Checks: topic rates, scan lengths (F-09), runner publish intervals and the inter
 the bag received on /manual/drive and /joy (mux TTLs 0.22 / 0.20 s, F-13),
 mux mode transitions with last_stop_reason, disarmed output = zero, and per stop:
 ERPM and current after zero, time to < 100 ERPM, rebound, tachometer counts.
+Command side (the bag never records /drive or /commands/*): vesc_speed_audit.log copied
+by the runner, else the mux output in /control/status.
 """
 import argparse
 import csv
@@ -20,14 +22,15 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from run_test import interval_stats  # noqa: E402
+import params as vp  # noqa: E402
+from run_test import interval_stats, parse_audit_line  # noqa: E402
 
 UNDER_ERPM = 100.0
 REBOUND_FAIL_ERPM = 300.0   # T1 pass: no rebound > 300 ERPM
 STOP_WINDOW_S = 3.0
 JOY_TTL_S, COMMAND_TTL_S = 0.20, 0.22   # physical_drive_mux.py
 EXPECTED_HZ = {'/scan': 29.6, '/odom_rf2o': 20.0, '/imu/data_raw': 100.0,
-               '/control/status': 20.0, '/manual/drive': 50.0, '/joy': 50.0, '/drive': 20.0}
+               '/control/status': 20.0, '/manual/drive': 50.0, '/joy': 50.0}
 
 # Reference palette (dataviz skill): series 1 blue, series 2 orange; ink and grid neutrals.
 BLUE, ORANGE, INK, MUTED, GRID = '#2a78d6', '#eb6834', '#0b0b0b', '#52514e', '#e4e3df'
@@ -66,6 +69,21 @@ def stop_metrics(t, erpm, current, tach, t0, t_end):
 def zero_transitions(t, cmd, eps=1.0):
     """Times where the commanded ERPM goes from > eps to <= eps."""
     return [t[i] for i in range(1, len(t)) if abs(cmd[i - 1]) > eps and abs(cmd[i]) <= eps]
+
+
+def command_series(audit_lines, statuses, legacy, gain):
+    """ERPM command actually sent, best source first. The bag never records /drive or
+    /commands/* (they are mux-protected), so: vesc_driver audit log (sent_erpm), else
+    mux output speed_mps x gain from /control/status, else /commands/motor/speed in old bags."""
+    audit = [a for a in (parse_audit_line(x) for x in audit_lines) if a]
+    if audit:
+        return 'vesc_speed_audit.log (sent_erpm)', [a[0] for a in audit], [a[2] for a in audit]
+    if statuses:
+        return ('/control/status speed_mps x %.0f' % gain, [t for t, _ in statuses],
+                [float(s.get('speed_mps') or 0.0) * gain for _, s in statuses])
+    if legacy:
+        return '/commands/motor/speed (legacy bag)', [t for t, _ in legacy], [m.data for _, m in legacy]
+    return None, [], []
 
 
 def mode_transitions(statuses):
@@ -111,8 +129,17 @@ def self_test():
                            (3, {'mode': 'STOP', 'last_stop_reason': 'JOYSTICK_DEADMAN_RELEASED_OR_STALE'})])
     assert [x['to_mode'] for x in tr] == ['STOP', 'MANUAL_READY', 'STOP']
     assert tr[-1]['last_stop_reason'].startswith('JOYSTICK')
+    line = '[INFO] [%.3f] [vesc_driver]: VESC_SPEED_AUDIT received_erpm=%.3f sent_erpm=%.3f'
+    audit = [line % (10.0, 4207, 3500), line % (10.05, 0, 0), '[INFO] [10.1] [vesc_driver]: other']
+    st = [(9.0, {'speed_mps': 0.3}), (9.05, {'speed_mps': 0.0})]
+    src, t, e = command_series(audit, st, [], 8414.0)
+    assert src.startswith('vesc_speed_audit') and t == [10.0, 10.05] and e == [3500.0, 0.0]
+    src, t, e = command_series([], st, [], 8414.0)
+    assert src.startswith('/control/status') and abs(e[0] - 2524.2) < 1e-6 and e[1] == 0.0
+    assert zero_transitions(t, e) == [9.05]
+    assert command_series([], [], [], 8414.0) == (None, [], [])
     print('PASS: stop metrics (12 Nov rebound shape fails, clean decay passes), zero detection,')
-    print('      mux transitions. No bag read; nothing published.')
+    print('      mux transitions, command source (audit > mux status > legacy). No bag read.')
 
 
 # ---------------------------------------------------------------- bag
@@ -196,11 +223,8 @@ def analyze(folder):
                                  'mode_request_result', 'front_valid_fraction', 'nearest_front_m'])
         wr.writeheader()
         wr.writerows(trans)
-    drive = [m.drive.speed for _, m in data.get('/drive', [])]
-    summary['drive_max_speed_mps'] = max(drive) if drive else None
-    if statuses and not any(s.get('real_actuation_enabled') for _, s in statuses):
-        # None = no /drive in the bag: nothing proven, not a pass.
-        summary['disarmed_output_all_zero'] = (max(drive) == 0.0) if drive else None
+    mux_out = [float(s.get('speed_mps') or 0.0) for _, s in statuses]
+    summary['mux_out_max_speed_mps'] = max(mux_out) if mux_out else None
 
     # VESC telemetry and commands.
     core = data.get('/sensors/core', [])
@@ -216,13 +240,15 @@ def analyze(folder):
             s = m.state
             wr.writerow([t, s.speed, s.current_motor, s.current_input, s.duty_cycle,
                          s.voltage_input, s.displacement, s.fault_code])
-    cmd = data.get('/commands/motor/speed', [])
-    mt = [t for t, _ in cmd]
-    mv = [m.data for _, m in cmd]
+    audit_path = folder / 'vesc_speed_audit.log'
+    audit_lines = audit_path.read_text().splitlines() if audit_path.exists() else []
+    gain = float(vp.get(vp.load(), 'drivetrain.speed_to_erpm_gain'))
+    cmd_source, mt, mv = command_series(audit_lines, statuses, data.get('/commands/motor/speed', []), gain)
+    summary['command_source'] = cmd_source
     with open(folder / 'motor_cmd.csv', 'w', newline='') as fp:
         wr = csv.writer(fp)
-        wr.writerow(['t', 'erpm_cmd'])
-        wr.writerows(zip(mt, mv))
+        wr.writerow(['t', 'erpm_cmd', 'source'])
+        wr.writerows((t, v, cmd_source) for t, v in zip(mt, mv))
     if core:
         summary['vesc'] = dict(max_abs_erpm=round(max(abs(x) for x in erpm), 1),
                                max_abs_current_a=round(max(abs(x) for x in cur), 2),
@@ -230,20 +256,27 @@ def analyze(folder):
                                voltage_min_v=round(min(m.state.voltage_input for _, m in core), 2))
     if mv:
         summary['max_erpm_command'] = max(mv)
+    if statuses and not any(s.get('real_actuation_enabled') for _, s in statuses):
+        # Disarmed proof: the mux reported zero output AND (if logged) vesc_driver sent zero.
+        # None = no data, which is not a pass.
+        summary['disarmed_mux_output_all_zero'] = max(mux_out) == 0.0
+        audit_sent = [a[2] for a in (parse_audit_line(x) for x in audit_lines) if a]
+        summary['disarmed_vesc_sent_all_zero'] = (
+            max(abs(x) for x in audit_sent) == 0.0) if audit_sent else None
 
-    # Stops: zero transitions on the real motor command; else the runner's ZERO_COMMAND events.
+    # Stops: zero transitions of the command actually sent; else the runner's ZERO_COMMAND events.
     events = read_csv(folder / 'runner_events.csv')
     zeros = zero_transitions(mt, mv)
-    source = '/commands/motor/speed'
+    source = cmd_source
     if not zeros:
         zeros = [float(e['wall']) for e in events if e['event'] == 'ZERO_COMMAND']
-        source = 'runner_events.csv (motor command never nonzero)'
+        source = 'runner_events.csv (command never nonzero)'
     reasons = [e['detail'] for e in events if e['event'] == 'ZERO_COMMAND']
     stops = []
     for k, t0 in enumerate(zeros):
         m = stop_metrics(ct, erpm, cur, tach, t0, t0 + STOP_WINDOW_S) if core else {'samples': 0}
         m.update(index=k, t0=t0)
-        if k < len(reasons) and source.startswith('/commands'):
+        if k < len(reasons) and source == cmd_source:
             m['runner_reason'] = reasons[k]
         stops.append(m)
     summary['stops'] = dict(source=source, count=len(stops), items=stops)
@@ -337,8 +370,10 @@ def write_readme(folder, s):
     lines.append('- Topic rates below 80 %% of expected: %s; missing: %s' % (low or 'none',
                                                                              s['expected_topics_missing'] or 'none'))
     lines.append('- Mux STOP reasons: %s' % s['mux_stop_reasons'])
-    if 'disarmed_output_all_zero' in s:
-        lines.append('- Disarmed: /drive always zero = %s' % s['disarmed_output_all_zero'])
+    lines.append('- Command source: %s' % s.get('command_source'))
+    if 'disarmed_mux_output_all_zero' in s:
+        lines.append('- Disarmed: mux output always zero = %s; vesc_driver sent ERPM always zero = %s' % (
+            s['disarmed_mux_output_all_zero'], s['disarmed_vesc_sent_all_zero']))
     st = s['stops']
     lines.append('- Stops: %d (from %s)' % (st['count'], st['source']))
     for x in st['items']:

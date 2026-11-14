@@ -19,6 +19,7 @@ import csv
 import json
 import math
 import os
+import re
 import select
 import signal
 import statistics
@@ -43,12 +44,22 @@ PROFILES = {
         note='Disarmed end-to-end check: keyboard deadman, mux handshake, bag, analysis.'),
 }
 
+# The bag is a subscriber: it must never touch the actuator chain, or the mux counts
+# 2 subscribers and latches ACTUATOR_GRAPH_OWNERSHIP_FAULT (dry run 14 Nov). Command side
+# comes from /control/status (mux output speed_mps / steer_rad), /manual/drive,
+# /sensors/servo_position_command and the vesc_driver VESC_SPEED_AUDIT log (sent ERPM).
 BAG_TOPICS = [
     '/scan', '/odom_rf2o', '/odom_vesc_observe', '/imu/data_raw', '/sensors/core',
-    '/sensors/servo_position_command', '/drive', '/commands/motor/speed',
-    '/commands/motor/brake', '/commands/servo/position', '/control/status',
+    '/sensors/servo_position_command', '/control/status',
     '/manual/drive', '/joy', '/control/request_mode', '/tf', '/tf_static',
 ]
+PROTECTED_TOPICS = ('/drive', '/drive_calibrated')
+PROTECTED_PREFIXES = ('/commands/',)
+
+
+def is_protected(topic):
+    """Actuator-chain topics nothing in these tools may publish to or subscribe to."""
+    return topic in PROTECTED_TOPICS or topic.startswith(PROTECTED_PREFIXES)
 
 # Topics this runner must own alone, and actuator topics nobody may publish in this stack.
 OWN_TOPICS = ['/manual/drive', '/joy', '/control/request_mode']
@@ -394,10 +405,149 @@ def self_test():
     assert m.state == 'DONE'
     st = interval_stats([0.02] * 99 + [0.25])
     assert st['over_0.20_s'] == 1 and st['p50_s'] == 0.02
+    # The bag must never subscribe to the actuator chain (dry run 14 Nov: drive_subscriber_count=2).
+    bad = [t for t in BAG_TOPICS if is_protected(t)]
+    assert not bad, 'protected topics in BAG_TOPICS: %s' % bad
+    assert all(is_protected(t) for t in ('/drive', '/drive_calibrated', '/commands/motor/speed',
+                                         '/commands/motor/brake', '/commands/servo/position'))
+    assert not any(is_protected(t) for t in ('/control/status', '/manual/drive', '/sensors/core'))
+    a = parse_audit_line('[INFO] [1794653015.653271431] [vesc_driver]: '
+                         'VESC_SPEED_AUDIT received_erpm=4207.000 sent_erpm=3500.000')
+    assert a == (1794653015.653271431, 4207.0, 3500.0), a
+    assert parse_audit_line('[INFO] [1.0] [vesc_driver]: Connected to VESC') is None
     print('PASS: deadman timing, ramp, speed-fit length, front range, config = vehicle_params,')
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
-    print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop.')
-    print('No ROS imported; nothing published.')
+    print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
+    print('      no protected topic in the bag list, audit-log parsing.')
+    # Clean shutdown on every exit path, in child processes on an isolated domain
+    # (ROS_DOMAIN_ID 77, localhost only). The probe node has no publishers.
+    env = dict(os.environ, ROS_DOMAIN_ID='77', ROS_LOCALHOST_ONLY='1')
+    for mode, want in (('normal', 0), ('systemexit', 3), ('keyboardinterrupt', None)) * 2:
+        res = subprocess.run([sys.executable, os.path.realpath(__file__), '--shutdown-probe', mode],
+                             env=env, capture_output=True, text=True, timeout=60)
+        aborted = res.returncode in (-signal.SIGABRT, 134) or 'terminate called' in res.stderr
+        assert not aborted, 'abort on %s exit:\n%s' % (mode, res.stderr[-800:])
+        assert want is None or res.returncode == want, (mode, res.returncode, res.stderr[-800:])
+        assert 'CHILD STILL RUNNING' not in res.stderr, mode
+    print('PASS: shutdown probe x2 (normal, SystemExit, KeyboardInterrupt): no abort, spin thread')
+    print('      joined, child process group stopped. Isolated domain 77; nothing published.')
+
+
+# ---------------------------------------------------------------- processes and logs
+
+AUDIT_RE = re.compile(r'\[(\d+\.\d+)\] \[vesc_driver\]: VESC_SPEED_AUDIT '
+                      r'received_erpm=(-?[\d.]+) sent_erpm=(-?[\d.]+)')
+
+
+def parse_audit_line(line):
+    """vesc_driver audit line (teammates' uncommitted build) -> (wall_s, received, sent) or None."""
+    m = AUDIT_RE.search(line)
+    return (float(m.group(1)), float(m.group(2)), float(m.group(3))) if m else None
+
+
+def ros_log_dir():
+    if os.environ.get('ROS_LOG_DIR'):
+        return Path(os.environ['ROS_LOG_DIR'])
+    return Path(os.environ.get('ROS_HOME') or os.path.expanduser('~/.ros')) / 'log'
+
+
+def vesc_driver_pid():
+    """The single running vesc_driver_node, else None (none or several)."""
+    out = subprocess.run(['pgrep', '-f', 'vesc_driver/vesc_driver_node'],
+                         capture_output=True, text=True).stdout.split()
+    return int(out[0]) if len(out) == 1 else None
+
+
+def copy_vesc_audit(out, pid, t0, t1):
+    """Copy VESC_SPEED_AUDIT lines in [t0-2, t1+2] into the results folder: the record of
+    the ERPM vesc_driver actually sent. Returns a note for runner_summary.json."""
+    if pid is None:
+        return 'no /vesc_driver in this ROS graph, or not exactly one vesc_driver process'
+    files = sorted(ros_log_dir().glob('vesc_driver_node_%d_*.log' % pid))
+    if not files:
+        return 'no log file for vesc_driver pid %d in %s' % (pid, ros_log_dir())
+    n = 0
+    with open(files[-1]) as src, open(out / 'vesc_speed_audit.log', 'w') as dst:
+        for line in src:
+            a = parse_audit_line(line)
+            if a and t0 - 2.0 <= a[0] <= t1 + 2.0:
+                dst.write(line)
+                n += 1
+    if not n:
+        return 'no VESC_SPEED_AUDIT lines in the run window (audit build not active?)'
+    return 'copied %d VESC_SPEED_AUDIT lines from %s' % (n, files[-1])
+
+
+def stop_process_group(proc, timeout=15.0):
+    """SIGINT the whole group (ros2 bag finalises its file), then SIGTERM, then SIGKILL."""
+    if proc is None or proc.poll() is not None:
+        return None if proc is None else proc.returncode
+    for sig, wait in ((signal.SIGINT, timeout), (signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            return proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            continue
+    return proc.poll()
+
+
+class RosSession:
+    """rclpy context + one spin thread, torn down in order on every exit path:
+    executor shutdown, join the spin thread, destroy the node, rclpy shutdown.
+    Shutting rclpy down under a running spin thread aborts the process
+    ("terminate called without an active exception", dry run 14 Nov)."""
+
+    def __init__(self, node_factory):
+        self.node_factory = node_factory
+
+    def __enter__(self):
+        import rclpy
+        from rclpy.executors import SingleThreadedExecutor
+        from rclpy.signals import SignalHandlerOptions
+        # No rclpy SIGINT handler: it would shut the context down before the zero commands
+        # in `finally` are published. Ctrl+C -> KeyboardInterrupt -> finally -> zero.
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+        try:
+            self.node = self.node_factory()
+            self.executor = SingleThreadedExecutor()
+            self.executor.add_node(self.node)
+        except BaseException:
+            rclpy.try_shutdown()
+            raise
+        self.thread = threading.Thread(target=self.executor.spin, name='ros_spin', daemon=True)
+        self.thread.start()
+        return self.node
+
+    def __exit__(self, *exc):
+        import rclpy
+        self.executor.shutdown(timeout_sec=2.0)
+        self.thread.join(timeout=3.0)
+        if self.thread.is_alive():
+            say('WARNING: ROS spin thread did not stop')
+        self.node.destroy_node()
+        rclpy.try_shutdown()
+        return False
+
+
+def shutdown_probe(mode):
+    """Self-test helper, run in a child process on an isolated domain. No publishers.
+    Starts a session and a process group like the bag, then leaves through `mode`."""
+    from rclpy.node import Node
+    child = subprocess.Popen(['sleep', '30'], start_new_session=True)
+    try:
+        with RosSession(lambda: Node('shutdown_probe')):
+            time.sleep(0.3)
+            if mode == 'systemexit':
+                raise SystemExit(3)
+            if mode == 'keyboardinterrupt':
+                raise KeyboardInterrupt
+    finally:
+        stop_process_group(child)
+        if child.poll() is None:
+            print('CHILD STILL RUNNING', file=sys.stderr)
 
 
 # ---------------------------------------------------------------- terminal
@@ -467,8 +617,6 @@ def say(text):
 # ---------------------------------------------------------------- ROS
 
 def run(args):
-    import rclpy
-    from rclpy.executors import SingleThreadedExecutor
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from ackermann_msgs.msg import AckermannDriveStamped
@@ -490,7 +638,6 @@ def run(args):
     if mism:
         raise SystemExit('config/real_car disagrees with vehicle_params.yaml:\n  ' + '\n  '.join(mism))
     r = vp.get(p, 'runner')
-    period = 1.0 / float(r['publish_hz'])
 
     class RunnerNode(Node):
         def __init__(self):
@@ -577,36 +724,33 @@ def run(args):
             v = fut.result().values[0]
             return v.double_value if v.type == 3 else None
 
-    # No rclpy SIGINT handler: it would shut the context down before the zero commands
-    # in `finally` are published. Ctrl+C -> KeyboardInterrupt -> finally -> zero.
-    from rclpy.signals import SignalHandlerOptions
-    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
-    node = RunnerNode()
-    executor = SingleThreadedExecutor()
-    executor.add_node(node)
-    threading.Thread(target=executor.spin, daemon=True).start()
+    if any(is_protected(t) for t in BAG_TOPICS):
+        raise SystemExit('BAG_TOPICS contains an actuator-chain topic: refusing.')
+    # Every exit below (return, refusal, SystemExit, Ctrl+C) leaves through RosSession,
+    # which stops the spin thread before rclpy shuts down.
+    with RosSession(RunnerNode) as node:
+        drive_session(args, p, prof, r, node)
 
+
+def drive_session(args, p, prof, r, node):
+    period = 1.0 / float(r['publish_hz'])
     t_end = time.monotonic() + 3.0
     while node.status is None and time.monotonic() < t_end:
         time.sleep(0.05)
     if node.status is None:
-        rclpy.shutdown()
         raise SystemExit('No /control/status in 3 s: start the test stack first.')
     st = dict(node.status)
     real = bool(st.get('real_actuation_enabled'))
     if real != args.live:
-        rclpy.shutdown()
         raise SystemExit('Mux real_actuation_enabled=%s but --live=%s: refusing.' % (real, args.live))
     cap = float(st.get('max_speed_mps', vp.get(p, 'caps.mux_default_max_speed_mps')))
     steer_cap = float(st.get('max_steer_rad', vp.get(p, 'caps.mux_default_max_steer_rad')))
     if prof['speed'] > cap + 1e-9 or abs(prof['steer']) > steer_cap + 1e-9:
-        rclpy.shutdown()
         raise SystemExit('Profile %.2f m/s / %.2f rad exceeds mux cap %.2f m/s / %.2f rad.' % (
             prof['speed'], prof['steer'], cap, steer_cap))
     speed_max = node.vesc_speed_max()
     need_erpm = prof['speed'] * float(vp.get(p, 'drivetrain.speed_to_erpm_gain'))
     if speed_max is not None and need_erpm > speed_max:
-        rclpy.shutdown()
         raise SystemExit('Profile needs %.0f ERPM but vesc_driver speed_max is %.0f.' % (need_erpm, speed_max))
 
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -632,6 +776,9 @@ def run(args):
 
     machine = Machine(prof, p, live=args.live, ground_ok=args.t1_passed_confirmed)
     kb = Keyboard(Deadman(float(r['deadman_first_press_s']), float(r['deadman_repeat_s'])))
+    # Audit log only from the vesc_driver of THIS ROS graph (a process on another domain is not ours).
+    in_graph = 'vesc_driver' in node.get_node_names()
+    audit_pid, t_run0 = (vesc_driver_pid() if in_graph else None), time.time()
     bag_log = open(out / 'bag.log', 'w')
     # stdin DEVNULL: the bag must never share the terminal that carries the SPACE deadman.
     bag = subprocess.Popen(['ros2', 'bag', 'record', '-o', str(out / 'bag')] + BAG_TOPICS,
@@ -704,28 +851,25 @@ def run(args):
         except termios.error:
             pass
         time.sleep(1.0)  # bag keeps the tail after the last zero
-        try:
-            os.killpg(bag.pid, signal.SIGINT)
-            bag.wait(timeout=15)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(bag.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        rc = stop_process_group(bag)
+        if bag.poll() is None:
+            say('WARNING: ros2 bag record still running (pid %d)' % bag.pid)
         bag_log.close()
         try:
-            write_outputs(out, machine, intervals, kb.log, node.status_log)
+            audit = copy_vesc_audit(out, audit_pid, t_run0, time.time())
+        except OSError as exc:
+            audit = 'audit copy failed: %s' % exc
+        try:
+            write_outputs(out, machine, intervals, kb.log, node.status_log,
+                          dict(vesc_speed_audit=audit, bag_returncode=rc))
         except Exception as exc:  # noqa: BLE001
             say('Writing runner outputs failed: %s' % exc)
-        executor.shutdown()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        say('VESC audit: %s' % audit)
         say('Results: %s\nNext: python3 %s %s' % (
             out, Path(__file__).with_name('analyze.py'), out))
 
 
-def write_outputs(out, machine, intervals, keys, status_log):
+def write_outputs(out, machine, intervals, keys, status_log, extra):
     with open(out / 'runner_events.csv', 'w', newline='') as fp:
         wr = csv.DictWriter(fp, ['wall', 'mono', 'repeat', 'state', 'event', 'detail'])
         wr.writeheader()
@@ -745,7 +889,7 @@ def write_outputs(out, machine, intervals, keys, status_log):
     gaps = [b - a for a, b in zip(space, space[1:])]
     summary = dict(repeats=machine.repeats,
                    publish_intervals=interval_stats([i[1] for i in intervals[1:]]),
-                   space_key_gaps=interval_stats(gaps))
+                   space_key_gaps=interval_stats(gaps), **extra)
     (out / 'runner_summary.json').write_text(json.dumps(summary, indent=2))
 
 
@@ -760,8 +904,12 @@ def main():
     ap.add_argument('--out-root', help='results root (default ~/f1tenth_hw_evidence/real_car_tests)')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--list', action='store_true')
+    ap.add_argument('--shutdown-probe', choices=['normal', 'systemexit', 'keyboardinterrupt'],
+                    help=argparse.SUPPRESS)
     args = ap.parse_args()
-    if args.self_test:
+    if args.shutdown_probe:
+        shutdown_probe(args.shutdown_probe)
+    elif args.self_test:
         self_test()
     elif args.list:
         for k, v in PROFILES.items():

@@ -20,6 +20,12 @@ Test tools for the physical car. Owner: Moatasem. Standard values:
 - One stack at a time. `preflight.sh clean` before launching, `preflight.sh stack` before the runner.
 - Nothing else may publish `/manual/drive`, `/joy`, `/control/request_mode` (the runner refuses),
   nor `/commands/motor/brake|current|duty_cycle|position`.
+- Nothing here subscribes to `/drive`, `/drive_calibrated` or `/commands/*` either, not even the bag:
+  the mux counts subscribers and latches `ACTUATOR_GRAPH_OWNERSHIP_FAULT` (dry run 14 Nov).
+  The sent ERPM comes from the vesc_driver `VESC_SPEED_AUDIT` log (teammates' uncommitted audit
+  build), which the runner copies to `vesc_speed_audit.log`; else from the mux output in `/control/status`.
+- `preflight.sh stack` allows one duplicate node name: `/rf2o_laser_odometry` x2 from a single rf2o
+  process (F-14, inner node inside rf2o). Any other duplicate fails.
 - Caps are raised only by launch arguments (`max_speed_mps`, `max_steer_rad`, `vesc_yaml`), per approved step.
 - Do not use `src/f1tenth_bringup/launch/vesc.launch.py`: it loads `config/vesc.yaml`
   (`brake_max 200000` A, `current_max 100` A) with no remapping.
