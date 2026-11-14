@@ -23,10 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import params as vp  # noqa: E402
-from run_test import interval_stats, parse_audit_line  # noqa: E402
+from run_test import (REBOUND_FAIL_ERPM, UNDER_ERPM, ReboundTracker,  # noqa: E402
+                      interval_stats, parse_audit_line)
 
-UNDER_ERPM = 100.0
-REBOUND_FAIL_ERPM = 300.0   # T1 pass: no rebound > 300 ERPM
 STOP_WINDOW_S = 3.0
 STEADY_FRACTION = 0.8       # a stop counts for the step gate only from >= 80 % of the step ERPM
 REASON_MATCH_S = 0.5        # runner ZERO_COMMAND event <-> measured zero time
@@ -47,16 +46,13 @@ def stop_metrics(t, erpm, current, tach, t0, t_end):
     if not idx:
         return {'samples': 0}
     a = [abs(erpm[i]) for i in idx]
-    running_min, min_at, rise, rise_at, rise_from, peak_after_min = a[0], t[idx[0]], 0.0, None, None, 0.0
-    for k, i in enumerate(idx):
-        if a[k] < running_min:
-            running_min, min_at = a[k], t[i]
-        if a[k] - running_min > rise:
-            rise, rise_at, rise_from = a[k] - running_min, t[i] - t0, min_at - t0
-            peak_after_min = a[k]
     under = next((t[i] - t0 for k, i in enumerate(idx) if a[k] < UNDER_ERPM), None)
     before = [i for i, x in enumerate(t) if x < t0]
     erpm_at_zero = abs(erpm[before[-1]]) if before else a[0]
+    tr = ReboundTracker(erpm_at_zero)   # same definition as the runner's live line
+    for k, i in enumerate(idx):
+        tr.add(t[i] - t0, a[k])
+    rise, rise_at, rise_from, peak_after_min = tr.rise, tr.rise_t, tr.from_t, tr.peak
     out = dict(samples=len(idx), erpm_at_zero=round(erpm_at_zero, 1),
                time_to_under_100_erpm_s=None if under is None else round(under, 3),
                rebound_rise_erpm=round(rise, 1),
@@ -64,7 +60,9 @@ def stop_metrics(t, erpm, current, tach, t0, t_end):
                rebound_at_s=None if rise_at is None else round(rise_at, 3),
                rebound_from_s=None if rise_from is None else round(rise_from, 3),  # the dip it rises from
                max_abs_current_after_zero_a=round(max(abs(current[i]) for i in idx), 2),
-               pass_no_rebound_over_300=rise <= REBOUND_FAIL_ERPM)
+               stopped=under is not None,
+               # A stop that never got under 100 ERPM in the window fails as well.
+               pass_no_rebound_over_300=under is not None and rise <= REBOUND_FAIL_ERPM)
     if tach:
         out['tach_counts_after_zero'] = tach[idx[-1]] - (tach[before[-1]] if before else tach[idx[0]])
     return out
@@ -137,6 +135,13 @@ def self_test():
     assert m['rebound_peak_erpm'] > 3800 and m['max_abs_current_after_zero_a'] == 18.0
     assert m['tach_counts_after_zero'] > 0 and m['time_to_under_100_erpm_s'] > 0.4
     assert abs(m['rebound_from_s'] - 0.2) < 0.03 and abs(m['rebound_at_s'] - 0.4) < 0.03, m
+    # T1b brake 5 A stop 5: +198 'rebound' at speed (3930 -> 4128) before the brake acted
+    tw = [1.0, 1.02, 1.04, 1.06, 1.08, 1.10, 1.30]
+    ew = [3930.0, 4128.0, 3000.0, 1500.0, 150.0, 83.0, 0.0]
+    m = stop_metrics(tw, ew, [3.0] * 7, None, 1.01, 3.0)
+    assert m['rebound_rise_erpm'] < 100 and m['rebound_peak_erpm'] < 200 and m['pass_no_rebound_over_300'], m
+    m = stop_metrics(t, [4200.0] * len(t), cur, None, 1.0, 4.0)        # never slows down
+    assert not m['pass_no_rebound_over_300'] and not m['stopped'], m
     clean = [4200.0 if x < 1.0 else max(0.0, 4200 - (x - 1.0) * 8000) for x in t]
     m = stop_metrics(t, clean, cur, None, 1.0, 4.0)
     assert m['pass_no_rebound_over_300'] and abs(m['time_to_under_100_erpm_s'] - 0.52) < 0.03, m
@@ -444,6 +449,38 @@ def plot_stop_detail(folder, n, before_s=0.5, after_s=1.5):
     return out, item
 
 
+def runs_table(root, repeats=5):
+    """Markdown comparison of every analysed T1 / T1b run under root (one row per run)."""
+    head = ('| Run | Method | Speed m/s | Steady / measured stops | Stops failing | Max rebound rise (ERPM) '
+            '| Max rebound peak (ERPM) | Worst settle < 100 ERPM (s) | Max current after zero (A) '
+            '| Max tach after zero | Verdict |\n|---|---|---|---|---|---|---|---|---|---|---|')
+    rows = []
+    for path in sorted(Path(root).expanduser().glob('*_t1*_stop_v*/summary.json')):
+        folder = path.parent
+        s = json.loads(path.read_text())
+        info = json.loads((folder / 'run_info.json').read_text())
+        items = [x for x in s['stops']['items'] if x.get('samples')]
+        if not items or not info.get('live'):
+            continue
+        steady = [x for x in items if x.get('reached_steady')]
+        fails = [x for x in items if not x.get('pass_no_rebound_over_300')]
+        settle = [x.get('time_to_under_100_erpm_s') for x in items]
+        if fails:
+            verdict = 'FAIL'
+        elif len(steady) >= repeats and s.get('vesc', {}).get('faults') == [0]:
+            verdict = 'PASS'
+        else:
+            verdict = 'INCOMPLETE (%d steady)' % len(steady)
+        rows.append('| `%s` | %s | %.2f | %d / %d | %d | %.0f | %.0f | %s | %.1f | %s | %s |' % (
+            folder.name[:15], info.get('stop_method'), float(info['profile']['speed']), len(steady),
+            len(items), len(fails), max(x['rebound_rise_erpm'] for x in items),
+            max(x['rebound_peak_erpm'] for x in items),
+            'not stopped' if None in settle else '%.3f' % max(settle),
+            max(x['max_abs_current_after_zero_a'] for x in items),
+            max((x.get('tach_counts_after_zero') or 0) for x in items), verdict))
+    return head + '\n' + '\n'.join(rows)
+
+
 def write_readme(folder, s):
     lines = ['## Analysis (analyze.py)', '']
     rp = s.get('runner_publish_intervals')
@@ -486,11 +523,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('folder', nargs='?')
     ap.add_argument('--self-test', action='store_true')
+    ap.add_argument('--table', nargs='?', const=str(vp.evidence_root()), metavar='ROOT',
+                    help='markdown comparison of all analysed T1/T1b runs (default evidence root)')
     ap.add_argument('--stop-plot', type=int, metavar='N',
                     help='after analysis: stopN_detail.png, -0.5..+1.5 s around stop N (1-based)')
     args = ap.parse_args()
     if args.self_test:
         self_test()
+    elif args.table:
+        print(runs_table(args.table))
     elif args.folder and args.stop_plot and (Path(args.folder).expanduser() / 'summary.json').exists():
         out, item = plot_stop_detail(args.folder, args.stop_plot)
         print('%s\n%s' % (out, json.dumps(item, indent=1)))

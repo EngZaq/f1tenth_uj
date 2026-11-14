@@ -76,3 +76,4 @@ max angles, backlash).
 Offline checks (no ROS graph, nothing published): `run_test.py --self-test` (its shutdown probe
 uses an isolated domain 77, localhost only, no publishers), `analyze.py --self-test`,
 `t1b_stop_converter.py --self-test`, `t2_servo_sweep.py --self-test`.
+Comparison of all analysed T1/T1b runs: `analyze.py --table`; one stop in detail: `analyze.py <folder> --stop-plot N`.

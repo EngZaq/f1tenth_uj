@@ -1,0 +1,20 @@
+# vesc_driver for T1b (stop-method comparison) step 1.5 m/s, stand only. Use ONLY with
+# converter:=t1b (tools/real_car_tests/t1b_stop_converter.py). Approved per step by Moatasem.
+# Same as vesc_test_erpm13883.yaml except brake_max 10.0: brake commands are AMPS
+# (vesc_packet.cpp: brake x 1000 -> mA), so the converter's 5 A / 10 A brake can pass.
+# current 0 (method current0) is inside current_min/max. NOT an emergency stop.
+vesc_driver:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
+    speed_min: -13883.0
+    speed_max: 13883.0
+    current_min: -2.0
+    current_max: 2.0
+    brake_min: 0.0
+    brake_max: 10.0
+    duty_cycle_min: 0.0
+    duty_cycle_max: 0.0
+    position_min: 0.0
+    position_max: 0.0
+    servo_min: 0.27
+    servo_max: 0.37

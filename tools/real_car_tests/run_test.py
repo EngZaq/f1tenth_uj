@@ -49,7 +49,7 @@ PROFILES = {
         live_allowed=True, converter='ackermann_to_vesc_node',
         note='T1a (F-01), wheels off the ground: ramp, 3 s steady, standard stop (speed 0). 5 repeats per step.'),
     't1b_stop': dict(
-        place='stand', steps=[0.5], steer=0.0, steady_s=3.0, repeats=5, post_zero_s=4.0,
+        place='stand', steps=[0.5, 1.0, 1.5], steer=0.0, steady_s=3.0, repeats=5, post_zero_s=4.0,
         live_allowed=True, converter='t1b_stop_converter',
         note='T1b (F-01), wheels off the ground: as T1a, stop method from t1b_stop_converter.'),
     't2_servo_sweep': dict(
@@ -152,6 +152,37 @@ def interval_stats(dts):
             'over_0.10_s': sum(d > .10 for d in s), 'over_0.20_s': sum(d > .20 for d in s)}
 
 
+REBOUND_FAIL_ERPM = 300.0   # T1 pass: no rebound > 300 ERPM
+UNDER_ERPM = 100.0          # "stopped"
+DECEL_FRACTION = 0.5        # a rebound counts only after |ERPM| fell to this share of its value at the zero
+
+
+class ReboundTracker:
+    """F-01 rebound after a zero command, the same definition live (runner) and offline (analyze):
+    the largest rise of |ERPM| above its running minimum, counted only once |ERPM| has fallen to
+    DECEL_FRACTION of its value at the zero (or below UNDER_ERPM). A wobble at speed before the
+    stop acts is not a rebound (T1b brake 5 A stop 5: live said peak 4128, the ERPM at the zero)."""
+
+    def __init__(self, erpm_at_zero=None):
+        self.start = None if erpm_at_zero is None else abs(erpm_at_zero)
+        self.decelerating = False
+        self.min = self.min_t = self.rise_t = self.from_t = None
+        self.rise = self.peak = 0.0
+
+    def add(self, t, erpm):
+        a = abs(erpm)
+        if self.start is None:
+            self.start = a
+        if not self.decelerating:
+            if a > max(DECEL_FRACTION * self.start, UNDER_ERPM):
+                return
+            self.decelerating = True
+        if self.min is None or a < self.min:
+            self.min, self.min_t = a, t
+        if a - self.min > self.rise:
+            self.rise, self.peak, self.rise_t, self.from_t = a - self.min, a, t, self.min_t
+
+
 def step_mismatch(speed, mux_cap, speed_max, gain, margin):
     """A stepped run must use exactly this step's caps: mux max_speed_mps == step speed and
     vesc_driver speed_max within [step ERPM, step ERPM x margin]. Returns a reason or None."""
@@ -234,6 +265,7 @@ class Machine:
         self.events = []
         self.repeats = []
         self.reset_deadman = False
+        self.last_erpm = None
         self.message = 'Press n to arm (SPACE released).'
 
     def log(self, now, event, detail=''):
@@ -272,7 +304,7 @@ class Machine:
     def stop(self, now, reason):
         self.state = 'STOPPING'
         self.t_stop = now
-        self.stop_min, self.stop_rise, self.stop_peak = None, 0.0, 0.0
+        self.tracker = ReboundTracker(self.last_erpm)  # ERPM at the zero = the latest telemetry
         self.log(now, 'ZERO_COMMAND', reason)
         if self.repeats and self.repeats[-1]['repeat'] == self.repeat and 'zero_wall' not in self.repeats[-1]:
             self.repeats[-1].update(zero_wall=time.time(), zero_reason=reason)
@@ -281,6 +313,8 @@ class Machine:
     def step(self, now, key, held, w):
         st = w.get('status') or {}
         mode = st.get('mode')
+        if w.get('erpm') is not None and self.state != 'STOPPING':
+            self.last_erpm = w['erpm']
         if key == 'q' or w.get('keyboard_lost'):
             self.quit = True  # lost SSH terminal: finish with zero, never wait in IDLE
         if self.state == 'IDLE':
@@ -373,21 +407,23 @@ class Machine:
                 self.log(now, 'STEADY_REACHED')
             return v, float(self.prof['steer']), 1, None
         if self.state == 'STOPPING':
-            # Live F-01 readout from /sensors/core; analyze.py gives the recorded numbers.
-            e = w.get('erpm')
-            if e is not None:
-                a = abs(e)
-                self.stop_min = a if self.stop_min is None else min(self.stop_min, a)
-                if a - self.stop_min > self.stop_rise:
-                    self.stop_rise, self.stop_peak = a - self.stop_min, a
+            # Live F-01 readout from /sensors/core (same definition as analyze.py, which uses the
+            # converter's own stop time and gives the recorded numbers).
+            tr = self.tracker
+            if w.get('erpm') is not None:
+                tr.add(now - self.t_stop, w['erpm'])
             if now - self.t_stop < self.post_zero:
                 return 0.0, 0.0, 0, None
-            detail = ('live rebound +%.0f ERPM (peak %.0f)%s' % (
-                self.stop_rise, self.stop_peak,
-                ' > 300: STEP FAILS' if self.stop_rise > 300 else '')
-                if self.stop_min is not None else 'no ERPM telemetry')
+            if tr.start is None:
+                detail = 'no ERPM telemetry'
+            elif not tr.decelerating:
+                detail = 'ERPM never fell below half of %.0f: NOT STOPPED, STEP FAILS' % tr.start
+            else:
+                detail = 'live rebound +%.0f ERPM (peak %.0f at +%.2f s)%s' % (
+                    tr.rise, tr.peak, tr.rise_t or 0.0,
+                    ' > 300: STEP FAILS' if tr.rise > REBOUND_FAIL_ERPM else '')
             if self.repeats and self.repeats[-1]['repeat'] == self.repeat:
-                self.repeats[-1]['live_rebound_rise_erpm'] = round(self.stop_rise, 1)
+                self.repeats[-1]['live_rebound_rise_erpm'] = round(tr.rise, 1)
             self.log(now, 'REPEAT_END', detail)
             self.repeat += 1
             self.reset_deadman = True
@@ -563,6 +599,15 @@ def self_test():
         m.step(t, None, False, world(telemetry_age=0.02, erpm=e, **live))
     m.step(5.0, None, False, world(telemetry_age=0.02, erpm=0.0, **live))
     assert m.repeats[-1]['live_rebound_rise_erpm'] == 3761.0 and 'STEP FAILS' in m.events[-1]['detail']
+    # T1b brake 5 A stop 5: a wobble at speed before the brake acts (3930 -> 4128) is not a rebound
+    tr = ReboundTracker(3930.0)
+    for t, e in ((0.02, 4128.0), (0.04, 3000.0), (0.06, 1500.0), (0.08, 150.0), (0.10, 83.0), (0.3, 0.0)):
+        tr.add(t, e)
+    assert tr.decelerating and tr.rise == 0.0 and tr.peak == 0.0, vars(tr)
+    tr = ReboundTracker(4200.0)
+    for t in range(10):
+        tr.add(t * 0.1, 4150.0 + 30 * (t % 2))                       # never slows down
+    assert not tr.decelerating
     print('PASS: deadman timing, ramp, speed-fit length, front range, config = vehicle_params,')
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
