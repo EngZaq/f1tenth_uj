@@ -37,12 +37,27 @@ import params as vp  # noqa: E402
 
 # place: 'stand' (wheels off the ground) or 'ground' (needs --t1-passed-confirmed).
 # Every profile ends by itself after ramp + steady; SPACE release ends it earlier.
+# steps: one speed per run (--speed); step N+1 only after step N passed (step_gate).
+# converter: the node that must own /drive -> /commands/* for this profile.
 PROFILES = {
     'dry_run': dict(
         place='stand', speed=0.30, steer=0.0, steady_s=2.0, repeats=2, post_zero_s=2.0,
-        live_allowed=False,
+        live_allowed=False, converter='ackermann_to_vesc_node',
         note='Disarmed end-to-end check: keyboard deadman, mux handshake, bag, analysis.'),
+    't1_stop': dict(
+        place='stand', steps=[0.5, 1.0, 1.5], steer=0.0, steady_s=3.0, repeats=5, post_zero_s=4.0,
+        live_allowed=True, converter='ackermann_to_vesc_node',
+        note='T1a (F-01), wheels off the ground: ramp, 3 s steady, standard stop (speed 0). 5 repeats per step.'),
+    't1b_stop': dict(
+        place='stand', steps=[0.5], steer=0.0, steady_s=3.0, repeats=5, post_zero_s=4.0,
+        live_allowed=True, converter='t1b_stop_converter',
+        note='T1b (F-01), wheels off the ground: as T1a, stop method from t1b_stop_converter.'),
+    't2_servo_sweep': dict(
+        kind='servo', live_allowed=True,
+        note='T2 servo sweep, servo-only launch, motor phases disconnected (t2_servo_sweep.py).'),
 }
+STEP_TOL = 1e-6
+SPEED_MAX_ROUNDING = 5.0  # ERPM: yaml values are rounded (4630 for 4627.7)
 
 # The bag is a subscriber: it must never touch the actuator chain, or the mux counts
 # 2 subscribers and latches ACTUATOR_GRAPH_OWNERSHIP_FAULT (dry run 14 Nov). Command side
@@ -52,6 +67,7 @@ BAG_TOPICS = [
     '/scan', '/odom_rf2o', '/odom_vesc_observe', '/imu/data_raw', '/sensors/core',
     '/sensors/servo_position_command', '/control/status',
     '/manual/drive', '/joy', '/control/request_mode', '/tf', '/tf_static',
+    '/t1b_stop_converter/status',
 ]
 PROTECTED_TOPICS = ('/drive', '/drive_calibrated')
 PROTECTED_PREFIXES = ('/commands/',)
@@ -135,6 +151,58 @@ def interval_stats(dts):
             'over_0.10_s': sum(d > .10 for d in s), 'over_0.20_s': sum(d > .20 for d in s)}
 
 
+def step_mismatch(speed, mux_cap, speed_max, gain, margin):
+    """A stepped run must use exactly this step's caps: mux max_speed_mps == step speed and
+    vesc_driver speed_max within [step ERPM, step ERPM x margin]. Returns a reason or None."""
+    if mux_cap is None or abs(mux_cap - speed) > STEP_TOL:
+        return 'mux max_speed_mps=%s, step needs %.2f (launch max_speed_mps:=%.2f)' % (mux_cap, speed, speed)
+    need = speed * gain
+    if speed_max is None:
+        return 'vesc_driver speed_max unreadable'
+    if not need <= speed_max <= need * margin + SPEED_MAX_ROUNDING:
+        return 'vesc_driver speed_max=%.0f, step %.2f m/s needs %.0f..%.0f (wrong vesc_yaml)' % (
+            speed_max, speed, need, need * margin + SPEED_MAX_ROUNDING)
+    return None
+
+
+def step_gate(root, test, method, speed, steps, repeats):
+    """Step N+1 only after step N passed: an analysed, armed run of the same test and stop
+    method at the previous speed with >= `repeats` measured stops, none rebounding
+    > 300 ERPM, VESC fault 0. Returns (ok, reason)."""
+    idx = [i for i, s in enumerate(steps) if abs(s - speed) <= STEP_TOL]
+    if not idx:
+        return False, 'speed %.2f is not a step of %s %s' % (speed, test, steps)
+    if idx[0] == 0:
+        return True, 'first step'
+    prev = steps[idx[0] - 1]
+    seen = []
+    for info_path in sorted(Path(root).expanduser().glob('*_%s_v*/run_info.json' % test)):
+        folder = info_path.parent
+        try:
+            info = json.loads(info_path.read_text())
+        except ValueError:
+            continue
+        if (not info.get('live') or info.get('stop_method') != method
+                or abs(float(info['profile'].get('speed', -1)) - prev) > STEP_TOL):
+            continue
+        summary = folder / 'summary.json'
+        if not summary.exists():
+            seen.append('%s not analysed (run analyze.py)' % folder.name)
+            continue
+        s = json.loads(summary.read_text())
+        stops = s.get('stops', {})
+        items = [x for x in stops.get('items', []) if x.get('samples')]
+        passed = [x for x in items if x.get('pass_no_rebound_over_300')]
+        ok = (len(items) >= repeats and len(passed) == len(items)
+              and s.get('vesc', {}).get('faults') == [0]
+              and not str(stops.get('source', '')).startswith('runner_events'))
+        if ok:
+            return True, 'step %.2f m/s passed in %s' % (prev, folder.name)
+        seen.append('%s: %d/%d stops pass, faults %s' % (folder.name, len(passed), len(items),
+                                                          s.get('vesc', {}).get('faults')))
+    return False, 'step %.2f m/s (%s) has no passed run: %s' % (prev, method, '; '.join(seen) or 'none found')
+
+
 class Machine:
     """Runner state machine. step() gets time, one key, deadman state and a world
     snapshot; returns (speed, steer, deadman_button, mode_request or None)."""
@@ -200,6 +268,7 @@ class Machine:
     def stop(self, now, reason):
         self.state = 'STOPPING'
         self.t_stop = now
+        self.stop_min, self.stop_rise, self.stop_peak = None, 0.0, 0.0
         self.log(now, 'ZERO_COMMAND', reason)
         if self.repeats and self.repeats[-1]['repeat'] == self.repeat and 'zero_wall' not in self.repeats[-1]:
             self.repeats[-1].update(zero_wall=time.time(), zero_reason=reason)
@@ -300,15 +369,28 @@ class Machine:
                 self.log(now, 'STEADY_REACHED')
             return v, float(self.prof['steer']), 1, None
         if self.state == 'STOPPING':
+            # Live F-01 readout from /sensors/core; analyze.py gives the recorded numbers.
+            e = w.get('erpm')
+            if e is not None:
+                a = abs(e)
+                self.stop_min = a if self.stop_min is None else min(self.stop_min, a)
+                if a - self.stop_min > self.stop_rise:
+                    self.stop_rise, self.stop_peak = a - self.stop_min, a
             if now - self.t_stop < self.post_zero:
                 return 0.0, 0.0, 0, None
-            self.log(now, 'REPEAT_END')
+            detail = ('live rebound +%.0f ERPM (peak %.0f)%s' % (
+                self.stop_rise, self.stop_peak,
+                ' > 300: STEP FAILS' if self.stop_rise > 300 else '')
+                if self.stop_min is not None else 'no ERPM telemetry')
+            if self.repeats and self.repeats[-1]['repeat'] == self.repeat:
+                self.repeats[-1]['live_rebound_rise_erpm'] = round(self.stop_rise, 1)
+            self.log(now, 'REPEAT_END', detail)
             self.repeat += 1
             self.reset_deadman = True
             self.state = 'DONE' if (self.quit or self.repeat >= self.prof['repeats']) else 'IDLE'
             if self.state == 'IDLE':
-                self.message = 'Repeat %d/%d: release SPACE, press n to arm.' % (
-                    self.repeat + 1, self.prof['repeats'])
+                self.message = '%s | Repeat %d/%d: release SPACE, press n to arm.' % (
+                    detail, self.repeat + 1, self.prof['repeats'])
             return 0.0, 0.0, 0, 'STOP'
         return 0.0, 0.0, 0, None
 
@@ -415,10 +497,68 @@ def self_test():
                          'VESC_SPEED_AUDIT received_erpm=4207.000 sent_erpm=3500.000')
     assert a == (1794653015.653271431, 4207.0, 3500.0), a
     assert parse_audit_line('[INFO] [1.0] [vesc_driver]: Connected to VESC') is None
+    # Stepped profiles: --speed must be a step; caps and vesc yaml must match the step exactly.
+    assert resolve_profile('t1_stop', 0.5)['speed'] == 0.5
+    for test, speed in (('t1_stop', None), ('t1_stop', 0.7), ('dry_run', 0.5)):
+        try:
+            resolve_profile(test, speed)
+        except SystemExit:
+            continue
+        raise AssertionError('resolved %s %s' % (test, speed))
+    assert step_mismatch(0.5, 0.5, 4630.0, 8414.0, 1.10) is None
+    assert step_mismatch(0.5, 1.5, 4630.0, 8414.0, 1.10)            # mux cap above the step
+    assert step_mismatch(0.5, 0.5, 13883.0, 8414.0, 1.10)           # 1.5 m/s yaml at step 0.5
+    assert step_mismatch(0.5, 0.5, 3500.0, 8414.0, 1.10)            # yaml below the step
+    assert step_mismatch(1.0, 1.0, 9255.0, 8414.0, 1.10) is None
+    assert step_mismatch(1.5, 1.5, 13883.0, 8414.0, 1.10) is None
+    import tempfile
+    with tempfile.TemporaryDirectory() as root:
+        steps = [0.5, 1.0, 1.5]
+        assert step_gate(root, 't1_stop', 'speed0', 0.5, steps, 5)[0]
+        assert not step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)[0]
+
+        def fake(name, speed, live, method, n_pass, n_items, faults=(0,), analysed=True):
+            d = Path(root) / name
+            d.mkdir()
+            (d / 'run_info.json').write_text(json.dumps(dict(
+                live=live, stop_method=method, profile=dict(speed=speed))))
+            if analysed:
+                items = [dict(samples=50, pass_no_rebound_over_300=k < n_pass) for k in range(n_items)]
+                (d / 'summary.json').write_text(json.dumps(dict(
+                    stops=dict(source='vesc_speed_audit.log (sent_erpm)', items=items),
+                    vesc=dict(faults=list(faults)))))
+        fake('1_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 4, 5)       # 1 rebound
+        fake('2_t1_stop_v0.50_speed0_erpmmax4630_disarmed', 0.5, False, 'speed0', 5, 5)   # not live
+        fake('3_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 5, 5, analysed=False)
+        fake('4_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 3, 3)       # too few
+        fake('5_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 5, 5, faults=(0, 4))
+        ok, why = step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)
+        assert not ok and 'not analysed' in why and '4/5' in why, why
+        fake('6_t1b_stop_v0.50_brake5A_erpmmax4630_armed', 0.5, True, 'brake5A', 5, 5)    # other test
+        assert not step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)[0]
+        fake('7_t1_stop_v0.50_speed0_erpmmax4630_armed', 0.5, True, 'speed0', 5, 5)
+        assert step_gate(root, 't1_stop', 'speed0', 1.0, steps, 5)[0]
+        assert not step_gate(root, 't1_stop', 'speed0', 1.5, steps, 5)[0]                 # 1.0 not passed
+        assert not step_gate(root, 't1_stop', 'brake5A', 1.0, steps, 5)[0]                # per method
+    # Live rebound readout in STOPPING (12 Nov shape: dip then rise)
+    m = Machine(dict(PROFILES['t1_stop'], speed=0.5), p, live=True)
+    live = dict(st=dict(real_actuation_enabled=True))
+    m.step(0.0, 'n', False, world(telemetry_age=0.02, **live))
+    m.step(0.1, None, False, world(telemetry_age=0.02, st=dict(real_actuation_enabled=True, mode='MANUAL_READY',
+                                                                last_mode_request='MANUAL')))
+    m.step(0.2, None, True, world(telemetry_age=0.02, st=dict(real_actuation_enabled=True, mode='MANUAL_READY')))
+    m.step(0.3, None, False, world(telemetry_age=0.02, erpm=4200.0, st=dict(real_actuation_enabled=True,
+                                                                          mode='MANUAL_ACTIVE')))
+    assert m.state == 'STOPPING'
+    for t, e in ((0.4, 2000.0), (0.5, 150.0), (0.7, 3911.0), (1.0, 0.0)):
+        m.step(t, None, False, world(telemetry_age=0.02, erpm=e, **live))
+    m.step(5.0, None, False, world(telemetry_age=0.02, erpm=0.0, **live))
+    assert m.repeats[-1]['live_rebound_rise_erpm'] == 3761.0 and 'STEP FAILS' in m.events[-1]['detail']
     print('PASS: deadman timing, ramp, speed-fit length, front range, config = vehicle_params,')
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
-    print('      no protected topic in the bag list, audit-log parsing.')
+    print('      no protected topic in the bag list, audit-log parsing, step resolution,')
+    print('      step/yaml/cap match, step gate (rebound, unanalysed, too few, fault, method), live rebound.')
     # Clean shutdown on every exit path, in child processes on an isolated domain
     # (ROS_DOMAIN_ID 77, localhost only). The probe node has no publishers.
     env = dict(os.environ, ROS_DOMAIN_ID='77', ROS_LOCALHOST_ONLY='1')
@@ -616,6 +756,18 @@ def say(text):
 
 # ---------------------------------------------------------------- ROS
 
+def resolve_profile(test, speed):
+    """Profile with its speed fixed: stepped profiles need --speed equal to one step."""
+    prof = dict(PROFILES[test])
+    if 'steps' in prof:
+        if speed is None or not any(abs(speed - s) <= STEP_TOL for s in prof['steps']):
+            raise SystemExit('%s needs --speed, one of %s' % (test, prof['steps']))
+        prof['speed'] = float(speed)
+    elif speed is not None:
+        raise SystemExit('%s has a fixed speed; do not pass --speed' % test)
+    return prof
+
+
 def run(args):
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
@@ -629,7 +781,7 @@ def run(args):
         VescStateStamped = None
 
     p = vp.load(args.params)
-    prof = PROFILES[args.test]
+    prof = resolve_profile(args.test, args.speed)
     if args.live and not prof['live_allowed']:
         raise SystemExit('profile %s never runs with real actuation' % args.test)
     if prof['place'] == 'ground' and not args.t1_passed_confirmed:
@@ -711,18 +863,25 @@ def run(args):
                 w['erpm'] = (self.tele or {}).get('erpm')
             return w
 
-        def vesc_speed_max(self):
-            cli = self.create_client(GetParameters, '/vesc_driver/get_parameters')
+        def get_params(self, node_name, names):
+            """{name: value} read from a running node (double/string/bool/int); {} if unreachable."""
+            cli = self.create_client(GetParameters, '/%s/get_parameters' % node_name)
             if not cli.wait_for_service(timeout_sec=2.0):
-                return None
-            fut = cli.call_async(GetParameters.Request(names=['speed_max']))
+                return {}
+            fut = cli.call_async(GetParameters.Request(names=list(names)))
             t_end = time.monotonic() + 2.0
             while not fut.done() and time.monotonic() < t_end:
                 time.sleep(0.02)
-            if not fut.done() or not fut.result().values:
-                return None
-            v = fut.result().values[0]
-            return v.double_value if v.type == 3 else None
+            if not fut.done() or fut.result() is None:
+                return {}
+            out = {}
+            for name, v in zip(names, fut.result().values):
+                out[name] = {1: v.bool_value, 2: v.integer_value, 3: v.double_value,
+                             4: v.string_value}.get(v.type)
+            return out
+
+        def vesc_speed_max(self):
+            return self.get_params('vesc_driver', ['speed_max']).get('speed_max')
 
     if any(is_protected(t) for t in BAG_TOPICS):
         raise SystemExit('BAG_TOPICS contains an actuator-chain topic: refusing.')
@@ -749,19 +908,49 @@ def drive_session(args, p, prof, r, node):
         raise SystemExit('Profile %.2f m/s / %.2f rad exceeds mux cap %.2f m/s / %.2f rad.' % (
             prof['speed'], prof['steer'], cap, steer_cap))
     speed_max = node.vesc_speed_max()
-    need_erpm = prof['speed'] * float(vp.get(p, 'drivetrain.speed_to_erpm_gain'))
+    gain = float(vp.get(p, 'drivetrain.speed_to_erpm_gain'))
+    need_erpm = prof['speed'] * gain
     if speed_max is not None and need_erpm > speed_max:
         raise SystemExit('Profile needs %.0f ERPM but vesc_driver speed_max is %.0f.' % (need_erpm, speed_max))
 
+    # Exactly the converter this profile expects owns /drive -> /commands/* (never both).
+    names = set(node.get_node_names())
+    other = {'ackermann_to_vesc_node', 't1b_stop_converter'} - {prof['converter']}
+    if prof['converter'] not in names or names & other:
+        raise SystemExit('%s needs converter %s and not %s; graph has %s (launch converter:=...)' % (
+            args.test, prof['converter'], sorted(other), sorted(names & (other | {prof['converter']}))))
+    converter_params = {}
+    method = 'speed0'
+    if prof['converter'] == 't1b_stop_converter':
+        converter_params = node.get_params('t1b_stop_converter', ['method', 'brake_current_a', 'brake_hold_s'])
+        method = converter_params.get('method')
+        if method == 'brake':
+            method = 'brake%gA' % converter_params.get('brake_current_a')
+        if not method:
+            raise SystemExit('t1b_stop_converter parameters unreadable: %s' % converter_params)
+    gate = 'not a stepped profile'
+    if 'steps' in prof:
+        bad = step_mismatch(prof['speed'], cap, speed_max, gain, float(vp.get(p, 'caps.vesc_speed_max_margin')))
+        if bad:
+            raise SystemExit('Step check: ' + bad)
+        if args.live:
+            ok, gate = step_gate(args.out_root or vp.evidence_root(), args.test, method,
+                                 prof['speed'], prof['steps'], prof['repeats'])
+            if not ok:
+                raise SystemExit('Step gate: ' + gate)
+        say('Step %.2f m/s, stop method %s: %s' % (prof['speed'], method, gate))
+
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    name = '%s_%s_v%.2f_erpmmax%s_%s' % (stamp, args.test, prof['speed'],
-                                         int(speed_max) if speed_max is not None else 'NA',
-                                         'armed' if real else 'disarmed')
+    name = '%s_%s_v%.2f_%s_erpmmax%s_%s' % (stamp, args.test, prof['speed'], method,
+                                            int(speed_max) if speed_max is not None else 'NA',
+                                            'armed' if real else 'disarmed')
     out = (Path(args.out_root).expanduser() if args.out_root else vp.evidence_root()) / name
     out.mkdir(parents=True, exist_ok=False)
     commit = subprocess.run(['git', '-C', str(vp.REPO), 'rev-parse', '--short', 'HEAD'],
                             capture_output=True, text=True).stdout.strip()
     info = dict(test=args.test, profile=prof, live=args.live, started=stamp, git_commit=commit,
+                stop_method=method, converter=prof['converter'], converter_params=converter_params,
+                step_gate=gate,
                 mux_status_at_start=st, mux_max_speed_mps=cap, mux_max_steer_rad=steer_cap,
                 vesc_speed_max_erpm=speed_max, publish_hz=r['publish_hz'],
                 ramp_accel_mps2=r['ramp_accel_mps2'], vehicle_params=p, bag_topics=BAG_TOPICS)
@@ -769,9 +958,11 @@ def drive_session(args, p, prof, r, node):
     (out / 'README.md').write_text(
         '# %s (%s)\n\n%s\n\n- Place: %s; target %.2f m/s, steer %.2f rad, steady %.1f s, %d repeats\n'
         '- Mux real actuation: %s; mux caps %.2f m/s / %.2f rad; vesc_driver speed_max: %s ERPM\n'
+        '- Converter %s, stop method %s; step gate: %s\n'
         '- Runner: %.0f Hz, ramp %.2f m/s^2; git %s\n\n## Operator notes\n\n(fill in)\n' % (
             args.test, stamp, prof['note'], prof['place'], prof['speed'], prof['steer'],
             prof['steady_s'], prof['repeats'], real, cap, steer_cap, speed_max,
+            prof['converter'], method, gate,
             float(r['publish_hz']), float(r['ramp_accel_mps2']), commit))
 
     machine = Machine(prof, p, live=args.live, ground_ok=args.t1_passed_confirmed)
@@ -904,16 +1095,23 @@ def main():
     ap.add_argument('--out-root', help='results root (default ~/f1tenth_hw_evidence/real_car_tests)')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--list', action='store_true')
+    ap.add_argument('--speed', type=float, help='stepped profiles (t1_stop, t1b_stop): this step, m/s')
     ap.add_argument('--shutdown-probe', choices=['normal', 'systemexit', 'keyboardinterrupt'],
                     help=argparse.SUPPRESS)
-    args = ap.parse_args()
+    args, rest = ap.parse_known_args()
+    if args.test and PROFILES[args.test].get('kind') == 'servo':
+        # T2 is its own tool (servo-only stack, no mux); pass the remaining arguments through.
+        tool = os.path.join(os.path.dirname(os.path.realpath(__file__)), 't2_servo_sweep.py')
+        os.execv(sys.executable, [sys.executable, tool] + rest)
+    if rest:
+        ap.error('unrecognized arguments: %s' % ' '.join(rest))
     if args.shutdown_probe:
         shutdown_probe(args.shutdown_probe)
     elif args.self_test:
         self_test()
     elif args.list:
         for k, v in PROFILES.items():
-            print('%-10s %s' % (k, v['note']))
+            print('%-15s %s%s' % (k, v['note'], '  steps %s m/s' % v['steps'] if 'steps' in v else ''))
     elif args.test:
         run(args)
     else:

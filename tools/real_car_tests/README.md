@@ -48,5 +48,18 @@ python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test dry_run
 python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py <results folder printed by the runner>
 ```
 
-Offline checks (no ROS graph, nothing published):
-`run_test.py --self-test`, `analyze.py --self-test`.
+## T1: stop behaviour on the stand (F-01)
+
+One run per speed step, each with its own caps: mux `max_speed_mps:=<step>` and
+`vesc_yaml:=config/real_car/vesc_test_erpm<N>.yaml` (0.5 -> 4630, 1.0 -> 9255, 1.5 -> 13883 ERPM).
+`run_test.py` refuses a run whose mux cap or `speed_max` does not match the step, and refuses step
+N+1 until an analysed, armed run of step N has >= 5 stops, none rebounding > 300 ERPM, VESC fault 0
+(`step_gate`). Run `analyze.py` on every T1 folder: the gate reads its `summary.json`.
+
+T1b (stop-method comparison) uses `converter:=t1b stop_method:=speed0|brake|current0`
+(`brake_current_a`, `brake_hold_s`) with `vesc_t1b_erpm4630.yaml` (brake_max 10 A) and
+`run_test.py --test t1b_stop`. The step gate is per stop method.
+
+Offline checks (no ROS graph, nothing published): `run_test.py --self-test` (its shutdown probe
+uses an isolated domain 77, localhost only, no publishers), `analyze.py --self-test`,
+`t1b_stop_converter.py --self-test`.

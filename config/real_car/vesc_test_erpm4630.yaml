@@ -1,0 +1,20 @@
+# vesc_driver for T1 step 0.5 m/s (stand, wheels off the ground). Approved per step by Moatasem.
+# ROS-side command clips only. NOT firmware current limiting and NOT an emergency stop.
+# speed_max 4630 ERPM = 0.5 m/s x 8414 x 1.10 (vehicle_params.yaml caps.vesc_speed_max_margin).
+# Launch with max_speed_mps:=0.5 (run_test.py refuses a mux cap or speed_max that does not match the step).
+# Servo clip 0.27-0.37 = offset 0.320 +/- 0.50 * 0.10 rad (T1 steers 0). brake 0: no brake can pass.
+vesc_driver:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
+    speed_min: -4630.0
+    speed_max: 4630.0
+    current_min: -2.0
+    current_max: 2.0
+    brake_min: 0.0
+    brake_max: 0.0
+    duty_cycle_min: 0.0
+    duty_cycle_max: 0.0
+    position_min: 0.0
+    position_max: 0.0
+    servo_min: 0.27
+    servo_max: 0.37

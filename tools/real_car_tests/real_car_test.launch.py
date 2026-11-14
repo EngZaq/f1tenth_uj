@@ -10,8 +10,10 @@ Contents (each actuator topic has exactly one publisher and one subscriber):
   vesc_driver        <- vesc_yaml (speed_max per speed step; one file per step)
   vesc_to_odom       -> /odom_vesc_observe, publish_tf false
   ackermann_to_vesc  <- /drive, config/real_car/ackermann_to_vesc_real.yaml (offset 0.320, gain -0.50)
+    OR (converter:=t1b, T1b only) t1b_stop_converter.py: same conversion, test stop method
   physical_drive_mux -> /drive, starts STOP; caps from max_speed_mps / max_steer_rad
-No explorer, lap watcher, joystick or trial adapter.
+No explorer, lap watcher, joystick or trial adapter. Exactly one converter: an unknown
+`converter` value starts none, and the mux then refuses (ownership check fails closed).
 
   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=false
 """
@@ -26,8 +28,9 @@ from launch.actions import (
 )
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -43,6 +46,10 @@ def generate_launch_description():
     max_speed = LaunchConfiguration('max_speed_mps')
     max_steer = LaunchConfiguration('max_steer_rad')
     vesc_yaml = LaunchConfiguration('vesc_yaml')
+    converter = LaunchConfiguration('converter')
+
+    def converter_is(name):
+        return IfCondition(PythonExpression(["'", converter, "' == '%s'" % name]))
 
     observation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -98,6 +105,19 @@ def generate_launch_description():
         output='screen',
         parameters=[os.path.join(cfg, 'ackermann_to_vesc_real.yaml')],
         remappings=[('ackermann_cmd', '/drive')],
+        condition=converter_is('ackermann_to_vesc'),
+    )
+
+    # T1b only: replaces ackermann_to_vesc (never both). Use with vesc_t1b_erpm*.yaml.
+    t1b_converter = ExecuteProcess(
+        cmd=['python3', '-u', os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                           't1b_stop_converter.py'),
+             '--ros-args',
+             '-p', ['method:=', LaunchConfiguration('stop_method')],
+             '-p', ['brake_current_a:=', LaunchConfiguration('brake_current_a')],
+             '-p', ['brake_hold_s:=', LaunchConfiguration('brake_hold_s')]],
+        output='screen',
+        condition=converter_is('t1b'),
     )
 
     mux = ExecuteProcess(
@@ -120,8 +140,16 @@ def generate_launch_description():
                               description='Mux steering cap for this test (ceiling 0.40).'),
         DeclareLaunchArgument('vesc_yaml', default_value=os.path.join(cfg, 'vesc_test_erpm3500.yaml'),
                               description='vesc_driver yaml; speed_max per speed step.'),
+        DeclareLaunchArgument('converter', default_value='ackermann_to_vesc',
+                              description='ackermann_to_vesc (standard) or t1b (T1b stop-method test only).'),
+        DeclareLaunchArgument('stop_method', default_value='speed0',
+                              description='converter:=t1b only: speed0, brake or current0.'),
+        DeclareLaunchArgument('brake_current_a', default_value='5.0',
+                              description='converter:=t1b, stop_method:=brake: amps, (0, 10].'),
+        DeclareLaunchArgument('brake_hold_s', default_value='2.0',
+                              description='converter:=t1b, stop_method:=brake: seconds, (0, 5].'),
         LogInfo(msg='REAL-CAR TEST STACK: real VESC connected, mux starts STOP. '
                     'Servo centres now. Not an emergency stop.'),
         vesc_exit_shutdown,
-        observation, imu, imu_tf, vesc_driver, vesc_odom, ackermann_to_vesc, mux,
+        observation, imu, imu_tf, vesc_driver, vesc_odom, ackermann_to_vesc, t1b_converter, mux,
     ])

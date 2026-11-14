@@ -86,6 +86,18 @@ def command_series(audit_lines, statuses, legacy, gain):
     return None, [], []
 
 
+def phase_exits(t1b_statuses):
+    """T1b converter: times it left DRIVE (its stop action starts). The audit log cannot show
+    these for brake/current0, because no speed command follows the stop."""
+    out, prev = [], None
+    for t, st in t1b_statuses:
+        phase = st.get('phase')
+        if prev == 'DRIVE' and phase != 'DRIVE':
+            out.append(t)
+        prev = phase
+    return out
+
+
 def mode_transitions(statuses):
     """statuses: [(t, dict)] -> list of mode changes with the mux's reasons."""
     out, prev = [], None
@@ -138,8 +150,13 @@ def self_test():
     assert src.startswith('/control/status') and abs(e[0] - 2524.2) < 1e-6 and e[1] == 0.0
     assert zero_transitions(t, e) == [9.05]
     assert command_series([], [], [], 8414.0) == (None, [], [])
+    ph = [(0, {'phase': 'RELEASED'}), (1, {'phase': 'DRIVE'}), (2, {'phase': 'DRIVE'}),
+          (3, {'phase': 'STOP_BRAKE'}), (5, {'phase': 'RELEASED'}), (6, {'phase': 'DRIVE'}),
+          (7, {'phase': 'STOP_SPEED0'})]
+    assert phase_exits(ph) == [3, 7]
     print('PASS: stop metrics (12 Nov rebound shape fails, clean decay passes), zero detection,')
-    print('      mux transitions, command source (audit > mux status > legacy). No bag read.')
+    print('      mux transitions, command source (audit > mux status > legacy),')
+    print('      T1b stop times from the converter phase. No bag read.')
 
 
 # ---------------------------------------------------------------- bag
@@ -264,19 +281,31 @@ def analyze(folder):
         summary['disarmed_vesc_sent_all_zero'] = (
             max(abs(x) for x in audit_sent) == 0.0) if audit_sent else None
 
-    # Stops: zero transitions of the command actually sent; else the runner's ZERO_COMMAND events.
+    # Stop times, best source first: the T1b converter's own switch to its stop method; the
+    # sent speed command (audit) falling to zero; the mux output; the runner's events.
     events = read_csv(folder / 'runner_events.csv')
-    zeros = zero_transitions(mt, mv)
-    source = cmd_source
-    if not zeros:
-        zeros = [float(e['wall']) for e in events if e['event'] == 'ZERO_COMMAND']
-        source = 'runner_events.csv (command never nonzero)'
+    t1b = []
+    for t, m in data.get('/t1b_stop_converter/status', []):
+        try:
+            t1b.append((t, json.loads(m.data)))
+        except ValueError:
+            pass
+    if t1b:
+        summary['t1b_methods'] = sorted(set(s.get('method') for _, s in t1b))
+    candidates = [
+        ('/t1b_stop_converter/status (left DRIVE)', phase_exits(t1b)),
+        (cmd_source, zero_transitions(mt, mv)),
+        ('/control/status speed_mps', zero_transitions([t for t, _ in statuses], [x * gain for x in mux_out])),
+        ('runner_events.csv (command never nonzero)',
+         [float(e['wall']) for e in events if e['event'] == 'ZERO_COMMAND']),
+    ]
+    source, zeros = next(((s, z) for s, z in candidates if z), (None, []))
     reasons = [e['detail'] for e in events if e['event'] == 'ZERO_COMMAND']
     stops = []
     for k, t0 in enumerate(zeros):
         m = stop_metrics(ct, erpm, cur, tach, t0, t0 + STOP_WINDOW_S) if core else {'samples': 0}
         m.update(index=k, t0=t0)
-        if k < len(reasons) and source == cmd_source:
+        if k < len(reasons) and not str(source).startswith('runner_events'):
             m['runner_reason'] = reasons[k]
         stops.append(m)
     summary['stops'] = dict(source=source, count=len(stops), items=stops)
