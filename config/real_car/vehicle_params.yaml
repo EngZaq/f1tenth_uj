@@ -1,0 +1,95 @@
+# F1TENTH UJ real car: single source of truth for real-car tests and shadow nodes.
+# Read by tools/real_car_tests/params.py. Do not copy these numbers into scripts.
+# Standard = docs/real_car/REAL_CAR_BASELINE_2026-11-14.md ("baseline 14 Nov").
+# A value changes only with its test name and date (docs/real_car/REAL_CAR_TEST_RESULTS.md).
+# null = not measured yet. PROVISIONAL = in use, but not verified on the car.
+
+frames:
+  map: map
+  odom: odom
+  base_link: base_link          # rear-axle centre (baseline 14 Nov, decision)
+  laser: laser
+  imu: imu_link
+
+vehicle:
+  wheelbase_m: 0.260            # CONFIRMED, baseline 14 Nov (replaces rough 0.25)
+  wheel_diameter_m: 0.065       # CONFIRMED, baseline 14 Nov
+  body_length_m: 0.345          # CONFIRMED, baseline 14 Nov
+  body_width_m: 0.197           # CONFIRMED, baseline 14 Nov
+  front_bumper_x_m: 0.305       # CONFIRMED, baseline 14 Nov (in base_link)
+
+lidar:                          # base_link -> laser, CONFIRMED, baseline 14 Nov (replaces x 0.195)
+  x_m: 0.215
+  y_m: 0.0
+  z_m: 0.150
+  yaw_rad: 0.0
+
+imu:                            # base_link -> imu_link
+  status: PROVISIONAL           # stream + sign CONFIRMED (baseline 14 Nov); how the TF was published on 14 Nov is unknown (asking Zaid)
+  x_m: 0.091
+  y_m: 0.057
+  z_m: 0.046
+  roll_rad: 3.141592653589793   # mounted upside down
+  pitch_rad: 0.0
+  yaw_rad: 0.0
+  gyro_z_bias_dps: null         # T5. Bench value -0.067 deg/s was the ESP32 board, not the car (baseline C-6)
+  gyro_z_scale: null            # T5. Bench value 1.009, ESP32 board (baseline C-6)
+  gyro_z_noise_var_rad2_s2: null  # T5. Bench value 5.4e-7, ESP32 board (baseline C-6)
+
+drivetrain:
+  speed_to_erpm_gain: 8414.0    # Standard, baseline 14 Nov (1/(pi*0.065)*60*4.09*7 = 8412). Ground scale: T4
+  speed_to_erpm_offset: 0.0
+
+steering:
+  # Linear converter used by config/real_car/ackermann_to_vesc_real.yaml and vesc_to_odom_real.yaml.
+  servo_gain: -0.50             # CONFIRMED 14 Nov after steering-play fix (baseline C-3)
+  servo_offset: 0.320           # CONFIRMED 14 Nov after steering-play fix (replaces 0.361)
+  max_left_rad: null            # T2
+  max_right_rad: null           # T2
+  backlash_servo: null          # T2 (play fixed 14 Nov; T2 confirms)
+  # RECORD ONLY, not used: asymmetric trial adapter
+  # (~/f1tenth_hw_evidence/steering_trial/steering_accel_adapter.py), measured BEFORE the 14 Nov play fix.
+  # T2 decides whether a piecewise converter (our own node) is still needed.
+  trial_record_pre_play_fix:
+    center: 0.32
+    left_gain: -0.44958461443514636
+    right_gain: -0.8569600610009573
+    left_limit_rad: 0.20
+    right_limit_rad: 0.15
+
+caps:
+  mux_default_max_speed_mps: 0.35   # physical_drive_mux.py MAX_SPEED (unchanged default)
+  mux_default_max_steer_rad: 0.10   # physical_drive_mux.py MAX_STEER (unchanged default)
+  mux_ceiling_max_speed_mps: 1.5    # hard ceiling of the max_speed_mps mux parameter (Moatasem, 14 Nov)
+  mux_ceiling_max_steer_rad: 0.40   # hard ceiling of the max_steer_rad mux parameter (Moatasem, 14 Nov)
+  test_speed_steps_mps: [0.5, 1.0, 1.5]  # decision 14 Nov; raise one step only after the previous passed
+  vesc_speed_max_margin: 1.10       # test yaml speed_max = step speed * gain * margin
+
+dynamics:
+  decel_mps2: null                  # T1/T4 (measured with the chosen stop method)
+  decel_assumed_mps2: 1.0           # used until decel_mps2 is measured (Moatasem, 14 Nov)
+  accel_measured_mps2: null         # T1/T4. Note: 12 Nov pulses needed 0.555 s to 0.24 m/s (~0.43 m/s^2)
+  start_delay_s: null               # T4 (command -> motion)
+
+runner:                             # tools/real_car_tests/run_test.py
+  publish_hz: 50.0                  # mux JOY_TTL 0.20 s / COMMAND_TTL 0.22 s -> 10x margin
+  ramp_accel_mps2: 0.5              # speed request ramp; the ground check uses this value.
+                                    # 0.5 for T1 at 0.5 and 1.0 m/s (Moatasem, 14 Nov). The 1.5 m/s step
+                                    # gets a ramp proposed from T1's measured accel/decel (0.5 needs ~5 m).
+  deadman_first_press_s: 0.7        # SPACE before terminal auto-repeat starts
+  deadman_repeat_s: 0.25            # SPACE gap allowed once auto-repeat runs
+  status_ttl_s: 0.25                # /control/status older than this -> zero
+  min_post_stop_zero_s: 1.0         # zero is sent at least this long after every stop
+  arm_timeout_s: 1.5                # MANUAL_READY must arrive within this
+
+ground_check:                       # needed = v^2/(2*ramp) + steady + v^2/(2*decel) + margin + (bumper - lidar x)
+  steady_length_m: 1.0
+  margin_m: 0.5
+  front_window_deg: 3.0             # median LiDAR range in +/- this window around 0 rad
+
+noise:                              # measurement R per sensor: T5/T6
+  vesc_vx_var: null
+  rf2o_vx_var: null
+  gyro_vyaw_var: null
+  time_offset_vesc_s: null
+  time_offset_imu_s: null

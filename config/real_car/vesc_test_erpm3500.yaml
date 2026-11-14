@@ -1,0 +1,21 @@
+# vesc_driver for the real-car test stack: dry run and anything at or below the 0.35 m/s mux default.
+# ROS-side command clips only. NOT firmware current limiting and NOT an emergency stop.
+# speed_max 3500 ERPM = 0.416 m/s at gain 8414 (same as the 12 Nov trial and vesc_real_integration.yaml).
+# Higher steps get their own file (vesc_test_erpm<N>.yaml), one per speed step, each approved first.
+# Servo clip 0.27-0.37 = offset 0.320 +/- 0.50 * 0.10 rad (mux default steering cap), symmetric about 0.320.
+# brake 0: no brake command can pass (brake units are AMPS: vesc_packet.cpp sends brake*1000 mA).
+vesc_driver:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
+    speed_min: -3500.0
+    speed_max: 3500.0
+    current_min: -2.0
+    current_max: 2.0
+    brake_min: 0.0
+    brake_max: 0.0
+    duty_cycle_min: 0.0
+    duty_cycle_max: 0.0
+    position_min: 0.0
+    position_max: 0.0
+    servo_min: 0.27
+    servo_max: 0.37

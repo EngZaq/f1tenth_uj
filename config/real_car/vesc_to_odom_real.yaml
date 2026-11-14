@@ -1,0 +1,14 @@
+# Real-car test stack VESC odometry -> /odom_vesc_observe (no TF; RF2O owns odom -> base_link).
+# Values must equal config/real_car/vehicle_params.yaml (run_test.py --self-test checks this).
+# Negative gain: vesc_to_odom computes speed = -erpm / gain, so +ERPM -> +vx (same sign as ackermann_to_vesc).
+/vesc_to_odom_node:
+  ros__parameters:
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: false
+    use_servo_cmd_to_calc_angular_velocity: true   # servo commands exist in this stack (observe_only sets false)
+    wheelbase: 0.260
+    speed_to_erpm_gain: -8414.0
+    speed_to_erpm_offset: 0.0
+    steering_angle_to_servo_gain: -0.50
+    steering_angle_to_servo_offset: 0.320
