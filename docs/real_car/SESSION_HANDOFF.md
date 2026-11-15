@@ -1,0 +1,181 @@
+# Real-car tests: session handoff (2026-11-15)
+
+For Moatasem and for the next Claude Code session. Read this, then
+[REAL_CAR_BASELINE_2026-11-14.md](REAL_CAR_BASELINE_2026-11-14.md) (standard values) and
+[REAL_CAR_TEST_RESULTS.md](REAL_CAR_TEST_RESULTS.md) (every measured result). Code:
+`tools/real_car_tests/` (README there). Numbers: `config/real_car/vehicle_params.yaml` only.
+
+## 1. Safety rules and standing approvals (Moatasem)
+
+| Rule | Detail |
+|---|---|
+| Who actuates | **Moatasem runs every launch and every runner that can power the motor or servo**, in his own SSH terminal, with a hand on the battery disconnect. Claude never starts them (not even disarmed: the test stack centres the servo) and never sets `enable_real_actuation:=true`. Claude gives exact commands, one terminal at a time. |
+| F-01 | CRITICAL. **No wheels-on-ground test until T1 passes and Moatasem confirms it in writing.** T1-T3 stand parts: car strapped, wheels off the ground, >= 0.8 m clear in front of the LiDAR (a box 1.5-2 m ahead keeps the front valid fraction >= 0.75), hands out of the front +/-20 deg sector. |
+| Mux | Never change mux gates, thresholds or interlocks. Caps change only through the per-test launch args (`max_speed_mps`, `max_steer_rad`) and the per-step `vesc_yaml`. No new publishers or subscribers on `/drive` or `/commands/*` (the bag never records them; the mux counts subscribers). |
+| One stack | `preflight.sh clean` before every launch, `preflight.sh stack` (or `stack t1b`) before every runner. |
+| Speeds | 0.5 -> 1.0 -> 1.5 m/s, one step only after the previous passed (runner `step_gate`, unchanged). Ground runs: LiDAR range ahead must fit ramp + 1 m + stop + 0.5 m (runner checks). |
+| Git | Claude may commit **its own files by name** without asking, author `Moatasem <motasemfaousju04@gmail.com>` passed per commit with `git -c user.name=... -c user.email=...` (the Jetson's git config is Zaid's: never change it). **Never push.** Never `git add -A`. Never stash/reset/commit teammates' files. |
+| Allowed without asking | Self-tests, `analyze.py`, offline replays (only when no car stack is running). |
+| Reporting | After each test: pass/fail, 3-5 numbers, the next exact commands, each terminal's command on its own. |
+| Sim repo | `~/f1tenth_uj_sim` (branch `moatasem/ekf-experiments`, at `9c581af`): read-only, `git pull` allowed, no commits. |
+
+## 2. Branch and commit state
+
+- Branch `moatasem/real-car-tests` from `zaq/hardware-integration` @ `53dfa91`. Not pushed.
+- Commits (oldest first): `d1e0c70` runner/analysis/params · `fea48d3` **mux caps (Zaid's file, separate commit for his review)** · `8b7228c` dry-run fixes · `61dcf0e` T1/T1b · `82336a1` T2 + VESC checklist · `057995f` steady-stop gate · `ae9a36f` shared rebound definition, T1b 1.0/1.5, table · `58b2449` results · `03b2e67` steady repeats only · plus the commit adding this file.
+- **Leave alone (teammates', uncommitted):** `tools/diagnostics/fit_steering_measurements.py`, and the `src/hardware/f1tenth_system` submodule (vesc_driver `VESC_SPEED_AUDIT` logging + serial fix: it is the record of sent ERPM, keep the build), untracked `teleop_tools`. `__pycache__/` is in `.git/info/exclude`.
+- Local, never committed: `~/f1tenth_uj/CLAUDE.local.md` (calibration section updated to the baseline). Claude memory: `~/.claude/projects/-home-ftenth/memory/`.
+
+## 3. T1 / T1b results so far (stand)
+
+`python3 tools/real_car_tests/analyze.py --table` (regenerate after each run):
+
+| Run | Method | Speed m/s | Steady / measured stops | Stops failing | Max rebound rise (ERPM) | Max rebound peak (ERPM) | Worst settle < 100 ERPM (s) | Max current after zero (A) | Max tach after zero | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `20261114_145433` | speed0 | 0.50 | 0 / 3 | 1 | 1774 | 1969 | 0.513 | 11.7 | 73 | FAIL |
+| `20261114_150601` | speed0 | 0.50 | 2 / 5 | 4 | 7644 | 7871 | 0.386 | 15.6 | 185 | FAIL |
+| `20261114_150933` | brake5A | 0.50 | 5 / 5 | 0 | 197 | 304 | 0.149 | 3.7 | 20 | PASS |
+| `20261114_152149` | brake10A | 0.50 | 4 / 5 | 0 | 193 | 243 | 0.130 | 3.4 | 25 | INCOMPLETE (4 steady) |
+| `20261114_152526` | brake10A | 0.50 | 5 / 5 | 0 | 246 | 251 | 0.123 | 4.2 | 20 | PASS |
+| `20261114_152830` | brake5A | 1.00 | 4 / 5 | 0 | 178 | 206 | 0.181 | 4.8 | 53 | INCOMPLETE (4 steady) |
+| `20261114_153922` | brake5A | 1.00 | 4 / 5 | 0 | 130 | 177 | 0.161 | 4.7 | 54 | INCOMPLETE (4 steady) |
+| `20261114_154158` | current0 | 0.50 | 5 / 5 | 0 | 78 | 91 | 0.197 | 1.2 | 32 | PASS |
+
+Reading: **speed 0 (the standard ackermann_to_vesc stop) is not safe**: rebound up to 7871 ERPM, above
+vesc_driver `speed_max` 4630, so VESC-internal; the VESC drives the motor (positive duty and current)
+~0.1-0.25 s after a zero. **Brake 5 A and 10 A stop cleanly** at 0.5 m/s; brake 5 A has 8 clean steady
+stops at 1.0 m/s over two runs but no single run with 5 (SPACE released early, now handled by extra
+repeats). **Current 0 passes on the stand but is a coast**; on the ground it needs a measured stop
+distance (T4) before it can be considered.
+
+## 4. Remaining work, in order
+
+1. **T1b brake 5 A, 1.0 m/s, third run** (needs 5 steady stops in one run). Gate then opens 1.5 m/s.
+2. **T1b brake 5 A, 1.5 m/s** (`vesc_t1b_erpm13883.yaml`, `max_speed_mps:=1.5`; hold SPACE ~6 s: 3 s ramp
+   + 3 s steady; ~7 wheel turns/s on the stand). Current 0 at 0.5 m/s is **done** (PASS).
+3. **T1 close-out:** VESC Tool checklist filled in; choose the stop method (the baseline criterion is no
+   rebound > 300 ERPM in 10 repeats with the chosen method); Moatasem confirms T1 in writing. Then
+   decide the permanent fix (section 5).
+4. **T2 servo sweep** (motor phases disconnected): `t2_servo_only.launch.py` + `t2_servo_sweep.py`;
+   holds only at points confirmed "no binding", 120 s auto-return, `q` returns to centre. Output:
+   servo -> angle table, max left/right, backlash, linear and per-side fit (decides whether a piecewise
+   converter is needed; the trial gains -0.4496 / -0.8570 were measured before the play fix).
+5. **T3** loaded steering on the stand, then mini-circles on the ground at 0.5 (then 1.0) m/s at 50 % and
+   90 % of the measured max steer (`max_steer_rad` launch arg, approved per test); delta = atan(0.260 / R)
+   vs T2. Runner profile not written yet.
+6. **T4** straight line 0.5/1.0/1.5 m/s toward a wall, 3 repeats each (runner ground check): LiDAR vs VESC
+   vs RF2O distance -> `speed_to_erpm_gain` (same value in both converter and vesc_to_odom), lateral drift
+   -> steering offset, start delay, stopping distance and deceleration with the chosen stop method. Profile
+   not written yet.
+7. **T5** IMU on the car: 10 min static (bias, R, Allan), 8 x 360 deg hand turns (scale, Moatasem's bench
+   scripts from `~/Data/kf_practice/imu/`), 2 min wheels spinning on the stand.
+8. **T6** offline on T3/T4/T5 bags: VESC vx vs RF2O vs LiDAR, gyro vs RF2O yaw rate, time offsets
+   (cross-correlation), R per sensor -> `vehicle_params.yaml noise`.
+9. **Phase F (shadow only, no TF authority):**
+   - `config/real_car/ekf_real_shadow.yaml` from `src/f1tenth_bringup/config/ekf_moatasem_vesc_imu_shadow.yaml`:
+     VESC vx + **vy = 0** (via `tools/shadow_covariance_adapter.py`) + BMI160 yaw rate (bias removed,
+     scale from T5), `two_d_mode: true`, R from T5/T6, Q_vx 0.05, Q_vyaw 0.02, no gates,
+     `smooth_lagged_data`, `publish_tf: false`, output `/ekf_shadow/odom`. Replay on real bags
+     (`use_sim_time`), judge the mean pose/yaw vs RF2O/SLAM, not P alone (baseline C-2).
+   - Nav2 AMCL in shadow on a real saved map, team laser model **A0** (`sigma_hit 0.10`, `z_rand 0.3`),
+     frames map/odom/base_link/laser, initial pose on its own topic, SLAM stopped. Replay on bags first.
+     Sim reference: `config/fusion_amcl_moatasem*.yaml`, `tools/localization/amcl_shadow.launch.py`.
+   - Port `tools/navigation/profiled_amcl_drive_moatasem.py` + `moatasem_speed_profile.py` (both in the sim
+     repo now) as a proposal-only node -> `/navigation/proposal` (never `/drive`); replace sim geometry
+     (0.3302, 0.17145, 0.27145, slam_map, fusion_* frames) with `vehicle_params.yaml`; guard with the
+     measured decel and delay; speed cap = mux cap.
+   - Write measured noise/bias/delay/steering play to a new sim file
+     `~/f1tenth_uj_sim/config/fusion_sim_sensors_realcar_<date>.yaml` (no commit there) and give the
+     command to re-run sim Test 7.
+
+## 5. Permanent stop fix (proposal, decide after T1)
+
+- **A: our own converter package** replacing `ackermann_to_vesc` (speed while driving, brake current on
+  stop, timed hold). Evidence-based (brake passed). Does not cover a dead Jetson (VESC timeout does),
+  nor overshoot on slow-downs to nonzero speed. The mux ownership check must then also require exactly
+  one publisher on `/commands/motor/brake` and `/commands/motor/current`, the same node as the speed
+  publisher, one subscriber each, none on duty/position: an added check in Zaid's file, needs review.
+- **B: VESC config** (speed-PID setpoint ramp `s_pid_ramp_erpms_s` is the leading hypothesis, gains,
+  allow braking, timeout brake current): fixes the cause for every source; not confirmed yet, settings
+  outside git (export XML), every change needs T1 again.
+- Recommended: both. Read the checklist, set a timeout brake current, test the ramp hypothesis with a
+  T1a speed0 repeat, keep brake-on-stop in ROS.
+
+## 6. Known bugs and open items
+
+| Item | State |
+|---|---|
+| Live rebound display | **Fixed** (`ae9a36f`, shared `ReboundTracker`: rises count only after ERPM fell to half its value at the zero). Confirmed on the current0 run: live = analysis on all 5 stops. Live peak times are ~0.06 s later than the analysis (live clock starts at the runner's zero, analysis at the converter's). |
+| Brake 10 A vs `l_current_min` | Requesting 10 A did not raise the measured motor current above the 5 A runs (<= 4.2 vs <= 3.7 A). Either the ~0.1 s stop is missed by 50 Hz telemetry or the firmware brake current limit caps it: check `l_current_min` (checklist row 11). |
+| VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). |
+| Brake hold release | Every brake stop shows a 77-100 ERPM rise at +2.1-2.2 s: the 2.0 s hold ending (switch to current 0). Tune the hold / release in the permanent fix. |
+| Battery | Pack read 11.1 V idle on 14 Nov after a power loss; charge before the 1.5 m/s step. |
+| Stand LiDAR | Front valid fraction ~0.83 vs the 0.75 MANUAL gate; an operator hand at 0.10-0.12 m (+10..+19 deg) latches `OBSTACLE_NEAR`. |
+| F-13 | Runner input gaps never exceeded 44 ms; the keyboard GUI's latch was not reproduced (GUI not re-tested). |
+| IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. |
+| Team notes | Repo configs still at offset 0.361; do not use `vesc.launch.py` (`config/vesc.yaml` brake 200000 A); listed in the results doc. |
+| T1b converter | Test-only (approved with conditions: one command per tick, brake/current only after a zero request, new nonzero request returns to speed at once, method logged per stop). |
+
+## 7. Command templates
+
+Every terminal, once:
+```bash
+source /opt/ros/humble/setup.bash
+source ~/f1tenth_uj/install/setup.bash
+export ROS_DOMAIN_ID=42 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+Before every launch (terminal A):
+```bash
+~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+```
+
+T1a stack, standard converter (terminal A); `<v>` / `<N>`: 0.5 / 4630, 1.0 / 9255, 1.5 / 13883:
+```bash
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=<v> vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_test_erpm<N>.yaml
+```
+
+T1b stack (terminal A); `stop_method` = `brake` (with `brake_current_a:=5.0|10.0`) or `current0`:
+```bash
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=<v> vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t1b_erpm<N>.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0
+```
+
+Preflight with the stack up (terminal B); add `t1b` for the T1b stack:
+```bash
+~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+```
+
+Runner (terminal B): `n` arms, hold SPACE until it stops by itself, `q` quits:
+```bash
+python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t1b_stop --speed <v> --live
+```
+
+Analysis (terminal B); `<pattern>` e.g. `t1b_stop_v1.00_brake5A`:
+```bash
+python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*<pattern>* | head -1)
+python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py --table
+python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py <folder> --stop-plot 1
+```
+
+Disarmed dry run (no `--live`, `enable_real_actuation:=false`):
+```bash
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=false
+python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test dry_run
+```
+
+T2 (motor phases disconnected; terminal A, then B; relaunch with a wider clip = approval):
+```bash
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.215 servo_max:=0.46
+python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py
+python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py --resume <folder>
+```
+
+Self-tests (Claude may run; the runner's shutdown probe uses isolated domain 77, no publishers):
+```bash
+for t in run_test analyze t1b_stop_converter t2_servo_sweep; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
+python3 ~/f1tenth_uj/src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
+```
+
+Results: `~/f1tenth_hw_evidence/real_car_tests/<stamp>_<test>_v<speed>_<method>_erpmmax<N>_<armed|disarmed>/`
+(bag, `runner_events.csv`, `keys.csv`, `publish_intervals.csv`, `vesc_speed_audit.log`, `summary.json`,
+CSVs, plots, README). Not committed.
