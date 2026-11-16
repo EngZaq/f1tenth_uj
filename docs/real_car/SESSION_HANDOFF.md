@@ -1,4 +1,4 @@
-# Real-car tests: session handoff (2026-11-15)
+# Real-car tests: session handoff (2026-11-16)
 
 For Moatasem and for the next Claude Code session. Read this, then
 [REAL_CAR_BASELINE_2026-11-14.md](REAL_CAR_BASELINE_2026-11-14.md) (standard values) and
@@ -10,7 +10,7 @@ For Moatasem and for the next Claude Code session. Read this, then
 | Rule | Detail |
 |---|---|
 | Who actuates | **Moatasem runs every launch and every runner that can power the motor or servo**, in his own SSH terminal, with a hand on the battery disconnect. Claude never starts them (not even disarmed: the test stack centres the servo) and never sets `enable_real_actuation:=true`. Claude gives exact commands, one terminal at a time. |
-| F-01 | CRITICAL. **No wheels-on-ground test until T1 passes and Moatasem confirms it in writing.** T1-T3 stand parts: car strapped, wheels off the ground, >= 0.8 m clear in front of the LiDAR (a box 1.5-2 m ahead keeps the front valid fraction >= 0.75), hands out of the front +/-20 deg sector. |
+| F-01 | **Mitigated on the stand (T1 passed, confirmed by Moatasem in writing 16 Nov): brake 5 A, never speed 0.** Any run that powers the motor uses the T1b converter with `stop_method:=brake brake_current_a:=5.0` until the permanent converter (section 5) replaces it; the standard `ackermann_to_vesc` (speed 0 stop) never drives the motor. Ground runs only as the T3/T4 steps below, each approved per step. Stand parts: car strapped, wheels off the ground, >= 0.8 m clear in front of the LiDAR (a box 1.5-2 m ahead keeps the front valid fraction >= 0.75), hands out of the front +/-20 deg sector. |
 | Mux | Never change mux gates, thresholds or interlocks. Caps change only through the per-test launch args (`max_speed_mps`, `max_steer_rad`) and the per-step `vesc_yaml`. No new publishers or subscribers on `/drive` or `/commands/*` (the bag never records them; the mux counts subscribers). |
 | One stack | `preflight.sh clean` before every launch, `preflight.sh stack` (or `stack t1b`) before every runner. |
 | Speeds | 0.5 -> 1.0 -> 1.5 m/s, one step only after the previous passed (runner `step_gate`, unchanged). Ground runs: LiDAR range ahead must fit ramp + 1 m + stop + 0.5 m (runner checks). |
@@ -22,11 +22,11 @@ For Moatasem and for the next Claude Code session. Read this, then
 ## 2. Branch and commit state
 
 - Branch `moatasem/real-car-tests` from `zaq/hardware-integration` @ `53dfa91`. Not pushed.
-- Commits (oldest first): `d1e0c70` runner/analysis/params · `fea48d3` **mux caps (Zaid's file, separate commit for his review)** · `8b7228c` dry-run fixes · `61dcf0e` T1/T1b · `82336a1` T2 + VESC checklist · `057995f` steady-stop gate · `ae9a36f` shared rebound definition, T1b 1.0/1.5, table · `58b2449` results · `03b2e67` steady repeats only · plus the commit adding this file.
+- Commits (oldest first): `d1e0c70` runner/analysis/params · `fea48d3` **mux caps (Zaid's file, separate commit for his review)** · `8b7228c` dry-run fixes · `61dcf0e` T1/T1b · `82336a1` T2 + VESC checklist · `057995f` steady-stop gate · `ae9a36f` shared rebound definition, T1b 1.0/1.5, table · `58b2449` results · `03b2e67` steady repeats only · `6b52990` this file + current 0 · plus the T1 close-out commit (16 Nov).
 - **Leave alone (teammates', uncommitted):** `tools/diagnostics/fit_steering_measurements.py`, and the `src/hardware/f1tenth_system` submodule (vesc_driver `VESC_SPEED_AUDIT` logging + serial fix: it is the record of sent ERPM, keep the build), untracked `teleop_tools`. `__pycache__/` is in `.git/info/exclude`.
 - Local, never committed: `~/f1tenth_uj/CLAUDE.local.md` (calibration section updated to the baseline). Claude memory: `~/.claude/projects/-home-ftenth/memory/`.
 
-## 3. T1 / T1b results so far (stand)
+## 3. T1 / T1b results (stand): T1 COMPLETE 16 Nov
 
 `python3 tools/real_car_tests/analyze.py --table` (regenerate after each run):
 
@@ -40,8 +40,17 @@ For Moatasem and for the next Claude Code session. Read this, then
 | `20261114_152830` | brake5A | 1.00 | 4 / 5 | 0 | 178 | 206 | 0.181 | 4.8 | 53 | INCOMPLETE (4 steady) |
 | `20261114_153922` | brake5A | 1.00 | 4 / 5 | 0 | 130 | 177 | 0.161 | 4.7 | 54 | INCOMPLETE (4 steady) |
 | `20261114_154158` | current0 | 0.50 | 5 / 5 | 0 | 78 | 91 | 0.197 | 1.2 | 32 | PASS |
+| `20261116_215116` | brake5A | 1.00 | 5 / 5 | 0 | 152 | 286 | 0.179 | 4.4 | 56 | PASS |
+| `20261116_215634` | brake5A | 1.50 | 5 / 5 | 0 | 114 | 220 | 0.227 | 4.8 | 103 | PASS |
 
-Reading: **speed 0 (the standard ackermann_to_vesc stop) is not safe**: rebound up to 7871 ERPM, above
+**Close-out (16 Nov):** brake 5 A passed at 0.5, 1.0 and 1.5 m/s: 23 steady stops, 0 failing, worst
+rebound rise 197 ERPM, worst settle 0.227 s, <= 4.8 A. **F-01 is mitigated on the stand with brake
+current; speed 0 must never be used as a stop command.** F-01 stays open for: the permanent converter
+(section 5), the ground stop distance (T4) and VESC Tool rows 11/14. A small rise (96-152 ERPM) at
++0.16 s in 4 of 10 stops at 1.0/1.5 m/s has the speed-0 rebound's timing: the cause is suppressed,
+not removed.
+
+Reading of the 14 Nov runs: **speed 0 (the standard ackermann_to_vesc stop) is not safe**: rebound up to 7871 ERPM, above
 vesc_driver `speed_max` 4630, so VESC-internal; the VESC drives the motor (positive duty and current)
 ~0.1-0.25 s after a zero. **Brake 5 A and 10 A stop cleanly** at 0.5 m/s; brake 5 A has 8 clean steady
 stops at 1.0 m/s over two runs but no single run with 5 (SPACE released early, now handled by extra
@@ -50,12 +59,10 @@ distance (T4) before it can be considered.
 
 ## 4. Remaining work, in order
 
-1. **T1b brake 5 A, 1.0 m/s, third run** (needs 5 steady stops in one run). Gate then opens 1.5 m/s.
-2. **T1b brake 5 A, 1.5 m/s** (`vesc_t1b_erpm13883.yaml`, `max_speed_mps:=1.5`; hold SPACE ~6 s: 3 s ramp
-   + 3 s steady; ~7 wheel turns/s on the stand). Current 0 at 0.5 m/s is **done** (PASS).
-3. **T1 close-out:** VESC Tool checklist filled in; choose the stop method (the baseline criterion is no
-   rebound > 300 ERPM in 10 repeats with the chosen method); Moatasem confirms T1 in writing. Then
-   decide the permanent fix (section 5).
+1. ~~T1b 1.0 / 1.5 m/s, T1 close-out~~ **Done 16 Nov** (brake 5 A chosen, 23 steady stops, 0 failing).
+2. **Still from T1:** VESC Tool checklist (`T1_VESC_TOOL_CHECKLIST.md`, at least rows 11 and 14 and the
+   two XML exports), and Zaid's decision on the permanent converter (proposal in section 5).
+3. (number kept free)
 4. **T2 servo sweep** (motor phases disconnected): `t2_servo_only.launch.py` + `t2_servo_sweep.py`;
    holds only at points confirmed "no binding", 120 s auto-return, `q` returns to centre. Output:
    servo -> angle table, max left/right, backlash, linear and per-side fit (decides whether a piecewise
@@ -88,7 +95,7 @@ distance (T4) before it can be considered.
      `~/f1tenth_uj_sim/config/fusion_sim_sensors_realcar_<date>.yaml` (no commit there) and give the
      command to re-run sim Test 7.
 
-## 5. Permanent stop fix (proposal, decide after T1)
+## 5. Permanent stop fix (T1 done: option A chosen for the proposal to Zaid, 16 Nov)
 
 - **A: our own converter package** replacing `ackermann_to_vesc` (speed while driving, brake current on
   stop, timed hold). Evidence-based (brake passed). Does not cover a dead Jetson (VESC timeout does),
@@ -108,8 +115,8 @@ distance (T4) before it can be considered.
 | Live rebound display | **Fixed** (`ae9a36f`, shared `ReboundTracker`: rises count only after ERPM fell to half its value at the zero). Confirmed on the current0 run: live = analysis on all 5 stops. Live peak times are ~0.06 s later than the analysis (live clock starts at the runner's zero, analysis at the converter's). |
 | Brake 10 A vs `l_current_min` | Requesting 10 A did not raise the measured motor current above the 5 A runs (<= 4.2 vs <= 3.7 A). Either the ~0.1 s stop is missed by 50 Hz telemetry or the firmware brake current limit caps it: check `l_current_min` (checklist row 11). |
 | VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). |
-| Brake hold release | Every brake stop shows a 77-100 ERPM rise at +2.1-2.2 s: the 2.0 s hold ending (switch to current 0). Tune the hold / release in the permanent fix. |
-| Battery | Pack read 11.1 V idle on 14 Nov after a power loss; charge before the 1.5 m/s step. |
+| Brake hold release | Every brake stop (also 16 Nov at 1.0 / 1.5 m/s: 88-101 ERPM at +2.09-2.15 s) shows a 77-100 ERPM rise at +2.1-2.2 s: the 2.0 s hold ending (switch to current 0). Tune the hold / release in the permanent fix. |
+| Battery | Charged: >= 12.3 V during both 16 Nov runs (11.1 V idle on 14 Nov after a power loss). |
 | Stand LiDAR | Front valid fraction ~0.83 vs the 0.75 MANUAL gate; an operator hand at 0.10-0.12 m (+10..+19 deg) latches `OBSTACLE_NEAR`. |
 | F-13 | Runner input gaps never exceeded 44 ms; the keyboard GUI's latch was not reproduced (GUI not re-tested). |
 | IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. |
