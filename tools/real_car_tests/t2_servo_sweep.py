@@ -11,8 +11,10 @@ Rules (Moatasem, 14 Nov; two servos already burned on this car), values in vehic
 - Every new outward point is first visited for at most pulse_s (< 1 s) and the operator answers
   "binding / noise?". Yes -> that side ends at the previous point and the tool never goes back.
   No -> the point is confirmed and may be held for measuring (back to centre after max_hold_s).
+  e -> no binding seen, but that side ends at the previous point (recorded as ended, not binding).
 - A point outside the vesc_driver hard clip needs a relaunch with a clip just outside it
-  (that relaunch is the approval); the tool saves and prints the command, then --resume.
+  (that relaunch is the approval). The operator can instead end that side there (e). Both sides
+  run before any pause; the tool then saves and prints one relaunch command for both, then --resume.
 - Any exit (q, Ctrl+C, SSH loss, error) slews back to the centre first.
 
 Wheel angles in degrees, + = wheel turned LEFT (servo below 0.320 steers left: gain -0.50).
@@ -67,6 +69,13 @@ def clip_needed(target, clip_lo, clip_hi, margin):
     if target < clip_lo:
         return round(target - margin, 3), clip_hi
     return clip_lo, round(target + margin, 3)
+
+
+def merge_clip(current, need):
+    """Widest clip covering both pending relaunch requests (None = no request yet)."""
+    if current is None:
+        return need
+    return round(min(current[0], need[0]), 3), round(max(current[1], need[1]), 3)
 
 
 def equivalent_angle(left_deg, right_deg):
@@ -127,6 +136,8 @@ def fit_rows(rows, centre):
             out['backlash_servo'] = round(abs(dd * full[1]), 4)
     out['binding'] = [dict(servo=float(r['servo']), side=r['side'], note=r['note'])
                       for r in rows if r['kind'] == 'pulse' and r['binding'] == 'yes']
+    out['ended_by_operator'] = [dict(servo=float(r['servo']), side=r['side'], note=r['note'])
+                                for r in rows if r['binding'] == 'end']
     return out
 
 
@@ -138,7 +149,7 @@ def edges_from_rows(rows, centre):
         if side not in state:
             continue
         s = float(r['servo'])
-        if r['kind'] == 'pulse' and r['binding'] == 'yes':
+        if r['binding'] in ('yes', 'end'):  # binding pulse, or side ended by the operator
             state[side][1] = True
         elif r['kind'] == 'pulse' and r['binding'] == 'no':
             if (side == 'left' and s < state[side][0]) or (side == 'right' and s > state[side][0]):
@@ -191,9 +202,20 @@ def self_test():
               dict(kind='pulse', side='right', servo=0.36, binding='yes')]
     st = edges_from_rows(pulses, centre)
     assert st == {'left': [0.28, False], 'right': [0.34, True]}, st
+    # 'e' after a pulse: side done, edge stays at the last confirmed point; 'e' at the clip likewise
+    ended = pulses[:3] + [dict(kind='pulse', side='right', servo=0.36, binding='end', note=''),
+                          dict(kind='end', side='left', servo=0.28, binding='end', note='')]
+    st = edges_from_rows(ended, centre)
+    assert st == {'left': [0.28, True], 'right': [0.34, True]}, st
+    f = fit_rows(rows + ended, centre)
+    assert [e['side'] for e in f['ended_by_operator']] == ['right', 'left'] and len(f['binding']) == 1
+    # Both sides paused at the clip: one relaunch covering both
+    assert merge_clip(None, (0.205, 0.46)) == (0.205, 0.46)
+    assert merge_clip((0.205, 0.46), (0.215, 0.47)) == (0.205, 0.47)
     print('PASS: sweep order (0.02 inside 0.22-0.455, then 0.01), clip relaunch values,')
     print('      equivalent Ackermann angle, linear + per-side fit, backlash, binding record,')
-    print('      resume edges. No ROS imported; nothing published.')
+    print('      resume edges, side ended by operator (e), one relaunch for both sides.')
+    print('      No ROS imported; nothing published.')
 
 
 # ---------------------------------------------------------------- operator I/O
@@ -351,21 +373,34 @@ def sweep(args, node, p, rules, centre, get_node_params):
     relaunch = None
     for side in ('left', 'right'):
         edge, done = edges[side]
+        start_edge = edge
         while not done:
             target = next_point(side, edge, rules)
             need = clip_needed(target, clip_lo, clip_hi, float(rules['clip_margin']))
             if need:
-                relaunch = need
-                print('%s side: next point %.3f is outside the driver clip %.3f..%.3f.' % (
-                    side, target, clip_lo, clip_hi))
+                ans = (ask('%s side: next point %.3f is outside the driver clip %.3f..%.3f. '
+                           'Enter = pause for a wider clip, e = end this side here:' % (
+                               side, target, clip_lo, clip_hi), 300) or '').lower()
+                if ans == 'e':
+                    record(kind='end', side=side, servo=edge, binding='end',
+                           note='ended by operator at the clip, next %.3f' % target)
+                    print('%s side ends at %.3f (operator).' % (side, edge))
+                else:
+                    relaunch = merge_clip(relaunch, need)
                 break
             # First visit: at most pulse_s at the new point, then back to the confirmed edge.
             node.go(target)
             time.sleep(float(rules['pulse_s']))
             node.go(edge)
             ans = None
-            while ans not in ('y', 'n'):
-                ans = (ask('Binding, end stop or noise at %.3f? [y/n]:' % target, 300) or '').lower()
+            while ans not in ('y', 'n', 'e'):
+                ans = (ask('Binding, end stop or noise at %.3f? [y/n, e = no binding, end side here]:'
+                           % target, 300) or '').lower()
+            if ans == 'e':
+                record(kind='pulse', side=side, servo=target, binding='end',
+                       note='no binding; side ended by operator at %.3f' % edge)
+                print('%s side ends at %.3f (operator).' % (side, edge))
+                break
             record(kind='pulse', side=side, servo=target, binding='yes' if ans == 'y' else 'no')
             if ans == 'y':
                 done = True
@@ -373,11 +408,11 @@ def sweep(args, node, p, rules, centre, get_node_params):
                 break
             edge = target
             measure(edge, side)
-        # Approach the centre from this side for the backlash pair.
-        node.go(centre)
-        measure(centre, 'centre', 'centre_from_%s' % side)
-        if relaunch:
-            break
+        # Approach the centre from this side for the backlash pair (only if the side moved now,
+        # so a resume does not ask again for a side finished earlier).
+        if edge != start_edge:
+            node.go(centre)
+            measure(centre, 'centre', 'centre_from_%s' % side)
 
     fit = fit_rows(rows, centre)
     (out / 'fit.json').write_text(json.dumps(fit, indent=2))

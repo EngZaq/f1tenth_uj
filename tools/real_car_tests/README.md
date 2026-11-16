@@ -64,14 +64,20 @@ Before T1b: fill in `docs/real_car/T1_VESC_TOOL_CHECKLIST.md`.
 
 ## T2: servo sweep (servo-only stack)
 
-Motor phase wires disconnected. `t2_servo_only.launch.py servo_min:=.. servo_max:=..` starts only
+Motor phase wires disconnected. **Servo power:** the servo is powered by the 6 A UBEC (fed from the
+battery); only the signal comes from the VESC. So the battery must be connected for the servo to
+move, and a binding servo draws its stall current from the UBEC (up to ~6 A), which the VESC does not
+limit: answer "binding" at the first buzz. `t2_servo_only.launch.py servo_min:=.. servo_max:=..` starts only
 `vesc_driver` with every motor limit 0 (`vesc_t2_servo_only.yaml`) and the servo clip just outside
 the approved range. `t2_servo_sweep.py` (or `run_test.py --test t2_servo_sweep`) checks that, then
-sweeps from 0.320: 0.02 steps inside 0.22-0.455, 0.01 beyond. Each new outward point is visited
-for <= 0.8 s, then you answer "binding?"; only then is it held for measuring. A point outside
-the clip pauses the sweep and prints the relaunch command (the relaunch is your approval), then
-`--resume <folder>`. Results: `points.csv`, `fit.json` (gain, offset, residual, per-side fits,
-max angles, backlash).
+sweeps from 0.320: 0.02 steps inside 0.22-0.455, 0.01 beyond, left side (servo down) first, then
+right. Each new outward point is visited for <= 0.8 s, then you answer `y` (binding / end stop /
+noise: the side ends at the previous point), `n` (confirmed, held for measuring) or `e` (no binding,
+but end this side at the previous point). A point outside the clip asks: Enter = pause for a wider
+clip, `e` = end this side there. Both sides run first; then one relaunch command covering both is
+printed (the relaunch is your approval), then `--resume <folder>`. Results: `points.csv`, `fit.json`
+(gain, offset, residual, per-side fits, max angles, backlash, binding points, sides ended by the
+operator).
 
 Offline checks (no ROS graph, nothing published): `run_test.py --self-test` (its shutdown probe
 uses an isolated domain 77, localhost only, no publishers), `analyze.py --self-test`,
