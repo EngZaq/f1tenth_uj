@@ -10,7 +10,9 @@ servo_min / servo_max = the hard clip, just outside the last range Moatasem appr
 means a relaunch with new values: that relaunch is the approval.
 
   ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.215 servo_max:=0.46
+  python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py --self-test   (clip check only)
 """
+import math
 import os
 import sys
 
@@ -24,7 +26,32 @@ from launch_ros.actions import Node
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import params as vp  # noqa: E402
 
-SANITY_MIN, SANITY_MAX = 0.15, 0.55  # far outside anything approved; catches typos only
+# Hard ceiling for the clip. 0.10-0.60 = the old config/vesc.yaml range (Moatasem, 18 Nov: wheels
+# still free at 0.15 and 0.55). VESC firmware maps servo 0..1 to 1000..2000 us (conf_general.h
+# SERVO_OUT_PULSE_MIN_US / MAX_US), so 0.10-0.60 = 1100-1600 us.
+SANITY_MIN, SANITY_MAX = 0.10, 0.60
+
+
+def check_clip(lo, hi, centre):
+    """Raise unless SANITY_MIN <= lo < centre < hi <= SANITY_MAX (all finite)."""
+    if not all(math.isfinite(v) for v in (lo, hi, centre)) or \
+            not SANITY_MIN <= lo < centre < hi <= SANITY_MAX:
+        raise RuntimeError('servo clip %.3f..%.3f rejected: needs %.2f <= min < %.3f < max <= %.2f'
+                           % (lo, hi, SANITY_MIN, centre, SANITY_MAX))
+
+
+def self_test():
+    centre = 0.320
+    for lo, hi in ((0.215, 0.46), (0.15, 0.55), (0.10, 0.60)):
+        check_clip(lo, hi, centre)
+    for lo, hi in ((0.09, 0.46), (0.215, 0.61), (0.33, 0.46), (0.215, 0.31), (float('nan'), 0.46)):
+        try:
+            check_clip(lo, hi, centre)
+        except RuntimeError:
+            continue
+        raise AssertionError('clip %r..%r accepted' % (lo, hi))
+    print('PASS: clip ceiling 0.10..0.60 accepted at its edges, 0.09 / 0.61 / centre outside the')
+    print('      clip / NaN rejected. No ROS node started; nothing published.')
 
 
 def driver(context):
@@ -32,9 +59,7 @@ def driver(context):
     centre = float(vp.get(p, 'steering.servo_offset'))
     lo = float(LaunchConfiguration('servo_min').perform(context))
     hi = float(LaunchConfiguration('servo_max').perform(context))
-    if not SANITY_MIN <= lo < centre < hi <= SANITY_MAX:
-        raise RuntimeError('servo clip %.3f..%.3f rejected: needs %.2f <= min < %.3f < max <= %.2f'
-                           % (lo, hi, SANITY_MIN, centre, SANITY_MAX))
+    check_clip(lo, hi, centre)
     node = Node(
         package='vesc_driver',
         executable='vesc_driver_node',
@@ -58,3 +83,7 @@ def generate_launch_description():
                               description='Hard servo clip, just above the last approved value.'),
         OpaqueFunction(function=driver),
     ])
+
+
+if __name__ == '__main__' and '--self-test' in sys.argv:
+    self_test()

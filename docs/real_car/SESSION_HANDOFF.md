@@ -180,6 +180,7 @@ python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py --resume <folder>
 Self-tests (Claude may run; the runner's shutdown probe uses isolated domain 77, no publishers):
 ```bash
 for t in run_test analyze t1b_stop_converter t2_servo_sweep; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
+python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py --self-test
 python3 ~/f1tenth_uj/src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
 ```
 
