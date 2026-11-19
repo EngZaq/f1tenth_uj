@@ -63,7 +63,10 @@ distance (T4) before it can be considered.
 2. **Still from T1:** VESC Tool checklist (`T1_VESC_TOOL_CHECKLIST.md`, at least rows 11 and 14 and the
    two XML exports), and Zaid's decision on the permanent converter (proposal in section 5).
 3. (number kept free)
-4. **T2 servo sweep** (motor phases disconnected): `t2_servo_only.launch.py` + `t2_servo_sweep.py`;
+4. **T2 servo sweep: limits done 19 Nov** (`20261119_134151_t2_servo_sweep` + `--extend-right`):
+   driving clip **0.10-0.68**, max left 0.2994 rad (17.15 deg), right -0.3208 rad (18.38 deg). The fit
+   (gain -0.956, offset 0.364) is not adopted: centre readings disagree, re-check the centre first.
+   Original T2 plan: (motor phases disconnected): `t2_servo_only.launch.py` + `t2_servo_sweep.py`;
    holds only at points confirmed "no binding", 120 s auto-return, `q` returns to centre. Output:
    servo -> angle table, max left/right, backlash, linear and per-side fit (decides whether a piecewise
    converter is needed; the trial gains -0.4496 / -0.8570 were measured before the play fix).
