@@ -80,6 +80,15 @@ printed (the relaunch is your approval), then `--resume <folder>`. Results: `poi
 (gain, offset, residual, per-side fits, max angles, backlash, binding points, sides ended by the
 operator).
 
+Right-side limit extension (19 Nov): `t2_servo_sweep.py --extend-right <T2 folder>` continues the
+right side of that run from its last free point in 0.02 steps (same 0.8 s visit and y / n / e prompt;
+`s` at the measure prompt), up to the driver clip (launch `servo_max` up to 1.0; min stays 0.10) and
+the VESC maximum 1.0. It never commands the left side. When the side ends it returns to the last free
+point for its angles (unless measured), appends to that folder's `points.csv`, refits `fit.json`
+(`max_right_*`, `right_last_free_servo`, `right_stop_servo`; old file kept as
+`fit_before_extend_right.json`) and writes `extend_right.json` (proposed right driving clip = last
+free point, one step before the stop).
+
 Offline checks (no ROS graph, nothing published): `run_test.py --self-test` (its shutdown probe
 uses an isolated domain 77, localhost only, no publishers), `analyze.py --self-test`,
 `t1b_stop_converter.py --self-test`, `t2_servo_sweep.py --self-test`,

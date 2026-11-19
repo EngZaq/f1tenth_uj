@@ -87,6 +87,7 @@ t2:                                 # servo sweep rules (Moatasem, 14 Nov; two s
   approved_servo_max: 0.60          # 18 Nov wheels free at 0.15/0.55 (REAL_CAR_TEST_RESULTS.md); = launch ceiling
   inside_step: 0.02                 # steps inside the approved range
   outside_step: 0.01                # beyond it: one step per confirmation, clip relaunch each time
+  extend_step: 0.02                 # t2_servo_sweep.py --extend-right (19 Nov): right side past its last free point
   clip_margin: 0.005                # vesc_driver servo_min/max = last approved value -/+ this
   pulse_s: 0.8                      # first visit of a new outward point: at most this long (< 1 s incl. servo travel)
   max_hold_s: 120.0                 # any hold for measuring: back to centre after this

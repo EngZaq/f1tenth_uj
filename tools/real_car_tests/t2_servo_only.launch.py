@@ -6,8 +6,8 @@ No mux, no converter, no sensors: t2_servo_sweep.py is the only /commands/servo/
 The servo moves only when t2_servo_sweep.py runs.
 
 servo_min / servo_max = the hard clip, just outside the last range Moatasem approved
-(vehicle_params.yaml t2.clip_margin). At the 0.10-0.60 ceiling the clip equals the approved
-range (no margin): ros2 launch ... servo_min:=0.10 servo_max:=0.60 runs the whole T2. vesc_driver reads them at start, so a wider range
+(vehicle_params.yaml t2.clip_margin). Normal T2: servo_min:=0.10 servo_max:=0.60 (the approved
+range). Right-side extension (--extend-right): servo_max up to 1.0; min stays 0.10. vesc_driver reads them at start, so a wider range
 means a relaunch with new values: that relaunch is the approval.
 
   ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.215 servo_max:=0.46
@@ -27,10 +27,11 @@ from launch_ros.actions import Node
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import params as vp  # noqa: E402
 
-# Hard ceiling for the clip. 0.10-0.60 = the old config/vesc.yaml range (Moatasem, 18 Nov: wheels
-# still free at 0.15 and 0.55). VESC firmware maps servo 0..1 to 1000..2000 us (conf_general.h
-# SERVO_OUT_PULSE_MIN_US / MAX_US), so 0.10-0.60 = 1100-1600 us.
-SANITY_MIN, SANITY_MAX = 0.10, 0.60
+# Hard ceiling for the clip. VESC firmware maps servo 0..1 to 1000..2000 us (conf_general.h
+# SERVO_OUT_PULSE_MIN_US / MAX_US). Min 0.10 = left last safe point (Moatasem, 19 Nov: 17 deg,
+# mechanical stop ~0.08). Max 1.0 = the VESC maximum, for the right-side extension
+# (t2_servo_sweep.py --extend-right); the sweep still visits every point briefly first.
+SANITY_MIN, SANITY_MAX = 0.10, 1.00
 
 
 def check_clip(lo, hi, centre):
@@ -43,9 +44,10 @@ def check_clip(lo, hi, centre):
 
 def self_test():
     centre = 0.320
-    for lo, hi in ((0.215, 0.46), (0.15, 0.55), (0.10, 0.60)):
+    for lo, hi in ((0.215, 0.46), (0.15, 0.55), (0.10, 0.60), (0.10, 0.80), (0.10, 1.00)):
         check_clip(lo, hi, centre)
-    for lo, hi in ((0.09, 0.46), (0.215, 0.61), (0.33, 0.46), (0.215, 0.31), (float('nan'), 0.46)):
+    for lo, hi in ((0.09, 0.46), (0.10, 1.01), (0.33, 0.46), (0.215, 0.31), (float('nan'), 0.46),
+                   (0.10, float('inf'))):
         try:
             check_clip(lo, hi, centre)
         except RuntimeError:
@@ -55,7 +57,7 @@ def self_test():
     p = vp.load()
     check_clip(float(vp.get(p, 't2.approved_servo_min')), float(vp.get(p, 't2.approved_servo_max')),
                float(vp.get(p, 'steering.servo_offset')))
-    print('PASS: clip ceiling 0.10..0.60 accepted at its edges, 0.09 / 0.61 / centre outside the')
+    print('PASS: clip ceiling 0.10..1.00 accepted at its edges, 0.09 / 1.01 / centre outside the')
     print('      clip / NaN rejected; vehicle_params t2 approved range is a valid clip.')
     print('      No ROS node started; nothing published.')
 

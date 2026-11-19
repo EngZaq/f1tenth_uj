@@ -177,6 +177,9 @@ since 19 Nov = the launch ceiling, so one launch; `e` ends a side):
 ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.10 servo_max:=0.60
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py --resume <folder>
+# right-side limit extension (19 Nov), linked to a finished run; launch servo_max up to 1.0, min 0.10:
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.10 servo_max:=0.80
+python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py --extend-right <folder>
 ```
 
 Self-tests (Claude may run; the runner's shutdown probe uses isolated domain 77, no publishers):
