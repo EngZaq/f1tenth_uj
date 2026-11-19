@@ -6,7 +6,8 @@ No mux, no converter, no sensors: t2_servo_sweep.py is the only /commands/servo/
 The servo moves only when t2_servo_sweep.py runs.
 
 servo_min / servo_max = the hard clip, just outside the last range Moatasem approved
-(vehicle_params.yaml t2.clip_margin). vesc_driver reads them at start, so a wider range
+(vehicle_params.yaml t2.clip_margin). At the 0.10-0.60 ceiling the clip equals the approved
+range (no margin): ros2 launch ... servo_min:=0.10 servo_max:=0.60 runs the whole T2. vesc_driver reads them at start, so a wider range
 means a relaunch with new values: that relaunch is the approval.
 
   ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.215 servo_max:=0.46
@@ -50,8 +51,13 @@ def self_test():
         except RuntimeError:
             continue
         raise AssertionError('clip %r..%r accepted' % (lo, hi))
+    # The approved range in vehicle_params.yaml must itself be a valid clip (one launch runs it all)
+    p = vp.load()
+    check_clip(float(vp.get(p, 't2.approved_servo_min')), float(vp.get(p, 't2.approved_servo_max')),
+               float(vp.get(p, 'steering.servo_offset')))
     print('PASS: clip ceiling 0.10..0.60 accepted at its edges, 0.09 / 0.61 / centre outside the')
-    print('      clip / NaN rejected. No ROS node started; nothing published.')
+    print('      clip / NaN rejected; vehicle_params t2 approved range is a valid clip.')
+    print('      No ROS node started; nothing published.')
 
 
 def driver(context):

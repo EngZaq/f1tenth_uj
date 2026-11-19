@@ -70,7 +70,8 @@ move, and a binding servo draws its stall current from the UBEC (up to ~6 A), wh
 limit: answer "binding" at the first buzz. `t2_servo_only.launch.py servo_min:=.. servo_max:=..` starts only
 `vesc_driver` with every motor limit 0 (`vesc_t2_servo_only.yaml`) and the servo clip just outside
 the approved range. `t2_servo_sweep.py` (or `run_test.py --test t2_servo_sweep`) checks that, then
-sweeps from 0.320: 0.02 steps inside 0.22-0.455, 0.01 beyond, left side (servo down) first, then
+sweeps from 0.320: 0.02 steps inside the approved range (`vehicle_params.yaml` `t2`, 0.10-0.60 since
+19 Nov, so one launch with `servo_min:=0.10 servo_max:=0.60` covers it), 0.01 beyond, left side (servo down) first, then
 right. Each new outward point is visited for <= 0.8 s, then you answer `y` (binding / end stop /
 noise: the side ends at the previous point), `n` (confirmed, held for measuring) or `e` (no binding,
 but end this side at the previous point). A point outside the clip asks: Enter = pause for a wider

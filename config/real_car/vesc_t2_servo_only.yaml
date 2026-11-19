@@ -1,7 +1,8 @@
 # vesc_driver for T2 servo sweep ONLY (tools/real_car_tests/t2_servo_only.launch.py).
 # Motor phase wires PHYSICALLY DISCONNECTED; in addition every motor command clips to 0
 # (speed, current, brake, duty, position: min = max = 0). t2_servo_sweep.py reads these back.
-# Servo clip: just outside the last range Moatasem approved. Start: approved 0.22-0.455.
+# Servo clip: just outside the last range Moatasem approved; launch args override these values.
+# Approved since 19 Nov: 0.10-0.60 (vehicle_params.yaml t2) = launch ceiling, so one launch at 0.10-0.60.
 # A wider clip only by relaunching with servo_min:= / servo_max:= (vesc_driver reads limits at start).
 vesc_driver:
   ros__parameters:

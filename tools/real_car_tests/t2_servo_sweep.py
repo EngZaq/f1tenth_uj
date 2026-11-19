@@ -7,7 +7,8 @@ The tool is the only /commands/servo/position publisher. Line input (both hands 
 measure); servo commands are slew-limited at 50 Hz.
 
 Rules (Moatasem, 14 Nov; two servos already burned on this car), values in vehicle_params.yaml t2:
-- Start inside the approved range 0.22-0.455 in 0.02 steps from the centre 0.320, then 0.01 steps.
+- Start inside the approved range (vehicle_params.yaml t2, 0.10-0.60 since 19 Nov) in 0.02 steps
+  from the centre 0.320, then 0.01 steps.
 - Every new outward point is first visited for at most pulse_s (< 1 s) and the operator answers
   "binding / noise?". Yes -> that side ends at the previous point and the tool never goes back.
   No -> the point is confirmed and may be held for measuring (back to centre after max_hold_s).
@@ -161,16 +162,30 @@ def self_test():
     p = vp.load()
     rules = vp.get(p, 't2')
     centre = float(vp.get(p, 'steering.servo_offset'))
-    left, e = [], centre
-    for _ in range(7):
-        e = next_point('left', e, rules)
-        left.append(e)
+
+    def walk(side, n, r):
+        out, e = [], centre
+        for _ in range(n):
+            e = next_point(side, e, r)
+            out.append(e)
+        return out
+    # Step algorithm on a fixed range (independent of the yaml): 0.02 inside, edge, then 0.01
+    fixed = dict(rules, approved_servo_min=0.22, approved_servo_max=0.455)
+    left = walk('left', 7, fixed)
     assert left == [0.30, 0.28, 0.26, 0.24, 0.22, 0.21, 0.20], left
-    right, e = [], centre
-    for _ in range(9):
-        e = next_point('right', e, rules)
-        right.append(e)
+    right = walk('right', 9, fixed)
     assert right == [0.34, 0.36, 0.38, 0.40, 0.42, 0.44, 0.455, 0.465, 0.475], right
+    # Live range (19 Nov 0.10-0.60): the planned points 0.28 0.20 0.10 / 0.36 0.46 0.60 lie on the
+    # grid, and the next point after each edge is outside a 0.10-0.60 clip (operator answers e).
+    left = walk('left', 12, rules)
+    assert left[:11] == [0.30, 0.28, 0.26, 0.24, 0.22, 0.20, 0.18, 0.16, 0.14, 0.12, 0.10], left
+    assert left[11] == 0.09 and clip_needed(0.09, 0.10, 0.60, rules['clip_margin']) is not None
+    right = walk('right', 15, rules)
+    assert right[:14] == [0.34, 0.36, 0.38, 0.40, 0.42, 0.44, 0.46, 0.48, 0.50, 0.52, 0.54, 0.56,
+                          0.58, 0.60], right
+    assert right[14] == 0.61 and clip_needed(0.61, 0.10, 0.60, rules['clip_margin']) is not None
+    assert clip_needed(0.10, 0.10, 0.60, rules['clip_margin']) is None
+    assert clip_needed(0.60, 0.10, 0.60, rules['clip_margin']) is None
     assert clip_needed(0.22, 0.215, 0.46, 0.005) is None
     assert clip_needed(0.21, 0.215, 0.46, 0.005) == (0.205, 0.46)
     assert clip_needed(0.465, 0.215, 0.46, 0.005) == (0.215, 0.47)
@@ -212,7 +227,8 @@ def self_test():
     # Both sides paused at the clip: one relaunch covering both
     assert merge_clip(None, (0.205, 0.46)) == (0.205, 0.46)
     assert merge_clip((0.205, 0.46), (0.215, 0.47)) == (0.205, 0.47)
-    print('PASS: sweep order (0.02 inside 0.22-0.455, then 0.01), clip relaunch values,')
+    print('PASS: sweep order (0.02 inside the range, then 0.01), live range 0.10-0.60 grid and')
+    print('      edges, clip relaunch values,')
     print('      equivalent Ackermann angle, linear + per-side fit, backlash, binding record,')
     print('      resume edges, side ended by operator (e), one relaunch for both sides.')
     print('      No ROS imported; nothing published.')

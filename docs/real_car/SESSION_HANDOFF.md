@@ -116,6 +116,7 @@ distance (T4) before it can be considered.
 | Brake 10 A vs `l_current_min` | Requesting 10 A did not raise the measured motor current above the 5 A runs (<= 4.2 vs <= 3.7 A). Either the ~0.1 s stop is missed by 50 Hz telemetry or the firmware brake current limit caps it: check `l_current_min` (checklist row 11). |
 | VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). |
 | Brake hold release | Every brake stop (also 16 Nov at 1.0 / 1.5 m/s: 88-101 ERPM at +2.09-2.15 s) shows a 77-100 ERPM rise at +2.1-2.2 s: the 2.0 s hold ending (switch to current 0). Tune the hold / release in the permanent fix. |
+| Servo horn off-centre (Zaid) | Straight = servo 0.320 = 1320 us, not 1500 us (VESC 0..1 = 1000-2000 us): left at most 0.32 of travel, right 0.68. Re-mount so straight is near 0.5 for symmetric travel; **redo T2 after that**. Zaid to decide. |
 | Battery | Charged: >= 12.3 V during both 16 Nov runs (11.1 V idle on 14 Nov after a power loss). |
 | Stand LiDAR | Front valid fraction ~0.83 vs the 0.75 MANUAL gate; an operator hand at 0.10-0.12 m (+10..+19 deg) latches `OBSTACLE_NEAR`. |
 | F-13 | Runner input gaps never exceeded 44 ms; the keyboard GUI's latch was not reproduced (GUI not re-tested). |
@@ -170,9 +171,10 @@ ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_rea
 python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test dry_run
 ```
 
-T2 (motor phases disconnected; terminal A, then B; relaunch with a wider clip = approval):
+T2 (motor phases disconnected, servo on the 6 A UBEC; terminal A, then B; approved range 0.10-0.60
+since 19 Nov = the launch ceiling, so one launch; `e` ends a side):
 ```bash
-ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.215 servo_max:=0.46
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:=0.10 servo_max:=0.60
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py --resume <folder>
 ```

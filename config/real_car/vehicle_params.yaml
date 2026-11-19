@@ -83,8 +83,8 @@ runner:                             # tools/real_car_tests/run_test.py
   arm_timeout_s: 1.5                # MANUAL_READY must arrive within this
 
 t2:                                 # servo sweep rules (Moatasem, 14 Nov; two servos already burned)
-  approved_servo_min: 0.22          # start inside this range (trial yaml range)
-  approved_servo_max: 0.455
+  approved_servo_min: 0.10          # 19 Nov (was 0.22-0.455): Oct teleop clip 0.1-0.6 no binding +
+  approved_servo_max: 0.60          # 18 Nov wheels free at 0.15/0.55 (REAL_CAR_TEST_RESULTS.md); = launch ceiling
   inside_step: 0.02                 # steps inside the approved range
   outside_step: 0.01                # beyond it: one step per confirmation, clip relaunch each time
   clip_margin: 0.005                # vesc_driver servo_min/max = last approved value -/+ this
