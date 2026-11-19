@@ -1,9 +1,17 @@
-# Real-car tests: session handoff (2026-11-16)
+# Real-car tests: session handoff (2026-11-19)
 
 For Moatasem and for the next Claude Code session. Read this, then
 [REAL_CAR_BASELINE_2026-11-14.md](REAL_CAR_BASELINE_2026-11-14.md) (standard values) and
 [REAL_CAR_TEST_RESULTS.md](REAL_CAR_TEST_RESULTS.md) (every measured result). Code:
 `tools/real_car_tests/` (README there). Numbers: `config/real_car/vehicle_params.yaml` only.
+
+**Status 19 Nov (end of session):**
+- **T1 COMPLETE** (16 Nov, stand): brake 5 A, 23 steady stops at 0.5 / 1.0 / 1.5 m/s, 0 failing.
+  F-01 mitigated on the stand; **speed 0 is never a stop command**. Permanent converter: proposal to Zaid.
+- **T2 COMPLETE** (19 Nov, limits): steering driving clip **0.10-0.68** (one step before the mechanical
+  stops ~0.08 / ~0.70), max left 17.15 deg, right 18.38 deg (R 0.84 / 0.78 m). Fitted gain **~-0.96 NOT
+  applied** (converter stays -0.50 / 0.320): the centre is uncertain because of left-wheel play.
+- **Next:** section 4, steps 1-3. Steering findings for Zaid: section 4a.
 
 ## 1. Safety rules and standing approvals (Moatasem)
 
@@ -21,8 +29,12 @@ For Moatasem and for the next Claude Code session. Read this, then
 
 ## 2. Branch and commit state
 
-- Branch `moatasem/real-car-tests` from `zaq/hardware-integration` @ `53dfa91`. Not pushed.
-- Commits (oldest first): `d1e0c70` runner/analysis/params · `fea48d3` **mux caps (Zaid's file, separate commit for his review)** · `8b7228c` dry-run fixes · `61dcf0e` T1/T1b · `82336a1` T2 + VESC checklist · `057995f` steady-stop gate · `ae9a36f` shared rebound definition, T1b 1.0/1.5, table · `58b2449` results · `03b2e67` steady repeats only · `6b52990` this file + current 0 · plus the T1 close-out commit (16 Nov).
+- Branch `moatasem/real-car-tests` from `zaq/hardware-integration` @ `53dfa91`. **Not pushed** (no
+  upstream yet; Moatasem pushes, Claude never does).
+- Commits (oldest first): `d1e0c70` runner/analysis/params · `fea48d3` **mux caps (Zaid's file, separate commit for his review)** · `8b7228c` dry-run fixes · `61dcf0e` T1/T1b · `82336a1` T2 + VESC checklist · `057995f` steady-stop gate · `ae9a36f` shared rebound definition, T1b 1.0/1.5, table · `58b2449` results · `03b2e67` steady repeats only · `6b52990` this file + current 0 · `066d104` T1 close-out ·
+  `530fff8` stop-converter proposal · `36ccfa7` T2 `e` answer · `d8202be` T2 clip ceiling ·
+  `7d70ed3` T2 range 0.10-0.60 · `dbf90f8` `--extend-right` · `782cc71` T2 clip 0.10-0.68 + max angles ·
+  plus the commit adding this update (19 Nov).
 - **Leave alone (teammates', uncommitted):** `tools/diagnostics/fit_steering_measurements.py`, and the `src/hardware/f1tenth_system` submodule (vesc_driver `VESC_SPEED_AUDIT` logging + serial fix: it is the record of sent ERPM, keep the build), untracked `teleop_tools`. `__pycache__/` is in `.git/info/exclude`.
 - Local, never committed: `~/f1tenth_uj/CLAUDE.local.md` (calibration section updated to the baseline). Claude memory: `~/.claude/projects/-home-ftenth/memory/`.
 
@@ -57,31 +69,61 @@ stops at 1.0 m/s over two runs but no single run with 5 (SPACE released early, n
 repeats). **Current 0 passes on the stand but is a coast**; on the ground it needs a measured stop
 distance (T4) before it can be considered.
 
-## 4. Remaining work, in order
+## 4. Next steps, in order (decided by Moatasem, 19 Nov)
 
-1. ~~T1b 1.0 / 1.5 m/s, T1 close-out~~ **Done 16 Nov** (brake 5 A chosen, 23 steady stops, 0 failing).
-2. **Still from T1:** VESC Tool checklist (`T1_VESC_TOOL_CHECKLIST.md`, at least rows 11 and 14 and the
+1. **Push the branch and send Zaid the two documents** (Moatasem): `git push -u origin
+   moatasem/real-car-tests` from his own terminal, then send
+   [PERMANENT_STOP_CONVERTER_PROPOSAL.md](PERMANENT_STOP_CONVERTER_PROPOSAL.md) (5 decisions, incl. the
+   `vesc_real_integration.yaml` `brake_max 0.0` that would clip the brake to 0) and the steering findings
+   (section 4a). `fea48d3` (mux caps in his file) is in the same push for his review.
+2. **After Zaid's mechanical fixes: re-measure the centre + short T2.** Several centre readings approached
+   from each side, same ruler method; then a short sweep (e.g. 0.20 / 0.10 / 0.46 / 0.68, `n` + `s`
+   elsewhere). If the centre readings agree (within ~1 deg), adopt gain/offset from the fit through a
+   results row (`servo_gain` -0.50 and `servo_offset` 0.320 change only then, in both converter and
+   vesc_to_odom yamls). If the horn is re-mounted, the full T2 (limits too) is redone.
+3. **T4 on the ground, 0.5 m/s, brake 5 A** (straight line toward a wall, 3 repeats). Before it:
+   - **The T4 runner profile does not exist yet** (`run_test.py` has `t1_stop`, `t1b_stop`,
+     `t2_servo_sweep` only): Claude writes it (straight, steer 0, ground check: LiDAR range ahead >= ramp
+     + 1 m + stop + 0.5 m), self-test, then a disarmed dry run on the car.
+   - Stack: T1b converter `stop_method:=brake brake_current_a:=5.0` with `vesc_t1b_erpm4630.yaml`
+     (brake_max 10), `max_speed_mps:=0.5`, `max_steer_rad` 0 or the minimum the mux allows.
+   - Moatasem's written approval for the ground step, a free straight length checked on site, hand on the
+     battery disconnect.
+   - Output: stop distance and deceleration with brake 5 A (closes the F-01 ground part), VESC vs LiDAR vs
+     RF2O distance (`speed_to_erpm_gain`), start delay. Lateral drift is only indicative while the centre
+     is uncertain.
+
+### 4a. Steering findings for Zaid (T2, 19 Nov)
+
+| Finding | Evidence | Consequence / ask |
+|---|---|---|
+| Driving clip **0.10-0.68**, mechanical stops ~0.08 (left) / ~0.70 (right) | T2 run `20261119_134151_t2_servo_sweep` + `--extend-right` | Every servo clip in a driving config must stay inside 0.10-0.68. `config/vesc_real_integration.yaml` clip 0.30-0.42 is far inside (only 0.04 rad left at gain -0.50). |
+| Max angles left 17.15 deg (R 0.84 m), right 18.38 deg (R 0.78 m) | Bicycle-equivalent of both wheels; Moatasem's wheel averages 17.5 / 18.5 deg | Fills baseline "real steering range UNKNOWN"; mux steer cap (0.10 rad, ceiling 0.40) is well inside. |
+| Fitted gain **~-0.96** (left -0.87, right -1.06), offset 0.364, vs converter -0.50 / 0.320 | `fit.json` of the T2 run, rms 2.1 deg | If confirmed, a commanded angle gives about **half** the real wheel angle (e.g. mux 0.10 rad -> ~0.05 rad). Fits F-02 (much less yaw than the bicycle model). **Not applied** until the centre is confirmed. |
+| **Left-wheel play / uncertain centre** | Centre readings at the same command: left wheel -5 / +3 / -3 deg, right +3 / +7 / +7 deg; fitted backlash 2.2 deg | Check the left steering linkage (knuckle, ball joints, servo saver) for play. About 8 deg toe difference at the first centre reading: check the toe setting. |
+| **Servo horn off-centre** | Straight = servo 0.320 = 1320 us; VESC sends 1000-2000 us (firmware), servo accepts 500-2500 us | Left has 0.32 of servo travel, right 0.68. Re-mounting the horn so straight is near 0.5 gives symmetric travel; **T2 must be redone after that**. |
+| Servo power | 6 A UBEC from the battery; only the signal comes from the VESC | A binding servo can draw up to ~6 A that the VESC does not limit (two servos already burned). |
+| Old configs | `ackermann_to_vesc.yaml` / `vesc_to_odom.yaml` still at offset 0.361 | Real-car configs use 0.320; align after the centre re-check. |
+
+## 4b. Backlog (after the next steps)
+
+1. **Still from T1:** VESC Tool checklist (`T1_VESC_TOOL_CHECKLIST.md`, at least rows 11 and 14 and the
    two XML exports), and Zaid's decision on the permanent converter (proposal in section 5).
-3. (number kept free)
-4. **T2 servo sweep: limits done 19 Nov** (`20261119_134151_t2_servo_sweep` + `--extend-right`):
-   driving clip **0.10-0.68**, max left 0.2994 rad (17.15 deg), right -0.3208 rad (18.38 deg). The fit
-   (gain -0.956, offset 0.364) is not adopted: centre readings disagree, re-check the centre first.
-   Original T2 plan: (motor phases disconnected): `t2_servo_only.launch.py` + `t2_servo_sweep.py`;
-   holds only at points confirmed "no binding", 120 s auto-return, `q` returns to centre. Output:
-   servo -> angle table, max left/right, backlash, linear and per-side fit (decides whether a piecewise
+2. T2 reference (done 19 Nov): `t2_servo_only.launch.py` + `t2_servo_sweep.py`, `--extend-right`;
+   output: servo -> angle table, limits, backlash, linear and per-side fit (decides whether a piecewise
    converter is needed; the trial gains -0.4496 / -0.8570 were measured before the play fix).
-5. **T3** loaded steering on the stand, then mini-circles on the ground at 0.5 (then 1.0) m/s at 50 % and
+3. **T3** loaded steering on the stand, then mini-circles on the ground at 0.5 (then 1.0) m/s at 50 % and
    90 % of the measured max steer (`max_steer_rad` launch arg, approved per test); delta = atan(0.260 / R)
    vs T2. Runner profile not written yet.
-6. **T4** straight line 0.5/1.0/1.5 m/s toward a wall, 3 repeats each (runner ground check): LiDAR vs VESC
+4. **T4** (0.5 m/s is next step 3) straight line 0.5/1.0/1.5 m/s toward a wall, 3 repeats each (runner ground check): LiDAR vs VESC
    vs RF2O distance -> `speed_to_erpm_gain` (same value in both converter and vesc_to_odom), lateral drift
    -> steering offset, start delay, stopping distance and deceleration with the chosen stop method. Profile
    not written yet.
-7. **T5** IMU on the car: 10 min static (bias, R, Allan), 8 x 360 deg hand turns (scale, Moatasem's bench
+5. **T5** IMU on the car: 10 min static (bias, R, Allan), 8 x 360 deg hand turns (scale, Moatasem's bench
    scripts from `~/Data/kf_practice/imu/`), 2 min wheels spinning on the stand.
-8. **T6** offline on T3/T4/T5 bags: VESC vx vs RF2O vs LiDAR, gyro vs RF2O yaw rate, time offsets
+6. **T6** offline on T3/T4/T5 bags: VESC vx vs RF2O vs LiDAR, gyro vs RF2O yaw rate, time offsets
    (cross-correlation), R per sensor -> `vehicle_params.yaml noise`.
-9. **Phase F (shadow only, no TF authority):**
+7. **Phase F (shadow only, no TF authority):**
    - `config/real_car/ekf_real_shadow.yaml` from `src/f1tenth_bringup/config/ekf_moatasem_vesc_imu_shadow.yaml`:
      VESC vx + **vy = 0** (via `tools/shadow_covariance_adapter.py`) + BMI160 yaw rate (bias removed,
      scale from T5), `two_d_mode: true`, R from T5/T6, Q_vx 0.05, Q_vyaw 0.02, no gates,
