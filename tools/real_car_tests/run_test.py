@@ -1297,7 +1297,13 @@ def drive_session(args, p, prof, r, node):
     converter_params = {}
     method = 'speed0'
     if prof['converter'] == 't1b_stop_converter':
-        converter_params = node.get_params('t1b_stop_converter', ['method', 'brake_current_a', 'brake_hold_s'])
+        converter_params = node.get_params('t1b_stop_converter',
+                                           ['method', 'brake_current_a', 'brake_hold_s', 'servo_offset'])
+        base_off = float(vp.get(p, 'steering.servo_offset'))
+        if converter_params.get('servo_offset') is not None and \
+                abs(float(converter_params['servo_offset']) - base_off) > 1e-9:
+            print('TEST servo_offset %.3f in the converter (baseline %.3f): recorded in run_info.json.'
+                  % (float(converter_params['servo_offset']), base_off))
         method = converter_params.get('method')
         if method == 'brake':
             method = 'brake%gA' % converter_params.get('brake_current_a')

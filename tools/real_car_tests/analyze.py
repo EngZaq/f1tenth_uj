@@ -363,6 +363,9 @@ def fmt(x, nd=2):
 
 def t4_report(name, t4, gain, table=True):
     lines = ['### T4 %s' % name, '']
+    off, base = t4.get('servo_offset'), t4.get('servo_offset_baseline')
+    if off is not None and base is not None and abs(off - base) > 1e-9:
+        lines += ['**TEST servo_offset %.3f** in the converter (baseline %.3f), steering command 0.' % (off, base), '']
     if table:
         lines += ['Range: %s. Times: bag receive. + drift = left. L = LiDAR, V = VESC odom.' % (
             ', '.join(sorted(set(x.get('range_source', '?') for x in t4['items'] if 'range_source' in x))) or '-'), '',
@@ -661,7 +664,10 @@ def analyze_t4(info, data, stops, t1b, events, ct, erpm, gain):
                  runner_to_cmd_s=(t_cmd - run[-1]) if (conv and run and run[-1] <= t_cmd) else None)
         x['counted'] = bool(st.get('reached_steady')) and reason.startswith('BRAKE_POINT') and x.get('moved', False)
         items.append(x)
-    return dict(items=items, summary=t4_summary(items), gain=gain)
+    off = (info.get('converter_params') or {}).get('servo_offset')
+    return dict(items=items, summary=t4_summary(items), gain=gain,
+                servo_offset=None if off is None else float(off),
+                servo_offset_baseline=float(vp.get(p, 'steering.servo_offset')))
 
 
 def analyze(folder, t4=False):

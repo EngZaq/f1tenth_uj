@@ -12,6 +12,9 @@ request is zero or /drive is stale (> 0.2 s):
 Brake units are AMPS (vesc_packet.cpp: brake x 1000 -> mA); vesc_driver clips at brake_max
 (10.0 in config/real_car/vesc_t1b_erpm4630.yaml). Output at 50 Hz so the VESC never times out
 mid-brake. Diagnostics: /t1b_stop_converter/status (JSON). Not an emergency stop.
+Parameter servo_offset (default = vehicle_params steering.servo_offset) is a TEST-ONLY override of
+the straight-ahead servo value (T4 20 Nov: --ros-args --params-file
+config/real_car/t1b_converter_t4_offset0358.yaml); validated against the baseline and T2 driving clip.
 
   t1b_stop_converter.py --self-test
 """
@@ -28,6 +31,8 @@ import params as vp  # noqa: E402
 METHODS = ('speed0', 'brake', 'current0')
 BRAKE_MAX_A = 10.0      # never above the T1b yaml brake_max
 HOLD_MAX_S = 5.0
+SERVO_OFFSET_MAX_DELTA = 0.05     # test override at most this far from the baseline offset
+SERVO_DRIVE_CLIP = (0.10, 0.68)   # T2 19 Nov driving clip (REAL_CAR_TEST_RESULTS.md)
 STALE_S = 0.2           # same order as the mux COMMAND_TTL (0.22 s)
 RATE_HZ = 50.0
 
@@ -39,6 +44,13 @@ def validate(method, brake_a, hold_s):
         raise ValueError('brake_current_a must be in (0, %.1f] A' % BRAKE_MAX_A)
     if not (math.isfinite(hold_s) and 0.0 < hold_s <= HOLD_MAX_S):
         raise ValueError('brake_hold_s must be in (0, %.1f] s' % HOLD_MAX_S)
+
+
+def validate_servo_offset(offset, baseline):
+    if not (math.isfinite(offset) and abs(offset - baseline) <= SERVO_OFFSET_MAX_DELTA + 1e-9
+            and SERVO_DRIVE_CLIP[0] <= offset <= SERVO_DRIVE_CLIP[1]):
+        raise ValueError('servo_offset %r must be within %.2f of the baseline %.3f and inside %.2f..%.2f'
+                         % (offset, SERVO_OFFSET_MAX_DELTA, baseline, SERVO_DRIVE_CLIP[0], SERVO_DRIVE_CLIP[1]))
 
 
 class StopLogic:
@@ -91,8 +103,23 @@ def self_test():
     z.step(0.0, 0.5, 0.01)
     assert z.step(0.1, 0.0, 0.01) == ('speed', 0.0, 'STOP_SPEED0')
     assert z.step(0.2, 0.5, None) == ('speed', 0.0, 'STOP_SPEED0')       # never received = stop
+    base = float(vp.get(p, 'steering.servo_offset'))
+    for ok in (base, 0.358, base + 0.05, base - 0.05):
+        validate_servo_offset(ok, base)
+    for bad in (base + 0.051, base - 0.051, float('nan'), float('inf')):
+        try:
+            validate_servo_offset(bad, base)
+        except ValueError:
+            continue
+        raise AssertionError('servo_offset %r accepted' % bad)
+    try:
+        validate_servo_offset(0.69, 0.66)       # inside the delta but outside the T2 clip
+        raise AssertionError('servo_offset outside the T2 clip accepted')
+    except ValueError:
+        pass
     print('PASS: method/limit validation, drive pass-through, brake hold then release,')
-    print('      current0, speed0, stale and non-finite /drive stop. No ROS imported.')
+    print('      current0, speed0, stale and non-finite /drive stop, servo_offset override limits.')
+    print('      No ROS imported.')
 
 
 def main():
@@ -120,10 +147,16 @@ def main():
             self.declare_parameter('method', 'speed0')
             self.declare_parameter('brake_current_a', 5.0)
             self.declare_parameter('brake_hold_s', 2.0)
+            self.declare_parameter('servo_offset', s_offset)
             method = str(self.get_parameter('method').value)
             brake_a = float(self.get_parameter('brake_current_a').value)
             hold_s = float(self.get_parameter('brake_hold_s').value)
             self.logic = StopLogic(method, brake_a, hold_s, gain, offset)  # raises -> node exits
+            self.servo_offset = float(self.get_parameter('servo_offset').value)
+            validate_servo_offset(self.servo_offset, s_offset)              # raises -> node exits
+            if abs(self.servo_offset - s_offset) > 1e-9:
+                self.get_logger().warn('TEST servo_offset override %.3f (baseline %.3f in vehicle_params.yaml)'
+                                       % (self.servo_offset, s_offset))
             self.speed_pub = self.create_publisher(Float64, '/commands/motor/speed', 10)
             self.brake_pub = self.create_publisher(Float64, '/commands/motor/brake', 10)
             self.current_pub = self.create_publisher(Float64, '/commands/motor/current', 10)
@@ -147,12 +180,12 @@ def main():
             pub = {'speed': self.speed_pub, 'brake': self.brake_pub, 'current': self.current_pub}[kind]
             pub.publish(Float64(data=float(value)))
             steer = self.steer if (age is not None and age < STALE_S and math.isfinite(self.steer)) else 0.0
-            servo = s_offset + s_gain * steer
+            servo = self.servo_offset + s_gain * steer
             self.servo_pub.publish(Float64(data=servo))
             self.status_pub.publish(String(data=json.dumps(dict(
                 method=self.logic.method, phase=phase, out=kind, value=round(value, 3),
                 speed_in=round(self.speed, 4), drive_age_s=None if age is None else round(age, 3),
-                servo=round(servo, 4)), separators=(',', ':'))))
+                servo=round(servo, 4), servo_offset=self.servo_offset), separators=(',', ':'))))
 
     rclpy.init()
     node = Converter()

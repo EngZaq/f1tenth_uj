@@ -24,7 +24,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument, EmitEvent, ExecuteProcess, IncludeLaunchDescription, LogInfo,
-    RegisterEventHandler,
+    OpaqueFunction, RegisterEventHandler,
 )
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -35,6 +35,34 @@ from launch_ros.actions import Node
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import params as vp  # noqa: E402
+
+
+def converter_cmd(script, method, brake_a, hold_s, params_file=''):
+    """t1b_stop_converter command line; params_file (test-only yaml) must exist when given."""
+    cmd = ['python3', '-u', script, '--ros-args', '-p', 'method:=%s' % method,
+           '-p', 'brake_current_a:=%s' % brake_a, '-p', 'brake_hold_s:=%s' % hold_s]
+    if params_file:
+        path = os.path.expanduser(params_file)
+        if not os.path.isfile(path):
+            raise RuntimeError('converter_params_file not found: %s' % path)
+        cmd += ['--params-file', path]
+    return cmd
+
+
+def self_test():
+    a = converter_cmd('c.py', 'brake', '5.0', '2.0')
+    assert a == ['python3', '-u', 'c.py', '--ros-args', '-p', 'method:=brake', '-p', 'brake_current_a:=5.0',
+                 '-p', 'brake_hold_s:=2.0'], a
+    f = str(vp.CONFIG / 't1b_converter_t4_offset0358.yaml')
+    b = converter_cmd('c.py', 'brake', '5.0', '2.0', f)
+    assert b[:len(a)] == a and b[len(a):] == ['--params-file', f], b
+    try:
+        converter_cmd('c.py', 'brake', '5.0', '2.0', '/nonexistent.yaml')
+        raise AssertionError('missing params file accepted')
+    except RuntimeError:
+        pass
+    print('PASS: t1b converter command line, with and without the test params file; missing file refused.')
+    print('      No ROS node started; nothing published.')
 
 
 def generate_launch_description():
@@ -109,16 +137,15 @@ def generate_launch_description():
     )
 
     # T1b only: replaces ackermann_to_vesc (never both). Use with vesc_t1b_erpm*.yaml.
-    t1b_converter = ExecuteProcess(
-        cmd=['python3', '-u', os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                           't1b_stop_converter.py'),
-             '--ros-args',
-             '-p', ['method:=', LaunchConfiguration('stop_method')],
-             '-p', ['brake_current_a:=', LaunchConfiguration('brake_current_a')],
-             '-p', ['brake_hold_s:=', LaunchConfiguration('brake_hold_s')]],
-        output='screen',
-        condition=converter_is('t1b'),
-    )
+    def t1b_converter_actions(context):
+        if LaunchConfiguration('converter').perform(context) != 't1b':
+            return []
+        return [ExecuteProcess(cmd=converter_cmd(
+            os.path.join(os.path.dirname(os.path.realpath(__file__)), 't1b_stop_converter.py'),
+            *[LaunchConfiguration(k).perform(context) for k in (
+                'stop_method', 'brake_current_a', 'brake_hold_s', 'converter_params_file')]),
+            output='screen')]
+    t1b_converter = OpaqueFunction(function=t1b_converter_actions)
 
     mux = ExecuteProcess(
         cmd=['python3', '-u', os.path.join(bringup, 'python_nodes', 'physical_drive_mux.py'),
@@ -148,8 +175,15 @@ def generate_launch_description():
                               description='converter:=t1b, stop_method:=brake: amps, (0, 10].'),
         DeclareLaunchArgument('brake_hold_s', default_value='2.0',
                               description='converter:=t1b, stop_method:=brake: seconds, (0, 5].'),
+        DeclareLaunchArgument('converter_params_file', default_value='',
+                              description='converter:=t1b only: TEST-ONLY params yaml for t1b_stop_converter '
+                                          '(e.g. config/real_car/t1b_converter_t4_offset0358.yaml). Empty = none.'),
         LogInfo(msg='REAL-CAR TEST STACK: real VESC connected, mux starts STOP. '
                     'Servo centres now. Not an emergency stop.'),
         vesc_exit_shutdown,
         observation, imu, imu_tf, vesc_driver, vesc_odom, ackermann_to_vesc, t1b_converter, mux,
     ])
+
+
+if __name__ == '__main__' and '--self-test' in sys.argv:
+    self_test()
