@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Read-only preflight for real-car tests. Publishes nothing, starts no node.
+# Read-only preflight for real-car tests. Publishes nothing; only short-lived subscribers
+# (ros2 topic echo, and the 2 s IMU check below).
 #   preflight.sh clean    before launching: no ROS process may be running (ros2 daemon allowed)
 #   preflight.sh stack    test stack running, runner NOT yet started
 #   preflight.sh stack t1b   same, with converter:=t1b (it alone publishes brake and current)
@@ -78,6 +79,32 @@ s=json.loads(doc['data']); \
 print({k: s.get(k) for k in ('mode','reason','real_actuation_enabled','max_speed_mps','max_steer_rad', \
 'front_valid_fraction','nearest_front_m','scan_reason','drive_subscriber_count','motor_subscriber_count')})" \
     || { echo "FAIL: no /control/status"; fail=1; }
+
+echo "== IMU (/imu/data_raw, 2 s; 20 Nov: BMI160 froze after one I2C timeout, rate stayed 100 Hz)"
+python3 - <<'PY' || fail=1
+import os, sys, time
+sys.path.insert(0, os.path.expanduser('~/f1tenth_uj/tools/real_car_tests'))
+from run_test import ImuWatch   # same rule as the runner's arm refusal
+import rclpy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
+rclpy.init()
+node = rclpy.create_node('preflight_imu_check')
+watch, n = ImuWatch(), [0]
+def on_imu(m):
+    g, a = m.angular_velocity, m.linear_acceleration
+    watch.add(time.monotonic(), (g.x, g.y, g.z, a.x, a.y, a.z))
+    n[0] += 1
+node.create_subscription(Imu, '/imu/data_raw', on_imu, qos_profile_sensor_data)
+t_end = time.monotonic() + 2.0
+while time.monotonic() < t_end:
+    rclpy.spin_once(node, timeout_sec=0.05)
+problem = watch.status(time.monotonic())
+node.destroy_node()
+rclpy.shutdown()
+print('%-4s /imu/data_raw %d msgs in 2 s: %s' % ('FAIL' if problem else 'OK', n[0], problem or 'changing samples'))
+sys.exit(1 if problem else 0)
+PY
 
 [ $fail = 0 ] && echo "OK: stack" || echo "FAIL: fix the above before running"
 exit $fail

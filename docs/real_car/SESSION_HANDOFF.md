@@ -81,7 +81,10 @@ distance (T4) before it can be considered.
    elsewhere). If the centre readings agree (within ~1 deg), adopt gain/offset from the fit through a
    results row (`servo_gain` -0.50 and `servo_offset` 0.320 change only then, in both converter and
    vesc_to_odom yamls). If the horn is re-mounted, the full T2 (limits too) is redone.
-3. **T4 on the ground, 0.5 m/s, brake 5 A** (straight line toward a wall, 3 repeats). Before it:
+3. **T4 on the ground, 0.5 m/s, brake 5 A: DONE 20 Nov** (results doc: tile stop ~0.137 m, decel ~0.9,
+   gain candidate ~8700, provisional tile centre ~0.330, all test-only; F-18 IMU freeze found and guarded).
+   Next: the left-wheel play fix (Zaid), then the centre re-measure; `decel_mps2` before 1.0 m/s.
+   Original plan:
    - **T4 runner profile written 20 Nov** (`t4_straight`, `analyze.py --t4`, see
      `tools/real_car_tests/README.md` T4): brake point 0.90 m LiDAR (above the mux 0.80 m gate), arm
      window 2.15..3.90 m. Self-tests pass; **next: disarmed dry run on the floor**. Moatasem chose (20 Nov)
@@ -168,6 +171,7 @@ distance (T4) before it can be considered.
 | VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). |
 | Brake hold release | Every brake stop (also 16 Nov at 1.0 / 1.5 m/s: 88-101 ERPM at +2.09-2.15 s) shows a 77-100 ERPM rise at +2.1-2.2 s: the 2.0 s hold ending (switch to current 0). Tune the hold / release in the permanent fix. |
 | Servo horn off-centre (Zaid) | Straight = servo 0.320 = 1320 us, not 1500 us (VESC 0..1 = 1000-2000 us): left at most 0.32 of travel, right 0.68. Re-mount so straight is near 0.5 for symmetric travel; **redo T2 after that**. Zaid to decide. |
+| **F-18 BMI160 freeze (Zaid)** | After one `I2C read failed: [Errno 110]` the stream repeats one sample at 100 Hz until the node restarts (2 of 4 T4 sessions, 20 Nov; results doc). Guard: runner refuses to arm on `IMU_FROZEN` / `IMU_STALE`, `preflight.sh stack` checks 2 s; recovery = restart the stack. **Proposed driver fix (imu_driver, Zaid's package):** after an `OSError`, redo the soft reset + configuration (keep the gyro bias), and a watchdog that resets on N identical samples. **Diagnostic at the next freeze** (stack stopped first, before relaunching; read-only): `i2cget -y 7 0x69 0x03` (PMU_STATUS), `0x02` (ERR_REG), and `0x18`-`0x1A` (SENSORTIME) twice, a second apart: SENSORTIME not advancing = the sensor stopped converting (register addresses from the BMI160 datasheet; verify). |
 | Battery | Charged: >= 12.3 V during both 16 Nov runs (11.1 V idle on 14 Nov after a power loss). |
 | Stand LiDAR | Front valid fraction ~0.83 vs the 0.75 MANUAL gate; an operator hand at 0.10-0.12 m (+10..+19 deg) latches `OBSTACLE_NEAR`. |
 | F-13 | Runner input gaps never exceeded 44 ms; the keyboard GUI's latch was not reproduced (GUI not re-tested). |

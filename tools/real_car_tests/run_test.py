@@ -99,6 +99,38 @@ T1B_ONLY_TOPICS = ('/commands/motor/brake', '/commands/motor/current')  # t1b_st
 
 # ---------------------------------------------------------------- pure logic
 
+# BMI160 (/imu/data_raw) watch, 20 Nov: after one I2C timeout ([Errno 110]) the stream kept its
+# 100 Hz rate but repeated one sample until the node restarted (two sessions). Rate checks miss it.
+IMU_WINDOW_S = 1.0        # look at the last second of samples
+IMU_FROZEN_SHARE = 0.5    # frozen: more than this share of consecutive samples identical
+IMU_STALE_S = 0.3         # stale: no sample for this long
+IMU_MIN_SAMPLES = 50      # fewer in the window (100 Hz expected) -> IMU_STALE
+
+
+class ImuWatch:
+    """Frozen / stale detection on (gyro xyz, accel xyz) tuples. status(now) -> None or reason."""
+
+    def __init__(self):
+        self.samples = []   # (t, tuple)
+
+    def add(self, t, sample):
+        self.samples.append((t, tuple(sample)))
+        cut = t - IMU_WINDOW_S
+        while self.samples and self.samples[0][0] < cut:
+            self.samples.pop(0)
+
+    def status(self, now):
+        if not self.samples or now - self.samples[-1][0] > IMU_STALE_S:
+            return 'IMU_STALE(no /imu/data_raw for > %.1f s)' % IMU_STALE_S
+        win = [v for t, v in self.samples if t >= now - IMU_WINDOW_S]
+        if len(win) < IMU_MIN_SAMPLES:
+            return 'IMU_STALE(%d samples in %.1f s)' % (len(win), IMU_WINDOW_S)
+        same = sum(1 for a, b in zip(win, win[1:]) if a == b) / (len(win) - 1)
+        if same > IMU_FROZEN_SHARE:
+            return 'IMU_FROZEN(%.0f %% identical samples in %.1f s; restart the stack)' % (100 * same, IMU_WINDOW_S)
+        return None
+
+
 class Deadman:
     """SPACE auto-repeat deadman. Time is injected so it is testable."""
 
@@ -434,6 +466,8 @@ class Machine:
                 reason = self.fault(w)
                 if reason is None and held:
                     reason = 'RELEASE_SPACE_FIRST'
+                if reason is None and w.get('imu_problem'):
+                    reason = w['imu_problem']   # arm only; a freeze while driving is logged, not a stop
                 if reason is None and self.ground:
                     if not self.ground_ok:
                         reason = 'GROUND_NEEDS_T1_PASS_CONFIRMED'
@@ -908,6 +942,26 @@ def self_test():
     for t in range(10):
         tr.add(t * 0.1, 4150.0 + 30 * (t % 2))                       # never slows down
     assert not tr.decelerating
+    # IMU watch (20 Nov freeze) and arm refusal
+    iw = ImuWatch()
+    assert iw.status(0.0).startswith('IMU_STALE')
+    for i in range(100):
+        iw.add(i * 0.01, (0.001 * (i % 7), 0.0, 0.002 * (i % 5), 0.1, 0.2, 9.8 + 0.01 * (i % 3)))
+    assert iw.status(0.995) is None, iw.status(0.995)
+    for i in range(100, 200):
+        iw.add(i * 0.01, (0.003, -0.001, 0.004, 0.12, 0.21, 9.79))
+    assert iw.status(1.995).startswith('IMU_FROZEN'), iw.status(1.995)
+    assert iw.status(2.5).startswith('IMU_STALE')                          # no sample for 0.5 s
+    sparse = ImuWatch()
+    for i in range(20):
+        sparse.add(i * 0.05, (float(i), 0, 0, 0, 0, 0))
+    assert sparse.status(0.96).startswith('IMU_STALE(20 samples')
+    mi = Machine(PROFILES['dry_run'], p, live=False)
+    mi.step(0.0, 'n', False, world(imu_problem='IMU_FROZEN(100 % identical samples in 1.0 s; restart the stack)'))
+    assert mi.state == 'IDLE' and mi.events[-1]['event'] == 'ARM_REFUSED' \
+        and mi.events[-1]['detail'].startswith('IMU_FROZEN'), mi.events[-1]
+    assert mi.step(0.1, 'n', False, world())[3] == 'MANUAL' and mi.state == 'ARMING'   # healthy -> arms
+    print('PASS: IMU watch: healthy / frozen / stale / too few samples; arm refused on IMU_FROZEN.')
     print('PASS: deadman timing, ramp, speed-fit length, front range, config = vehicle_params,')
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
@@ -1155,7 +1209,7 @@ def run(args):
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from ackermann_msgs.msg import AckermannDriveStamped
-    from sensor_msgs.msg import Joy, LaserScan
+    from sensor_msgs.msg import Imu, Joy, LaserScan
     from std_msgs.msg import String
     try:
         from vesc_msgs.msg import VescStateStamped
@@ -1187,6 +1241,8 @@ def run(args):
             self.scan = self.scan_at = None
             self.create_subscription(String, '/control/status', self.on_status, 10)
             self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+            self.imu_watch = ImuWatch()
+            self.create_subscription(Imu, '/imu/data_raw', self.on_imu, qos_profile_sensor_data)
             if VescStateStamped is not None:
                 self.create_subscription(VescStateStamped, '/sensors/core', self.on_core, 10)
 
@@ -1202,6 +1258,11 @@ def run(args):
         def on_scan(self, msg):
             with self.lock:
                 self.scan, self.scan_at = msg, time.monotonic()
+
+        def on_imu(self, msg):
+            a, g = msg.linear_acceleration, msg.angular_velocity
+            with self.lock:
+                self.imu_watch.add(time.monotonic(), (g.x, g.y, g.z, a.x, a.y, a.z))
 
         def on_core(self, msg):
             with self.lock:
@@ -1250,6 +1311,7 @@ def run(args):
                              left_m=front_range(self.scan, half_width, 90.0),
                              right_m=front_range(self.scan, half_width, -90.0))
                 w['erpm'] = (self.tele or {}).get('erpm')
+                w['imu_problem'] = self.imu_watch.status(now)
             return w
 
         def get_params(self, node_name, names):
@@ -1389,6 +1451,7 @@ def drive_session(args, p, prof, r, node):
             'key = KILL (brake, latched until n). ' + machine.message)
         last_msg = None
         graph = None
+        last_imu = 'unknown'
         tick = 0
         next_t = last_pub = time.monotonic()
         while machine.state != 'DONE':
@@ -1405,6 +1468,10 @@ def drive_session(args, p, prof, r, node):
             w = node.world(now, half_width)
             w['graph_fault'] = graph
             w['keyboard_lost'] = kb.eof
+            if w.get('imu_problem') != last_imu:
+                last_imu = w.get('imu_problem')
+                machine.log(now, 'IMU_STATUS', last_imu or 'OK')
+                say('IMU: %s' % (last_imu or 'OK'))
             speed, steer, dead, req = machine.step(now, kb.get_key(), kb.held(now), w)
             node.emit(speed, steer, dead)
             intervals.append((time.time(), now - last_pub, speed, dead))
