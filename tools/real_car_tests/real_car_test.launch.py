@@ -9,7 +9,7 @@ Contents (each actuator topic has exactly one publisher and one subscriber):
   f1tenth_imu imu.launch.py (BMI160 -> /imu/data_raw) + static base_link->imu_link (PROVISIONAL)
   vesc_driver        <- vesc_yaml (speed_max per speed step; one file per step)
   vesc_to_odom       -> /odom_vesc_observe, publish_tf false
-  ackermann_to_vesc  <- /drive, config/real_car/ackermann_to_vesc_real.yaml (offset 0.320, gain -0.50)
+  ackermann_to_vesc  <- /drive, config/real_car/ackermann_to_vesc_real.yaml (offset 0.330 provisional, gain -0.50)
     OR (converter:=t1b, T1b only) t1b_stop_converter.py: same conversion, test stop method
   physical_drive_mux -> /drive, starts STOP; caps from max_speed_mps / max_steer_rad
 No explorer, lap watcher, joystick or trial adapter. Exactly one converter: an unknown

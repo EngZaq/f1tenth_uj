@@ -3,6 +3,8 @@
 # speed_max 9255 ERPM = 1.0 m/s x 8414 x 1.10 (vehicle_params.yaml caps.vesc_speed_max_margin).
 # Launch with max_speed_mps:=1.0 (run_test.py refuses a mux cap or speed_max that does not match the step).
 # Servo clip 0.27-0.37 = offset 0.320 +/- 0.50 * 0.10 rad (T1 steers 0). brake 0: no brake can pass.
+# Offset 0.330 since 20 Nov (provisional): inside the clip; the clip is unchanged (approved per test),
+# so right steering is limited to (0.37 - 0.330) / 0.50 = 0.08 rad here.
 vesc_driver:
   ros__parameters:
     port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"

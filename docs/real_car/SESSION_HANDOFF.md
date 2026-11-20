@@ -11,6 +11,9 @@ For Moatasem and for the next Claude Code session. Read this, then
 - **T2 COMPLETE** (19 Nov, limits): steering driving clip **0.10-0.68** (one step before the mechanical
   stops ~0.08 / ~0.70), max left 17.15 deg, right 18.38 deg (R 0.84 / 0.78 m). Fitted gain **~-0.96 NOT
   applied** (converter stays -0.50 / 0.320): the centre is uncertain because of left-wheel play.
+- **20 Nov:** T4 at 0.5 m/s done (carpet + tile, brake 5 A, no F-01 rebound); **steering offset 0.330
+  PROVISIONAL baseline** (tile; was 0.320; re-measure after the play fix); gain candidate ~8700 not
+  adopted (8414 stays); F-18 IMU freeze guarded in the runner and preflight.
 - **Next:** section 4, steps 1-3. Steering findings for Zaid: section 4a.
 
 ## 1. Safety rules and standing approvals (Moatasem)

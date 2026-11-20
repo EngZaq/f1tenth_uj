@@ -1,10 +1,10 @@
 # Real-car test stack converter (tools/real_car_tests/real_car_test.launch.py).
 # Values must equal config/real_car/vehicle_params.yaml (run_test.py --self-test checks this).
-# Offset 0.320 / gain -0.50: CONFIRMED 14 Nov after the steering-play fix (baseline C-3).
+# Offset 0.330: PROVISIONAL 20 Nov (tile T4, results doc; was 0.320). Gain -0.50: 14 Nov (baseline C-3).
 # The repo's src/f1tenth_bringup/config/ackermann_to_vesc.yaml still has 0.361 (not edited, see results doc).
 /ackermann_to_vesc_node:
   ros__parameters:
     speed_to_erpm_gain: 8414.0
     speed_to_erpm_offset: 0.0
     steering_angle_to_servo_gain: -0.50
-    steering_angle_to_servo_offset: 0.320
+    steering_angle_to_servo_offset: 0.330

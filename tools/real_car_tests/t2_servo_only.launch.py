@@ -43,10 +43,11 @@ def check_clip(lo, hi, centre):
 
 
 def self_test():
-    centre = 0.320
+    p = vp.load()
+    centre = float(vp.get(p, 'steering.servo_offset'))
     for lo, hi in ((0.215, 0.46), (0.15, 0.55), (0.10, 0.60), (0.10, 0.80), (0.10, 1.00)):
         check_clip(lo, hi, centre)
-    for lo, hi in ((0.09, 0.46), (0.10, 1.01), (0.33, 0.46), (0.215, 0.31), (float('nan'), 0.46),
+    for lo, hi in ((0.09, 0.46), (0.10, 1.01), (centre, 0.46), (0.215, centre), (float('nan'), 0.46),
                    (0.10, float('inf'))):
         try:
             check_clip(lo, hi, centre)
@@ -54,7 +55,6 @@ def self_test():
             continue
         raise AssertionError('clip %r..%r accepted' % (lo, hi))
     # The approved range in vehicle_params.yaml must itself be a valid clip (one launch runs it all)
-    p = vp.load()
     check_clip(float(vp.get(p, 't2.approved_servo_min')), float(vp.get(p, 't2.approved_servo_max')),
                float(vp.get(p, 'steering.servo_offset')))
     print('PASS: clip ceiling 0.10..1.00 accepted at its edges, 0.09 / 1.01 / centre outside the')

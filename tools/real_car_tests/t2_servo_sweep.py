@@ -8,7 +8,7 @@ measure); servo commands are slew-limited at 50 Hz.
 
 Rules (Moatasem, 14 Nov; two servos already burned on this car), values in vehicle_params.yaml t2:
 - Start inside the approved range (vehicle_params.yaml t2, 0.10-0.60 since 19 Nov) in 0.02 steps
-  from the centre 0.320, then 0.01 steps.
+  from the centre (vehicle_params steering.servo_offset: 0.320 on 19 Nov, 0.330 since 20 Nov), then 0.01.
 - Every new outward point is first visited for at most pulse_s (< 1 s) and the operator answers
   "binding / noise?". Yes -> that side ends at the previous point and the tool never goes back.
   No -> the point is confirmed and may be held for measuring (back to centre after max_hold_s).
@@ -24,7 +24,7 @@ Rules (Moatasem, 14 Nov; two servos already burned on this car), values in vehic
   DIR/extend_right.json records the last free point, the stop and the proposed right driving clip
   (= last free point, one step before the stop). The left side is never commanded.
 
-Wheel angles in degrees, + = wheel turned LEFT (servo below 0.320 steers left: gain -0.50).
+Wheel angles in degrees, + = wheel turned LEFT (servo below the centre steers left: gain -0.50).
 
   t2_servo_sweep.py                  new sweep
   t2_servo_sweep.py --resume DIR     continue after relaunching with a wider clip
@@ -125,7 +125,7 @@ def fit_rows(rows, centre):
         off, g, rms = full
         out.update(offset=round(off, 4), gain=round(g, 4), rms_servo=round(rms, 5),
                    rms_deg=round(math.degrees(rms / abs(g)), 3) if g else None,
-                   offset_disagrees_with_0320=abs(off - centre) > 0.005)
+                   centre=centre, offset_disagrees_with_centre=abs(off - centre) > 0.005)
     for name, sel in (('left', lambda d: d >= -1e-3), ('right', lambda d: d <= 1e-3)):
         sub = [(s, d) for s, d, _ in pts if sel(d)]
         f = linear_fit([d for _, d in sub], [s for s, _ in sub])
@@ -269,10 +269,11 @@ def edges_from_rows(rows, centre):
 def self_test():
     p = vp.load()
     rules = vp.get(p, 't2')
-    centre = float(vp.get(p, 'steering.servo_offset'))
+    centre = 0.320   # algorithm / fit fixture (the 19 Nov T2 grid), independent of the yaml
+    live_centre = float(vp.get(p, 'steering.servo_offset'))
 
-    def walk(side, n, r):
-        out, e = [], centre
+    def walk(side, n, r, c=centre):
+        out, e = [], c
         for _ in range(n):
             e = next_point(side, e, r)
             out.append(e)
@@ -283,15 +284,27 @@ def self_test():
     assert left == [0.30, 0.28, 0.26, 0.24, 0.22, 0.21, 0.20], left
     right = walk('right', 9, fixed)
     assert right == [0.34, 0.36, 0.38, 0.40, 0.42, 0.44, 0.455, 0.465, 0.475], right
-    # Live range (19 Nov 0.10-0.60): the planned points 0.28 0.20 0.10 / 0.36 0.46 0.60 lie on the
-    # grid, and the next point after each edge is outside a 0.10-0.60 clip (operator answers e).
-    left = walk('left', 12, rules)
+    # 19 Nov grid (centre 0.320, range 0.10-0.60): the measured points 0.28 0.20 0.10 / 0.36 0.46 0.60
+    # lie on it, and the next point after each edge is outside a 0.10-0.60 clip (operator answered e).
+    r19 = dict(rules, approved_servo_min=0.10, approved_servo_max=0.60)
+    left = walk('left', 12, r19)
     assert left[:11] == [0.30, 0.28, 0.26, 0.24, 0.22, 0.20, 0.18, 0.16, 0.14, 0.12, 0.10], left
     assert left[11] == 0.09 and clip_needed(0.09, 0.10, 0.60, rules['clip_margin']) is not None
-    right = walk('right', 15, rules)
+    right = walk('right', 15, r19)
     assert right[:14] == [0.34, 0.36, 0.38, 0.40, 0.42, 0.44, 0.46, 0.48, 0.50, 0.52, 0.54, 0.56,
                           0.58, 0.60], right
     assert right[14] == 0.61 and clip_needed(0.61, 0.10, 0.60, rules['clip_margin']) is not None
+    # Live yaml (centre and approved range): 0.02 steps from the centre, ending exactly on each edge,
+    # then 0.01 beyond it, which needs a wider clip.
+    lo, hi = float(rules['approved_servo_min']), float(rules['approved_servo_max'])
+    assert lo < live_centre < hi
+    for side, edge, sign in (('left', lo, -1), ('right', hi, 1)):
+        pts = walk(side, 60, rules, live_centre)
+        k = pts.index(round(edge, 3))
+        steps = [round(b - a, 3) for a, b in zip([live_centre] + pts[:k], pts[:k + 1])]
+        assert all(abs(x) == 0.02 for x in steps[:-1]) and 0 < abs(steps[-1]) <= 0.02 + 1e-9, (side, steps)
+        assert pts[k + 1] == round(edge + sign * 0.01, 3)
+        assert clip_needed(pts[k + 1], lo, hi, rules['clip_margin']) is not None
     assert clip_needed(0.10, 0.10, 0.60, rules['clip_margin']) is None
     assert clip_needed(0.60, 0.10, 0.60, rules['clip_margin']) is None
     assert clip_needed(0.22, 0.215, 0.46, 0.005) is None
