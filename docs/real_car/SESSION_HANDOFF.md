@@ -87,6 +87,10 @@ distance (T4) before it can be considered.
      window 2.15..3.90 m. Self-tests pass; **next: disarmed dry run on the floor**. Moatasem chose (20 Nov)
      to run T4 before Zaid's steering fix, at the current centre (0.320 / -0.50, steer cap 0.10, steer 0):
      side drift and heading are indicative only.
+   - 20 Nov changes: brake trigger = front median only (side objects -> mux gate brakes instead, still
+     5 A); KILL key (any key but SPACE while armed/driving = brake, latched until `n`). Lane width with
+     the car centred, drift 0.3 m / 2 m (~17 deg): no contact (0.10 m margin) 0.88 m at a 2.2 m start,
+     1.25 m at 2.8 m; mux never tripping before the brake point 1.16 m at 2.2 m, 1.61 m at 2.8 m.
    - Stack: T1b converter `stop_method:=brake brake_current_a:=5.0` with `vesc_t1b_erpm4630.yaml`
      (brake_max 10), `max_speed_mps:=0.5`, `max_steer_rad` 0 or the minimum the mux allows.
    - Moatasem's written approval for the ground step, a free straight length checked on site, hand on the

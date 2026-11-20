@@ -32,7 +32,11 @@ Test tools for the physical car. Owner: Moatasem. Standard values:
 
 ## Keys (SSH terminal, no Enter)
 
-`n` arm (SPACE released) · hold `SPACE` drive · `s` skip · `q` quit. SPACE is a deadman from
+`n` arm (SPACE released) · hold `SPACE` drive · `s` skip (idle) · `q` quit (idle) · `m` placement (ground).
+**KILL** (20 Nov): while arming, armed, driving or stopping, ANY key but SPACE sends zero at once (same
+path as a SPACE release: mux STOP -> converter brake), prints `*** KILL ***` and latches: nothing drives
+until SPACE is released and `n` pressed. `q` there kills, then the runner ends. KILL stops never count.
+Not faster than a SPACE release and not an emergency stop. SPACE is a deadman from
 terminal auto-repeat: 0.7 s grace after the first press, then 0.25 s between repeats. If your
 terminal's repeat delay is longer than 0.7 s the run stops at once: shorten it locally.
 
@@ -72,9 +76,13 @@ steer cap). Runner: `run_test.py --test t4_straight --speed 0.5 --t1-passed-conf
 - **Brake point** (LiDAR range from the laser, `vehicle_params.yaml t4`): max(mux gate 0.80 +
   guard 0.10, bumper 0.09 + v x reaction 0.20 s + v^2/(2 x 1.0) + margin 0.5) = **0.90 m at 0.5 m/s**.
   The runner sends zero there; the mux 0.80 m gate is only the backstop.
-- **Range watched** = min(front median +/-3 deg, nearest return in the mux's +/-20 deg sector).
-- **Arm** only with that range in **2.15..3.90 m** (ramp 0.25 + steady 1.0 + brake point; max = brake
-  point + 3.0 m) and |ERPM| < 100. `m` prints the placement readout (range, window, side walls).
+- **Brake trigger and arm window use the front median (+/-3 deg) only** (20 Nov, narrow floor): a side
+  object never brakes the runner early. A side object closer than 0.80 m in the mux +/-20 deg sector
+  makes the **mux** latch STOP -> zero on `/drive` -> converter brake 5 A (same brake; the repeat ends
+  `MUX_LEFT_MANUAL_MODE` and does not count). Lane width: see the handoff (T4).
+- **Arm** only with the front range in **2.15..3.90 m** (ramp 0.25 + steady 1.0 + brake point; max = brake
+  point + 3.0 m), |ERPM| < 100 and nothing within 0.90 m in the mux sector (`MUX_SECTOR_OBJECT`).
+  `m` prints the placement readout (front, window, mux nearest, side walls).
 - Drives until the brake point (no fixed time); time limit = expected time + 1 s. `FRONT_RANGE_LOST`
   stops at once. Only `BRAKE_POINT` stops count; SPACE release still brakes but does not count.
 

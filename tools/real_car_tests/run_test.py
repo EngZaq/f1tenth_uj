@@ -6,8 +6,10 @@ Publishes /manual/drive, /joy (button 5 = deadman) and /control/request_mode at
 /commands/*. Records its own ros2 bag. Not an emergency stop: the battery
 disconnect / kill switch stays in the operator's hand.
 
-Keys over SSH (no Enter): n = arm, hold SPACE = drive, s = skip, q = quit,
+Keys over SSH (no Enter): n = arm, hold SPACE = drive, s = skip (idle only), q = quit,
 m = placement readout (ground profiles: range ahead, arm window, brake point, side walls).
+KILL: while arming, armed, driving or stopping, ANY key but SPACE = zero (converter brake), latched
+until n. q there kills too, then the runner ends.
 SPACE is a deadman from terminal auto-repeat: 0.7 s after the first press,
 then 0.25 s between repeats. No fresh SPACE -> zero, and zero is kept >= 1 s.
 
@@ -177,6 +179,9 @@ def interval_stats(dts):
             'over_0.10_s': sum(d > .10 for d in s), 'over_0.20_s': sum(d > .20 for d in s)}
 
 
+KILL_BANNER = ('*** KILL *** zero sent (converter brakes) - LATCHED: no driving until you release SPACE '
+               'and press n')
+
 REBOUND_FAIL_ERPM = 300.0   # T1 pass: no rebound > 300 ERPM
 UNDER_ERPM = 100.0          # "stopped"
 DECEL_FRACTION = 0.5        # a rebound counts only after |ERPM| fell to this share of its value at the zero
@@ -298,6 +303,7 @@ class Machine:
         self.max_repeats = prof['repeats'] + prof.get('extra_repeats', 0)
         self.stop_steady = False
         self.quit = False
+        self.killed = False      # KILL latch: cleared only by a successful n (arm request)
         self.events = []
         self.repeats = []
         self.reset_deadman = False
@@ -340,12 +346,11 @@ class Machine:
 
     @staticmethod
     def ahead(w):
-        """Range the ground checks use: the smaller of the front median (+/-3 deg) and the
-        mux-style nearest in +/-20 deg. NaN if the front window has no return."""
-        f, s = w.get('front_m', float('nan')), w.get('sector_min_m', float('nan'))
-        if not math.isfinite(f):
-            return float('nan')
-        return min(f, s) if math.isfinite(s) else f
+        """Range the arm window and the brake trigger use: the front median (+/-3 deg) only, so a
+        side object never brakes early (20 Nov, narrow floor). A side object closer than 0.80 m in
+        the mux +/-20 deg sector makes the MUX latch STOP -> zero -> converter brake 5 A (backstop).
+        NaN if the front window has no return."""
+        return w.get('front_m', float('nan'))
 
     def ground_window(self):
         """(need, max) LiDAR range ahead for arming. need = ramp + steady + brake point, and
@@ -363,10 +368,10 @@ class Machine:
 
     def placement(self, w):
         need, top = self.ground_window()
-        return ('ahead %.2f m (front %.2f, nearest +/-20deg %.2f) | arm window %.2f..%.2f m | brake point '
-                '%.2f m | side L %.2f R %.2f m' % (
-                    self.ahead(w), w.get('front_m', float('nan')), w.get('sector_min_m', float('nan')),
-                    need, top, self.brake_range(float(self.prof['speed'])),
+        return ('front %.2f m | arm window %.2f..%.2f m | brake point %.2f m | mux nearest +/-20deg %.2f m '
+                '(arm needs >= %.2f, mux brakes < %.2f) | side L %.2f R %.2f m' % (
+                    self.ahead(w), need, top, self.brake_range(float(self.prof['speed'])),
+                    w.get('sector_min_m', float('nan')), self.gate + self.guard, self.gate,
                     w.get('left_m', float('nan')), w.get('right_m', float('nan'))))
 
     def finished(self):
@@ -377,6 +382,7 @@ class Machine:
 
     def stop(self, now, reason):
         self.stop_steady = (self.state == 'DRIVING' and getattr(self, 'steady_logged', False)
+                            and not reason.startswith('KILL')
                             and (not self.brake_at_range or reason.startswith('BRAKE_POINT')))
         self.state = 'STOPPING'
         self.t_stop = now
@@ -386,6 +392,21 @@ class Machine:
             self.repeats[-1].update(zero_wall=time.time(), zero_reason=reason)
         return 0.0, 0.0, 0, 'STOP'
 
+    def kill(self, now, key):
+        """Software kill: any key but SPACE while arming, armed, driving or stopping. Same zero
+        path as a SPACE release (runner zero -> mux STOP -> converter brake), latched until n.
+        Not faster than SPACE release and not an emergency stop."""
+        self.killed = True
+        out, was = None, self.state
+        if self.state in ('READY', 'DRIVING'):
+            out = self.stop(now, 'KILL(key %r)' % key)
+        elif self.state == 'ARMING':
+            self.state = 'IDLE'
+            out = (0.0, 0.0, 0, 'STOP')
+        self.log(now, 'KILL', 'key %r in %s' % (key, was))
+        self.message = KILL_BANNER
+        return out or (0.0, 0.0, 0, None)
+
     def step(self, now, key, held, w):
         st = w.get('status') or {}
         mode = st.get('mode')
@@ -393,6 +414,11 @@ class Machine:
             self.last_erpm = w['erpm']
         if key == 'q' or w.get('keyboard_lost'):
             self.quit = True  # lost SSH terminal: finish with zero, never wait in IDLE
+        if key is not None and self.state in ('ARMING', 'READY', 'DRIVING'):
+            return self.kill(now, key)
+        if key is not None and self.state == 'STOPPING':
+            self.kill(now, key)  # already sending zero; latch and show it, keep the stop running
+            key = None
         if self.state == 'IDLE':
             if self.quit:
                 self.state = 'DONE'
@@ -413,6 +439,10 @@ class Machine:
                         reason = 'GROUND_NEEDS_T1_PASS_CONFIRMED'
                     elif w.get('erpm') is not None and abs(w['erpm']) >= UNDER_ERPM:
                         reason = 'CAR_MOVING(%.0f ERPM)' % w['erpm']
+                    elif w.get('sector_min_m', float('inf')) < self.gate + self.guard:
+                        # The mux would latch STOP on the first tick: refuse with the reason instead.
+                        reason = 'MUX_SECTOR_OBJECT(nearest +/-20deg %.2f m < %.2f m)' % (
+                            w['sector_min_m'], self.gate + self.guard)
                     else:
                         ok, need, have = self.ground_fit(w)
                         top = self.ground_window()[1]
@@ -424,6 +454,7 @@ class Machine:
                 else:
                     self.state = 'ARMING'
                     self.t_arm = self.t_req = now
+                    self.killed = False  # n is the only way out of a KILL latch
                     self.log(now, 'ARM_REQUEST')
                     return 0.0, 0.0, 0, 'MANUAL'
             return 0.0, 0.0, 0, None
@@ -447,11 +478,8 @@ class Machine:
             return 0.0, 0.0, 0, None
         if self.state == 'READY':
             reason = self.fault(w)
-            if reason or self.quit or key == 's' or mode != 'MANUAL_READY':
-                if key == 's':
-                    self.repeats.append(dict(repeat=self.repeat, skipped=True))
-                return self.stop(now, reason or ('QUIT' if self.quit else 'SKIP' if key == 's'
-                                                 else 'MUX_LEFT_MANUAL_MODE(%s)' % mode))
+            if reason or self.quit or mode != 'MANUAL_READY':
+                return self.stop(now, reason or ('QUIT' if self.quit else 'MUX_LEFT_MANUAL_MODE(%s)' % mode))
             if held:
                 self.state = 'DRIVING'
                 self.t_drive = now
@@ -482,9 +510,7 @@ class Machine:
             if reason is None and mode not in ('MANUAL_READY', 'MANUAL_ACTIVE'):
                 reason = 'MUX_LEFT_MANUAL_MODE(%s,%s)' % (mode, st.get('last_stop_reason'))
             if reason is None and self.quit:
-                reason = 'QUIT'
-            if reason is None and key == 's':
-                reason = 'SKIP'
+                reason = 'QUIT'  # lost terminal (keys are KILL, handled above)
             if reason is None and not self.brake_at_range and elapsed >= self.ramp_s + self.steady_s:
                 reason = 'PROFILE_DONE'
             if reason is None and elapsed >= self.hard_s:
@@ -537,6 +563,8 @@ class Machine:
             elif self.state == 'IDLE':
                 self.message = '%s | Repeat %d/%d: release SPACE, press n to arm.' % (
                     detail, self.repeat + 1, self.prof['repeats'])
+            if self.killed:
+                self.message = '%s | %s' % (KILL_BANNER, self.message)
             return 0.0, 0.0, 0, 'STOP'
         return 0.0, 0.0, 0, None
 
@@ -652,7 +680,7 @@ def self_test():
     assert t4.state == 'IDLE' and t4.events[-1]['event'] == 'PLACEMENT' and 'arm window 2.15..3.90' in \
         t4.events[-1]['detail'], t4.events[-1]
     for front, sector, why in ((2.0, None, 'SPEED_DOES_NOT_FIT'), (4.2, None, 'SPEED_DOES_NOT_FIT'),
-                               (2.8, 1.2, 'SPEED_DOES_NOT_FIT'),    # object in the mux +/-20 deg sector
+                               (2.8, 0.85, 'MUX_SECTOR_OBJECT'),    # mux would latch on the first tick
                                (float('nan'), None, 'SPEED_DOES_NOT_FIT')):
         t4.step(0.0, 'n', False, gw(front, sector))
         assert t4.state == 'IDLE' and why in t4.events[-1]['detail'], t4.events[-1]
@@ -691,6 +719,66 @@ def self_test():
     assert t4.state == 'IDLE' and t4.repeat == 4                            # 3 + 2 extra: one attempt left
     t, k, why = t4_repeat(t, 3.0)
     assert t4.state == 'DONE' and t4.steady_count == 2                      # cap reached at 5 attempts
+    # Narrow floor: a side object in the mux sector (1.2 m, later 0.5 m) never brakes the runner;
+    # only the front median does. At < 0.80 m the MUX latches STOP and the runner follows it.
+    sd = Machine(tp, p, live=False, ground_ok=True)
+    sd.step(0.0, 'n', False, gw(2.8, 1.2))
+    assert sd.state == 'ARMING', sd.events[-1]
+    sd.step(0.05, None, False, gw(2.8, 1.2, mode='MANUAL_READY'))
+    sd.step(0.1, None, True, gw(2.8, 1.2, mode='MANUAL_READY'))
+    assert sd.step(1.5, None, True, gw(2.3, 0.5, mode='MANUAL_ACTIVE'))[0] > 0 and sd.state == 'DRIVING'
+    assert sd.step(1.55, None, True, gw(2.3, 0.5, mode='STOP'))[0] == 0.0
+    assert sd.events[-1]['detail'].startswith('MUX_LEFT_MANUAL_MODE') and sd.steady_count == 0
+
+    # ---- KILL: any key but SPACE while arming / armed / driving / stopping -> zero, latched until n
+    def armed(m, front=2.8):
+        m.step(0.0, 'n', False, gw(front))
+        m.step(0.05, None, False, gw(front, mode='MANUAL_READY'))
+        assert m.state == 'READY', m.events[-1]
+    for key in ('x', 's', 'm', 'q', '\r'):
+        kd = Machine(tp, p, live=False, ground_ok=True)
+        armed(kd)
+        kd.step(0.1, None, True, gw(2.8, mode='MANUAL_READY'))
+        assert kd.step(2.0, None, True, gw(2.2, mode='MANUAL_ACTIVE'))[0] > 0  # steady speed
+        out = kd.step(2.02, key, True, gw(2.2, mode='MANUAL_ACTIVE'))           # SPACE still held
+        assert out == (0.0, 0.0, 0, 'STOP') and kd.state == 'STOPPING' and kd.killed, (key, out)
+        assert kd.message.startswith(KILL_BANNER) and kd.events[-1]['event'] == 'KILL'
+        zero = [e for e in kd.events if e['event'] == 'ZERO_COMMAND'][-1]['detail']
+        assert zero.startswith('KILL') and not kd.stop_steady, zero
+        assert kd.step(2.5, None, True, gw(2.2))[:3] == (0.0, 0.0, 0)          # held SPACE: still zero
+        kd.step(9.0, None, True, gw(2.2))
+        assert kd.steady_count == 0 and kd.message.startswith(KILL_BANNER)
+        if key == 'q':
+            assert kd.state == 'DONE'                                           # q: kill, then end
+            continue
+        assert kd.state == 'IDLE' and kd.killed
+        assert kd.step(9.1, None, True, gw(2.8))[:3] == (0.0, 0.0, 0) and kd.state == 'IDLE'  # SPACE alone: nothing
+        kd.step(9.2, 'n', False, gw(2.8))
+        assert kd.state == 'ARMING' and not kd.killed                           # only n clears the latch
+    kd = Machine(tp, p, live=False, ground_ok=True)
+    armed(kd)
+    assert kd.step(0.1, 'k', False, gw(2.8, mode='MANUAL_READY')) == (0.0, 0.0, 0, 'STOP')   # READY
+    assert kd.state == 'STOPPING' and kd.killed
+    kd = Machine(tp, p, live=False, ground_ok=True)
+    kd.step(0.0, 'n', False, gw(2.8))
+    assert kd.step(0.02, 'k', False, gw(2.8)) == (0.0, 0.0, 0, 'STOP') and kd.state == 'IDLE'  # ARMING
+    assert kd.killed and kd.events[-1]['detail'] == "key 'k' in ARMING"
+    kd = Machine(tp, p, live=False, ground_ok=True)
+    armed(kd)
+    kd.step(0.1, None, True, gw(2.8, mode='MANUAL_READY'))
+    kd.step(0.5, None, False, gw(2.7, mode='MANUAL_ACTIVE'))                    # SPACE release: brake
+    assert kd.state == 'STOPPING' and not kd.killed
+    assert kd.step(0.6, 'z', False, gw(2.7))[:3] == (0.0, 0.0, 0) and kd.state == 'STOPPING'   # STOPPING
+    assert kd.killed and kd.message.startswith(KILL_BANNER)
+    # T1 profile: a KILL from steady speed is not a counted stop
+    k1 = Machine(dict(PROFILES['t1b_stop'], speed=0.5), p, live=False)
+    k1.step(0.0, 'n', False, world())
+    k1.step(0.05, None, False, world(st=dict(mode='MANUAL_READY', last_mode_request='MANUAL')))
+    k1.step(0.1, None, True, world(st=dict(mode='MANUAL_READY', last_mode_request='MANUAL')))
+    k1.step(2.0, None, True, world(st=dict(mode='MANUAL_ACTIVE')))
+    k1.step(2.02, 'x', True, world(st=dict(mode='MANUAL_ACTIVE')))
+    k1.step(9.0, None, False, world())
+    assert k1.steady_count == 0 and k1.state == 'IDLE' and k1.killed
     # sector_min = the mux's nearest in +/-20 deg; side ranges at +/-90 deg (REP-103: +90 = left)
     s = Scan()
     s.ranges = [5.0] * 1440
@@ -826,9 +914,13 @@ def self_test():
     print('      no protected topic in the bag list, audit-log parsing, step resolution,')
     print('      step/yaml/cap match, step gate (rebound, unanalysed, too few, not steady, fault, method), live rebound,')
     print('      unsteady repeats not counted (extra repeats, capped).')
-    print('PASS: T4 brake point 0.90 m (> mux gate 0.80 m), arm window 2.15..3.90 m, object in the mux')
-    print('      sector / car moving refused, placement readout, drive to the brake point (no fixed time),')
-    print('      only brake-point stops count, time limit, front range lost, sector min / side ranges.')
+    print('PASS: T4 brake point 0.90 m (> mux gate 0.80 m), arm window 2.15..3.90 m (front median), object')
+    print('      < 0.90 m in the mux sector / car moving refused, placement readout, drive to the brake point,')
+    print('      side object in the sector never brakes the runner (mux does), only brake-point stops count,')
+    print('      time limit, front range lost, sector min / side ranges.')
+    print('PASS: KILL: any key but SPACE (x s m q Enter) while driving -> zero at once even with SPACE held,')
+    print('      banner, latched (SPACE alone does nothing) until n; also in READY, ARMING, STOPPING; q ends;')
+    print('      KILL stops never counted (T4 and T1).')
     # Clean shutdown on every exit path, in child processes on an isolated domain
     # (ROS_DOMAIN_ID 77, localhost only). The probe node has no publishers.
     env = dict(os.environ, ROS_DOMAIN_ID='77', ROS_LOCALHOST_ONLY='1')
@@ -1287,7 +1379,8 @@ def drive_session(args, p, prof, r, node):
             say('Ground: arm only with %.2f..%.2f m free ahead (LiDAR); runner brakes at %.2f m '
                 '(mux gate %.2f m = backstop). m = placement readout.' % (
                     need, top, machine.brake_range(prof['speed']), machine.gate))
-        say('Keys: n = arm, hold SPACE = drive, s = skip, q = quit. ' + machine.message)
+        say('Keys: n = arm, hold SPACE = drive, s = skip, q = quit (idle). While armed/driving ANY other '
+            'key = KILL (brake, latched until n). ' + machine.message)
         last_msg = None
         graph = None
         tick = 0
@@ -1317,6 +1410,8 @@ def drive_session(args, p, prof, r, node):
                 machine.reset_deadman = False
             if machine.message != last_msg:
                 last_msg = machine.message
+                if machine.message.startswith(KILL_BANNER):
+                    say('\a\n' + '!' * 72)
                 say('[%s] %s | mux %s %s | ERPM %s' % (
                     machine.state, machine.message, (w['status'] or {}).get('mode'),
                     (w['status'] or {}).get('reason'), w.get('erpm')))

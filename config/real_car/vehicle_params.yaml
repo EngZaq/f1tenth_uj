@@ -100,7 +100,8 @@ ground_check:                       # needed = v^2/(2*ramp) + steady + v^2/(2*de
 
 t4:                                 # T4 straight line on the ground (run_test.py t4_straight), design 20 Nov
   mux_gate_m: 0.80                  # physical_drive_mux.py front_evidence stop_m (MANUAL): nearest finite < 0.80 m
-  mux_sector_deg: 20.0              # ... in +/- this sector (from the laser). The runner watches the same nearest
+  mux_sector_deg: 20.0              # ... in +/- this sector (from the laser). Runner: arm refused if nearest < gate + guard;
+                                    # the brake trigger uses the front median only (20 Nov, narrow floor)
   gate_guard_m: 0.10                # runner brakes at >= gate + guard: the mux gate stays the backstop
   reaction_s: 0.20                  # scan age + runner 50 Hz + mux 20 Hz + converter 50 Hz + serial (worst case)
   max_approach_m: 3.0               # arm refused if the brake point is further than this (uncertain steering centre)
