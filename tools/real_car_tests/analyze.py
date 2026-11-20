@@ -16,7 +16,9 @@ by the runner, else the mux output in /control/status.
 import argparse
 import csv
 import json
+import math
 import os
+import statistics
 import sys
 from collections import Counter
 from pathlib import Path
@@ -24,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import params as vp  # noqa: E402
 from run_test import (REBOUND_FAIL_ERPM, UNDER_ERPM, ReboundTracker,  # noqa: E402
-                      interval_stats, parse_audit_line)
+                      front_range, interval_stats, parse_audit_line, window_ranges)
 
 STOP_WINDOW_S = 3.0
 STEADY_FRACTION = 0.8       # a stop counts for the step gate only from >= 80 % of the step ERPM
@@ -100,6 +102,327 @@ def phase_exits(t1b_statuses):
     return out
 
 
+def phase_entries(t1b_statuses):
+    """T1b converter: times it entered DRIVE (first nonzero speed command sent to vesc_driver)."""
+    out, prev = [], None
+    for t, st in t1b_statuses:
+        phase = st.get('phase')
+        if phase == 'DRIVE' and prev != 'DRIVE':
+            out.append(t)
+        prev = phase
+    return out
+
+
+# ---------------------------------------------------------------- T4 (ground, straight)
+
+T4_TEST = 't4_straight'
+MOTION_ERPM = 150.0        # first motion: |ERPM| >= this on 2 consecutive samples (~0.018 m/s)
+MOTION_RANGE_M = 0.02      # ... or the range 2 cm below its pre-start median on 2 consecutive scans
+PRE_S = 1.0                # pre-start window before the command: car still, hands off
+STILL_STD_M = 0.01         # range spread allowed in the pre-start and standstill windows
+SIDE_MAX_M = 4.0           # side walls further than this are not used
+WALL_MIN_POINTS, WALL_MAX_RMS = 12, 0.02
+WALL_SHARE = 0.9           # wall fit on >= this share of a repeat's scans -> use it, else front median
+CURVED_DEG = 5.0           # heading change above this: LiDAR distance corrected by cos(heading)
+
+
+def wall_fit(scan, half_width_deg):
+    """Line x = c + b*y through the front returns (laser frame, +/- half_width): perpendicular
+    distance to the wall d = c / sqrt(1 + b^2) and heading to the wall normal psi = atan(b)
+    (+ = car turned left). None when too few points or not a plane (box edge, clutter)."""
+    pts = window_ranges(scan, half_width_deg)
+    if len(pts) < WALL_MIN_POINTS:
+        return None
+    med = statistics.median(r for _, r in pts)
+    xy = [(r * math.cos(a), r * math.sin(a)) for a, r in pts if abs(r - med) < max(0.25, 0.15 * med)]
+    rms = float('inf')
+    for _ in range(3):
+        n = len(xy)
+        if n < WALL_MIN_POINTS:
+            return None
+        mx, my = sum(p[0] for p in xy) / n, sum(p[1] for p in xy) / n
+        syy = sum((p[1] - my) ** 2 for p in xy)
+        if syy < 1e-9:
+            return None
+        b = sum((p[1] - my) * (p[0] - mx) for p in xy) / syy
+        c = mx - b * my
+        res = [p[0] - c - b * p[1] for p in xy]
+        rms = math.sqrt(sum(r * r for r in res) / n)
+        keep = [p for p, r in zip(xy, res) if abs(r) <= max(3 * rms, 0.01)]
+        if len(keep) == n:
+            break
+        xy = keep
+    if rms > WALL_MAX_RMS:
+        return None
+    return dict(d=c / math.sqrt(1 + b * b), psi=math.atan(b), n=len(xy), rms=rms)
+
+
+def scan_features(scan, front_deg, wall_deg):
+    return dict(front=front_range(scan, front_deg), wall=wall_fit(scan, wall_deg),
+                left=front_range(scan, front_deg, 90.0), right=front_range(scan, front_deg, -90.0))
+
+
+def interp(ts, vs, t):
+    """Linear interpolation of a sorted series; None outside it."""
+    if not ts or t < ts[0] or t > ts[-1]:
+        return None
+    lo, hi = 0, len(ts) - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if ts[mid] <= t else (lo, mid)
+    if ts[hi] == ts[lo]:
+        return vs[lo]
+    return vs[lo] + (vs[hi] - vs[lo]) * (t - ts[lo]) / (ts[hi] - ts[lo])
+
+
+def in_window(ts, vs, a, b):
+    return [v for t, v in zip(ts, vs) if a <= t <= b and v is not None and math.isfinite(v)]
+
+
+def integrate(ts, vs, a, b):
+    """Trapezoid integral of a sorted series over [a, b] (interpolated ends); None if no data."""
+    if not ts or b <= a:
+        return None
+    a, b = max(a, ts[0]), min(b, ts[-1])
+    if b <= a:
+        return None
+    pts = [(a, interp(ts, vs, a))] + [(t, v) for t, v in zip(ts, vs) if a < t < b] + [(b, interp(ts, vs, b))]
+    return sum((t2 - t1) * (v1 + v2) / 2 for (t1, v1), (t2, v2) in zip(pts, pts[1:]))
+
+
+def first_sustained(ts, vs, t_from, pred):
+    """First t >= t_from where pred holds on this and the next sample."""
+    for i in range(len(ts) - 1):
+        if ts[i] >= t_from and pred(vs[i]) and pred(vs[i + 1]):
+            return ts[i]
+    return None
+
+
+def slope(ts, vs):
+    n = len(ts)
+    if n < 3:
+        return None
+    mt, mv = sum(ts) / n, sum(vs) / n
+    stt = sum((t - mt) ** 2 for t in ts)
+    return sum((t - mt) * (v - mv) for t, v in zip(ts, vs)) / stt if stt > 0 else None
+
+
+def med(vals):
+    return statistics.median(vals) if vals else None
+
+
+def unwrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def t4_repeat(t0, t_cmd, t_runner_zero, scan_t, feats, ct, erpm, ot, vx, rt, rpose, gain, hold_s, ramp_accel):
+    """T4 metrics of one repeat. t0 = brake command (converter left DRIVE), t_cmd = first nonzero
+    speed command (converter entered DRIVE), t_runner_zero = runner's ZERO_COMMAND (or None).
+    feats: scan_features per scan time; rpose: RF2O (x, y, yaw). All times: bag receive (wall)."""
+    out = {}
+    win_feats = [f for t, f in zip(scan_t, feats) if t_cmd - PRE_S <= t <= t0 + hold_s]
+    walls = sum(1 for f in win_feats if f['wall'])
+    use_wall = bool(win_feats) and walls >= WALL_SHARE * len(win_feats)
+    out['range_source'] = 'wall fit (perpendicular)' if use_wall else 'front median +/-3 deg'
+    rng = [(f['wall']['d'] if f['wall'] else None) if use_wall else f['front'] for f in feats]
+    psi = [f['wall']['psi'] if f['wall'] else None for f in feats]
+    rts = [t for t, r in zip(scan_t, rng) if r is not None and math.isfinite(r)]
+    rvs = [r for r in rng if r is not None and math.isfinite(r)]
+    aerpm = [abs(e) for e in erpm]
+
+    # Pre-start: still, hands off.
+    pre = in_window(rts, rvs, t_cmd - PRE_S, t_cmd - 0.02)
+    r_pre = med(pre)
+    out['pre_range_m'] = r_pre
+    pre_erpm = in_window(ct, aerpm, t_cmd - PRE_S, t_cmd)
+    out['pre_still'] = (len(pre) >= 3 and statistics.pstdev(pre) <= STILL_STD_M
+                        and (not pre_erpm or max(pre_erpm) < UNDER_ERPM))
+
+    # Start delay: command -> first motion.
+    t_mv = first_sustained(ct, aerpm, t_cmd, lambda e: e >= MOTION_ERPM)
+    t_ml = (first_sustained(rts, rvs, t_cmd, lambda r: r <= r_pre - MOTION_RANGE_M)
+            if r_pre is not None else None)
+    out['start_delay_erpm_s'] = None if t_mv is None or t_mv > t0 else t_mv - t_cmd
+    out['start_delay_lidar_s'] = None if t_ml is None or t_ml > t0 else t_ml - t_cmd
+    out['cmd_speed_at_motion_mps'] = (None if out['start_delay_erpm_s'] is None
+                                      else ramp_accel * out['start_delay_erpm_s'])
+    if out['start_delay_erpm_s'] is None:
+        out['moved'] = False
+        return out
+    out['moved'] = True
+
+    # Brake: range and speed at the brake command.
+    r_brake = interp(rts, rvs, t0)
+    sl = slope([t for t in rts if t0 - 0.4 <= t <= t0], in_window(rts, rvs, t0 - 0.4, t0))
+    v_lidar = None if sl is None else -sl
+    vv = in_window(ot, vx, t0 - 0.1, t0)
+    v_vesc = sum(vv) / len(vv) if vv else interp(ot, vx, t0)
+    out.update(range_at_brake_m=r_brake, v_brake_lidar_mps=v_lidar, v_brake_vesc_mps=v_vesc)
+
+    # Standstill: ERPM < 100, then the range while the brake still holds.
+    t_under = next((t for t, e in zip(ct, aerpm) if t >= t0 and e < UNDER_ERPM), None)
+    out['stop_time_s'] = None if t_under is None else t_under - t0
+    if t_under is None:
+        out['stopped'] = False
+        return out
+    out['stopped'] = True
+    a, b = max(t_under + 0.2, t0 + 0.5), t0 + hold_s - 0.1
+    still = in_window(rts, rvs, a, b)
+    if len(still) < 3:
+        b = a + 1.0
+        still = in_window(rts, rvs, a, b)
+    r_still = med(still)
+    out['range_still_m'] = r_still
+    out['still_ok'] = len(still) >= 3 and statistics.pstdev(still) <= STILL_STD_M
+
+    def dist(x, y):
+        return None if x is None or y is None else x - y
+    out['stop_lidar_m'] = dist(r_brake, r_still)
+    out['stop_vesc_m'] = integrate(ot, vx, t0, a)
+    if t_runner_zero is not None:
+        out['stop_from_runner_lidar_m'] = dist(interp(rts, rvs, t_runner_zero), r_still)
+        out['runner_to_brake_s'] = t0 - t_runner_zero
+
+    def decel(v, d):
+        return v * v / (2 * d) if v is not None and d is not None and d > 0.005 else None
+    out['decel_lidar_mps2'] = decel(v_lidar, out['stop_lidar_m'])
+    out['decel_vesc_mps2'] = decel(v_vesc, out['stop_vesc_m'])
+
+    # Heading to the wall (wall fit) and RF2O yaw: curvature = steering offset (indicative).
+    pts = [(t, p) for t, p in zip(scan_t, psi) if p is not None]
+    psi_pre = med([p for t, p in pts if t_cmd - PRE_S <= t <= t_cmd])
+    psi_still = med([p for t, p in pts if a <= t <= b])
+    psi_drive = med([p for t, p in pts if t_cmd <= t <= t0])
+    out['heading_change_wall_deg'] = (None if psi_pre is None or psi_still is None
+                                      else math.degrees(psi_still - psi_pre))
+    r0 = [interp(rt, [p[k] for p in rpose], t_cmd) for k in range(3)]
+    r1 = [interp(rt, [p[k] for p in rpose], t0) for k in range(3)]
+    r2 = [interp(rt, [p[k] for p in rpose], a) for k in range(3)]
+    have_rf = None not in r0 + r1 + r2
+    out['heading_change_rf2o_deg'] = math.degrees(unwrap(r2[2] - r0[2])) if have_rf else None
+
+    # Distance while driving (gain) and in total.
+    cos_fix = math.cos(psi_drive) if (use_wall and psi_drive is not None) else 1.0
+    out['drive_lidar_m'] = None if dist(r_pre, r_brake) is None else dist(r_pre, r_brake) / cos_fix
+    out['drive_vesc_m'] = integrate(ot, vx, t_cmd - 0.2, t0)
+    out['drive_rf2o_m'] = math.hypot(r1[0] - r0[0], r1[1] - r0[1]) if have_rf else None
+    out['total_lidar_m'] = dist(r_pre, r_still)
+    out['total_vesc_m'] = integrate(ot, vx, t_cmd - 0.2, a)
+    out['total_rf2o_m'] = math.hypot(r2[0] - r0[0], r2[1] - r0[1]) if have_rf else None
+    dl, dv, dr = out['drive_lidar_m'], out['drive_vesc_m'], out['drive_rf2o_m']
+    # vesc distance = true distance x gain_true / gain_used  ->  gain_true = gain x d_vesc / d_true
+    out['gain_suggested_lidar'] = gain * dv / dl if dl and dv and dl > 0.2 else None
+    out['gain_suggested_rf2o'] = gain * dv / dr if dr and dv and dr > 0.2 else None
+    curved = [abs(x) for x in (out['heading_change_wall_deg'], out['heading_change_rf2o_deg']) if x is not None]
+    out['curved'] = bool(curved) and max(curved) > CURVED_DEG
+
+    # Side drift (+ = left). Wall: sideways along the wall from d and heading; side walls; RF2O
+    # relative to the start heading.
+    lat = 0.0
+    seq = [(t, f['wall']) for t, f in zip(scan_t, feats) if t_cmd <= t <= a and f['wall']]
+    for (_, w1), (_, w2) in zip(seq, seq[1:]):
+        lat += (w1['d'] - w2['d']) * math.tan((w1['psi'] + w2['psi']) / 2)
+    out['drift_wall_m'] = lat if use_wall and len(seq) > 2 else None
+    side = []
+    for key, sign in (('left', -1.0), ('right', 1.0)):
+        s0 = med(in_window(scan_t, [f[key] for f in feats], t_cmd - PRE_S, t_cmd))
+        s1 = med(in_window(scan_t, [f[key] for f in feats], a, b))
+        out['%s_wall_change_m' % key] = dist(s1, s0)
+        if s0 is not None and s1 is not None and s0 <= SIDE_MAX_M and s1 <= SIDE_MAX_M:
+            side.append(sign * (s1 - s0))
+    out['drift_side_m'] = sum(side) / len(side) if side else None
+    if have_rf:
+        dx, dy = r2[0] - r0[0], r2[1] - r0[1]
+        out['drift_rf2o_m'] = -math.sin(r0[2]) * dx + math.cos(r0[2]) * dy
+    else:
+        out['drift_rf2o_m'] = None
+    return out
+
+
+T4_KEYS = ['stop_lidar_m', 'stop_vesc_m', 'stop_from_runner_lidar_m', 'decel_lidar_mps2', 'decel_vesc_mps2',
+           'stop_time_s', 'gain_suggested_lidar', 'gain_suggested_rf2o', 'start_delay_erpm_s',
+           'start_delay_lidar_s', 'drift_wall_m', 'drift_side_m', 'drift_rf2o_m',
+           'heading_change_wall_deg', 'heading_change_rf2o_deg', 'rebound_rise_erpm']
+
+
+def t4_summary(items):
+    """Mean / sd / min / max over the counted repeats (stopped at the brake point from steady speed)."""
+    use = [x for x in items if x.get('counted') and x.get('stopped')]
+    out = dict(counted=len(use), repeats=len(items))
+    for k in T4_KEYS:
+        vals = [x[k] for x in use if x.get(k) is not None]
+        if vals:
+            out[k] = dict(n=len(vals), mean=sum(vals) / len(vals), min=min(vals), max=max(vals),
+                          sd=statistics.stdev(vals) if len(vals) > 1 else 0.0)
+    return out
+
+
+def fmt(x, nd=2):
+    return '-' if x is None else ('%.*f' % (nd, x))
+
+
+def t4_report(name, t4, gain, table=True):
+    lines = ['### T4 %s' % name, '']
+    if table:
+        lines += ['Range: %s. Times: bag receive. + drift = left. L = LiDAR, V = VESC odom.' % (
+            ', '.join(sorted(set(x.get('range_source', '?') for x in t4['items'] if 'range_source' in x))) or '-'), '',
+                  '| # | Reason | Counted | v brake m/s L / V | Stop m L / V (from runner) | Decel m/s^2 L / V '
+                  '| Stop time s | Drive m L / V / RF2O | Gain sugg. L / RF2O | Start delay s ERPM / LiDAR '
+                  '| Drift m wall / side / RF2O | Heading deg wall / RF2O | Rebound ERPM | Flags |',
+                  '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+    for x in (t4['items'] if table else []):
+        flags = [f for f, bad in (('pre-start not still', x.get('pre_still') is False),
+                                  ('standstill noisy', x.get('still_ok') is False),
+                                  ('curved > %g deg' % CURVED_DEG, x.get('curved')),
+                                  ('no motion', x.get('moved') is False),
+                                  ('not stopped', x.get('moved') and x.get('stopped') is False)) if bad]
+        lines.append('| %d | %s | %s | %s / %s | %s / %s (%s) | %s / %s | %s | %s / %s / %s | %s / %s | %s / %s '
+                     '| %s / %s / %s | %s / %s | %s | %s |' % (
+                         x['index'] + 1, (x.get('runner_reason') or '-').split('(')[0],
+                         'yes' if x.get('counted') else 'no',
+                         fmt(x.get('v_brake_lidar_mps')), fmt(x.get('v_brake_vesc_mps')),
+                         fmt(x.get('stop_lidar_m'), 3), fmt(x.get('stop_vesc_m'), 3),
+                         fmt(x.get('stop_from_runner_lidar_m'), 3),
+                         fmt(x.get('decel_lidar_mps2')), fmt(x.get('decel_vesc_mps2')), fmt(x.get('stop_time_s'), 3),
+                         fmt(x.get('drive_lidar_m'), 3), fmt(x.get('drive_vesc_m'), 3),
+                         fmt(x.get('drive_rf2o_m'), 3),
+                         fmt(x.get('gain_suggested_lidar'), 0), fmt(x.get('gain_suggested_rf2o'), 0),
+                         fmt(x.get('start_delay_erpm_s'), 3), fmt(x.get('start_delay_lidar_s'), 3),
+                         fmt(x.get('drift_wall_m'), 3), fmt(x.get('drift_side_m'), 3), fmt(x.get('drift_rf2o_m'), 3),
+                         fmt(x.get('heading_change_wall_deg'), 1), fmt(x.get('heading_change_rf2o_deg'), 1),
+                         fmt(x.get('rebound_rise_erpm'), 0), ', '.join(flags) or '-'))
+    s = t4['summary']
+    lines += ['', 'Summary over %d counted of %d repeats (mean +/- sd, min..max):' % (s['counted'], s['repeats'])]
+
+    def row(label, key, nd=3, unit=''):
+        v = s.get(key)
+        if v:
+            lines.append('- %s: %s +/- %s%s (%s..%s, n=%d)' % (label, fmt(v['mean'], nd), fmt(v['sd'], nd), unit,
+                                                             fmt(v['min'], nd), fmt(v['max'], nd), v['n']))
+    row('Stopping distance, LiDAR, from the brake command', 'stop_lidar_m', 3, ' m')
+    row('Stopping distance, VESC odom', 'stop_vesc_m', 3, ' m')
+    row('Stopping distance, LiDAR, from the runner zero (incl. mux pipeline)', 'stop_from_runner_lidar_m', 3, ' m')
+    row('Deceleration, LiDAR v^2/2d', 'decel_lidar_mps2', 2, ' m/s^2')
+    row('Deceleration, VESC v^2/2d', 'decel_vesc_mps2', 2, ' m/s^2')
+    row('Time to < 100 ERPM', 'stop_time_s', 3, ' s')
+    row('speed_to_erpm_gain suggested from LiDAR (now %.0f)' % gain, 'gain_suggested_lidar', 0)
+    row('speed_to_erpm_gain suggested from RF2O', 'gain_suggested_rf2o', 0)
+    row('Start delay, command -> ERPM >= %.0f' % MOTION_ERPM, 'start_delay_erpm_s', 3, ' s')
+    row('Start delay, command -> LiDAR -%.0f cm' % (MOTION_RANGE_M * 100), 'start_delay_lidar_s', 3, ' s')
+    row('Side drift, wall fit (indicative: steering centre uncertain)', 'drift_wall_m', 3, ' m')
+    row('Side drift, side walls', 'drift_side_m', 3, ' m')
+    row('Side drift, RF2O vs start heading', 'drift_rf2o_m', 3, ' m')
+    row('Heading change, wall fit', 'heading_change_wall_deg', 1, ' deg')
+    row('Heading change, RF2O', 'heading_change_rf2o_deg', 1, ' deg')
+    row('F-01 ground: rebound rise after the brake', 'rebound_rise_erpm', 0, ' ERPM')
+    d = s.get('decel_lidar_mps2')
+    if d:
+        lines.append('- For the speed-fit checks (conservative): decel = min LiDAR value rounded down = %.1f m/s^2 '
+                     '(vehicle_params dynamics.decel_mps2 changes only through a results row).' % (
+                         math.floor(d['min'] * 10) / 10))
+    return '\n'.join(lines)
+
+
 def mode_transitions(statuses):
     """statuses: [(t, dict)] -> list of mode changes with the mux's reasons."""
     out, prev = [], None
@@ -164,9 +487,106 @@ def self_test():
           (3, {'phase': 'STOP_BRAKE'}), (5, {'phase': 'RELEASED'}), (6, {'phase': 'DRIVE'}),
           (7, {'phase': 'STOP_SPEED0'})]
     assert phase_exits(ph) == [3, 7]
+    assert phase_entries(ph) == [1, 6]
     print('PASS: stop metrics (12 Nov rebound shape fails, clean decay passes), zero detection,')
     print('      mux transitions, command source (audit > mux status > legacy),')
     print('      T1b stop times from the converter phase. No bag read.')
+    t4_self_test()
+
+
+def t4_self_test():
+    class Scan:
+        angle_min, angle_max = -math.pi, math.pi
+        angle_increment = 2 * math.pi / 1440
+        range_min, range_max = 0.05, 30.0
+
+    def wall_scan(d, psi, noise=0.0):
+        """Wall at perpendicular distance d, car turned left by psi; returns only within +/-60 deg."""
+        s = Scan()
+        s.ranges = []
+        for i in range(1440):
+            a = s.angle_min + i * s.angle_increment
+            c = math.cos(a + psi)        # wall normal at -psi in the car frame
+            r = d / c if abs(a) < math.radians(60) and c > 0.1 else float('inf')
+            s.ranges.append(r + noise * (((i * 7919) % 13) / 6.0 - 1.0))
+        return s
+    for d, psi in ((1.5, 0.0), (0.9, math.radians(5)), (2.6, math.radians(-8))):
+        w = wall_fit(wall_scan(d, psi, noise=0.005), 10.0)
+        assert w and abs(w['d'] - d) < 0.005 and abs(w['psi'] - psi) < math.radians(0.7), (d, psi, w)
+    s = wall_scan(1.5, 0.0)
+    s.ranges[720 + 20] = 0.3                                                  # one stray return: rejected
+    w = wall_fit(s, 10.0)
+    assert w and abs(w['d'] - 1.5) < 0.002, w
+    s = Scan()
+    s.ranges = [float('inf')] * 1440
+    s.ranges[715:725] = [1.0] * 10                                            # too few points
+    assert wall_fit(s, 10.0) is None
+    assert abs(integrate([0, 1, 2], [0, 1, 1], 0.5, 2) - 1.375) < 1e-9 and integrate([0, 1], [1, 1], 2, 3) is None
+    assert interp([0, 1], [0, 10], 0.25) == 2.5 and interp([0, 1], [0, 10], 2) is None
+
+    # Simulated T4 repeat: 0.15 s start delay, 0.5 m/s^2 to 0.5 m/s, brake at 0.90 m, 2.0 m/s^2,
+    # VESC gain 5 % higher than the converter's (true 8834.7 vs 8414), heading 3 deg left of the
+    # wall normal, side walls 1.0 m left / 1.2 m right, RF2O at yaw 0.3 rad.
+    gain, true_gain, psi, decel = 8414.0, 8414.0 * 1.05, math.radians(3.0), 2.0
+    t_cmd, delay, d0, dt = 10.0, 0.15, 2.8, 0.001
+    t, s_, v, t0, hist = 8.0, 0.0, 0.0, None, []
+    while t < 18.5:                                                           # brake at ~14.46 s, hold 2 s
+        if t0 is None and t >= t_cmd + delay:
+            v = min(0.5, v + 0.5 * dt)
+        if t0 is None and d0 - s_ * math.cos(psi) <= 0.9:
+            t0 = t                                                            # runner and converter brake
+        if t0 is not None:
+            v = max(0.0, v - decel * dt)
+        s_ += v * dt
+        hist.append((t, s_, v))
+        t += dt
+
+    def at(period):
+        return [h for k, h in enumerate(hist) if k % int(round(period / dt)) == 0]
+    scan_t, feats = [], []
+    for t, s_, v in at(1 / 30.0):
+        y = s_ * math.sin(psi)
+        d = d0 - s_ * math.cos(psi)
+        scan_t.append(t)
+        feats.append(dict(front=d / math.cos(psi), wall=dict(d=d, psi=psi), left=(1.0 - y) / math.cos(psi),
+                          right=(1.2 + y) / math.cos(psi)))
+    core = at(0.02)
+    ct, erpm = [h[0] for h in core], [h[2] * true_gain for h in core]
+    ot, vx = ct, [e / gain for e in erpm]
+    rf = at(0.05)
+    rt = [h[0] for h in rf]
+    rpose = [(h[1] * math.cos(0.3), h[1] * math.sin(0.3), 0.3) for h in rf]
+    x = t4_repeat(t0, t_cmd, t0 - 0.06, scan_t, feats, ct, erpm, ot, vx, rt, rpose, gain, 2.0, 0.5)
+    stop_true = 0.25 / (2 * decel) * math.cos(psi)                           # along the wall normal
+    assert x['moved'] and x['stopped'] and x['pre_still'] and x['still_ok'], x
+    assert x['range_source'].startswith('wall'), x
+    assert abs(x['start_delay_erpm_s'] - (delay + MOTION_ERPM / true_gain / 0.5)) < 0.03, x['start_delay_erpm_s']
+    assert x['start_delay_lidar_s'] > x['start_delay_erpm_s']
+    assert abs(x['stop_lidar_m'] - stop_true) < 0.01, (x['stop_lidar_m'], stop_true)
+    assert abs(x['stop_vesc_m'] - 1.05 * 0.0625) < 0.005, x['stop_vesc_m']
+    assert abs(x['decel_lidar_mps2'] - decel) < 0.25, x['decel_lidar_mps2']
+    assert abs(x['gain_suggested_lidar'] - true_gain) < 0.01 * true_gain, x['gain_suggested_lidar']
+    assert abs(x['gain_suggested_rf2o'] - true_gain) < 0.01 * true_gain, x['gain_suggested_rf2o']
+    s_end = hist[-1][1]
+    assert abs(x['drift_wall_m'] - s_end * math.sin(psi)) < 0.01, (x['drift_wall_m'], s_end * math.sin(psi))
+    assert abs(x['drift_side_m'] - s_end * math.sin(psi)) < 0.01, x['drift_side_m']
+    assert abs(x['drift_rf2o_m']) < 1e-6 and abs(x['heading_change_rf2o_deg']) < 1e-6
+    assert abs(x['heading_change_wall_deg']) < 1e-6 and not x['curved']
+    assert x['stop_from_runner_lidar_m'] > x['stop_lidar_m'] - 1e-9
+    # Disarmed / no motion: start delay None, not counted
+    y = t4_repeat(t0, t_cmd, None, scan_t, [dict(f, wall=None) for f in feats[:1]] * len(feats),
+                  ct, [0.0] * len(ct), ot, [0.0] * len(ot), rt, rpose, gain, 2.0, 0.5)
+    assert y['moved'] is False and y['range_source'].startswith('front'), y
+    items = [dict(x, index=0, counted=True, runner_reason='BRAKE_POINT(ahead 0.90 m <= 0.90 m)'),
+             dict(x, index=1, counted=True, gain_suggested_lidar=x['gain_suggested_lidar'] + 100),
+             dict(y, index=2, counted=False, runner_reason='HARD_TIME_LIMIT')]
+    sm = t4_summary(items)
+    assert sm['counted'] == 2 and sm['repeats'] == 3 and abs(sm['gain_suggested_lidar']['sd'] - 70.71) < 0.01, sm
+    text = t4_report('selftest', dict(items=items, summary=sm), gain)
+    assert 'no motion' in text and 'For the speed-fit checks' in text and text.count('\n| ') == 4, text
+    print('PASS: T4 wall fit (distance, heading, stray return, too few), integrate/interp, simulated ground')
+    print('      repeat: start delay, stop distance L/V, decel, gain from LiDAR and RF2O (+5 %), drift')
+    print('      wall/side/RF2O, heading; no-motion repeat; summary and report.')
 
 
 # ---------------------------------------------------------------- bag
@@ -196,7 +616,55 @@ def read_csv(path):
         return list(csv.DictReader(fp))
 
 
-def analyze(folder):
+def quat_yaw(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+def analyze_t4(info, data, stops, t1b, events, ct, erpm, gain):
+    """T4 metrics per stop: the command start is the converter entering DRIVE before the stop
+    (else the runner's DRIVE_START), the brake command the stop's t0."""
+    p = vp.load()
+    front_deg = float(vp.get(p, 'ground_check.front_window_deg'))
+    wall_deg = float(vp.get(p, 't4.wall_fit_deg'))
+    scans = data.get('/scan', [])
+    scan_t = [t for t, _ in scans]
+    feats = [scan_features(m, front_deg, wall_deg) for _, m in scans]
+    vo = data.get('/odom_vesc_observe', [])
+    ot, vx = [t for t, _ in vo], [m.twist.twist.linear.x for _, m in vo]
+    rf = data.get('/odom_rf2o', [])
+    rt = [t for t, _ in rf]
+    rpose = [(m.pose.pose.position.x, m.pose.pose.position.y, quat_yaw(m.pose.pose.orientation)) for _, m in rf]
+    entries = phase_entries(t1b)
+    starts = [float(e['wall']) for e in events if e['event'] == 'DRIVE_START']
+    runner_zeros = [float(e['wall']) for e in events if e['event'] == 'ZERO_COMMAND']
+    hold = float((info.get('converter_params') or {}).get('brake_hold_s') or 2.0)
+    ramp = float(info.get('ramp_accel_mps2') or vp.get(p, 'runner.ramp_accel_mps2'))
+    items, prev_t0 = [], float('-inf')
+    for st in stops:
+        t0 = st['t0']
+        conv = [t for t in entries if prev_t0 < t <= t0]
+        run = [t for t in starts if prev_t0 < t <= t0]
+        prev_t0 = t0
+        reason = st.get('runner_reason') or ''
+        base = dict(index=st['index'], t0=t0, runner_reason=reason,
+                    rebound_rise_erpm=st.get('rebound_rise_erpm'),
+                    rebound_pass=st.get('pass_no_rebound_over_300'),
+                    reached_steady=st.get('reached_steady'))
+        if not conv and not run:
+            items.append(dict(base, moved=False, counted=False, note='no drive start before this stop'))
+            continue
+        t_cmd = conv[-1] if conv else run[-1]
+        rz = [t for t in runner_zeros if t0 - REASON_MATCH_S <= t <= t0 + 1e-3]
+        x = t4_repeat(t0, t_cmd, rz[-1] if rz else None, scan_t, feats, ct, erpm, ot, vx, rt, rpose,
+                      gain, hold, ramp)
+        x.update(base, t_cmd=t_cmd, cmd_source='converter DRIVE entry' if conv else 'runner DRIVE_START',
+                 runner_to_cmd_s=(t_cmd - run[-1]) if (conv and run and run[-1] <= t_cmd) else None)
+        x['counted'] = bool(st.get('reached_steady')) and reason.startswith('BRAKE_POINT') and x.get('moved', False)
+        items.append(x)
+    return dict(items=items, summary=t4_summary(items), gain=gain)
+
+
+def analyze(folder, t4=False):
     folder = Path(folder).expanduser()
     bag_dir = folder / 'bag' if (folder / 'bag' / 'metadata.yaml').exists() else folder
     data = read_bag(bag_dir)
@@ -335,6 +803,9 @@ def analyze(folder):
     if stops and any(s.get('samples') for s in stops):
         summary['stops']['all_pass_no_rebound_over_300'] = all(
             s.get('pass_no_rebound_over_300', True) for s in stops)
+
+    if t4 or info.get('test') == T4_TEST:
+        summary['t4'] = analyze_t4(info, data, stops, t1b, events, ct, erpm, gain)
 
     plots = make_plots(folder, ct, erpm, cur, mt, mv, zeros, pub, data)
     summary['plots'] = plots
@@ -513,6 +984,8 @@ def write_readme(folder, s):
                              x.get('rebound_from_s'), x.get('rebound_at_s'),
                              x['max_abs_current_after_zero_a'], x.get('tach_counts_after_zero'),
                              x['pass_no_rebound_over_300'], x.get('runner_reason')))
+    if 't4' in s:
+        lines += ['', t4_report(folder.name, s['t4'], s['t4']['gain'])]
     readme = folder / 'README.md'
     text = readme.read_text() if readme.exists() else ''
     text = text.split('## Analysis (analyze.py)')[0].rstrip() + '\n\n' + '\n'.join(lines) + '\n'
@@ -521,23 +994,41 @@ def write_readme(folder, s):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('folder', nargs='?')
+    ap.add_argument('folder', nargs='*')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--table', nargs='?', const=str(vp.evidence_root()), metavar='ROOT',
                     help='markdown comparison of all analysed T1/T1b runs (default evidence root)')
     ap.add_argument('--stop-plot', type=int, metavar='N',
                     help='after analysis: stopN_detail.png, -0.5..+1.5 s around stop N (1-based)')
+    ap.add_argument('--t4', action='store_true',
+                    help='T4 metrics per repeat + summary (default: latest t4_straight folder; '
+                         'several folders: pooled summary as well)')
     args = ap.parse_args()
     if args.self_test:
         self_test()
     elif args.table:
         print(runs_table(args.table))
-    elif args.folder and args.stop_plot and (Path(args.folder).expanduser() / 'summary.json').exists():
-        out, item = plot_stop_detail(args.folder, args.stop_plot)
+    elif args.t4:
+        folders = args.folder or [str(p) for p in sorted(vp.evidence_root().glob('*_%s_v*' % T4_TEST))[-1:]]
+        if not folders:
+            ap.error('no %s folder under %s' % (T4_TEST, vp.evidence_root()))
+        pooled, gain = [], None
+        for f in folders:
+            s = analyze(f, t4=True)
+            gain = s['t4']['gain']
+            print(t4_report(Path(f).expanduser().name, s['t4'], gain) + '\n')
+            pooled += s['t4']['items']
+        if len(folders) > 1:
+            print(t4_report('pooled (%d folders)' % len(folders),
+                            dict(items=pooled, summary=t4_summary(pooled)), gain, table=False))
+    elif len(args.folder) > 1:
+        ap.error('one folder (several only with --t4)')
+    elif args.folder and args.stop_plot and (Path(args.folder[0]).expanduser() / 'summary.json').exists():
+        out, item = plot_stop_detail(args.folder[0], args.stop_plot)
         print('%s\n%s' % (out, json.dumps(item, indent=1)))
     elif args.folder:
-        s = analyze(args.folder)
-        print((Path(args.folder).expanduser() / 'README.md').read_text().split('## Analysis (analyze.py)')[-1])
+        s = analyze(args.folder[0])
+        print((Path(args.folder[0]).expanduser() / 'README.md').read_text().split('## Analysis (analyze.py)')[-1])
         print('summary.json, CSVs and %s written.' % ', '.join(s['plots'] or ['no plots']))
     else:
         ap.error('folder or --self-test')

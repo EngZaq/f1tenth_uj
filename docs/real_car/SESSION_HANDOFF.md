@@ -82,9 +82,11 @@ distance (T4) before it can be considered.
    results row (`servo_gain` -0.50 and `servo_offset` 0.320 change only then, in both converter and
    vesc_to_odom yamls). If the horn is re-mounted, the full T2 (limits too) is redone.
 3. **T4 on the ground, 0.5 m/s, brake 5 A** (straight line toward a wall, 3 repeats). Before it:
-   - **The T4 runner profile does not exist yet** (`run_test.py` has `t1_stop`, `t1b_stop`,
-     `t2_servo_sweep` only): Claude writes it (straight, steer 0, ground check: LiDAR range ahead >= ramp
-     + 1 m + stop + 0.5 m), self-test, then a disarmed dry run on the car.
+   - **T4 runner profile written 20 Nov** (`t4_straight`, `analyze.py --t4`, see
+     `tools/real_car_tests/README.md` T4): brake point 0.90 m LiDAR (above the mux 0.80 m gate), arm
+     window 2.15..3.90 m. Self-tests pass; **next: disarmed dry run on the floor**. Moatasem chose (20 Nov)
+     to run T4 before Zaid's steering fix, at the current centre (0.320 / -0.50, steer cap 0.10, steer 0):
+     side drift and heading are indicative only.
    - Stack: T1b converter `stop_method:=brake brake_current_a:=5.0` with `vesc_t1b_erpm4630.yaml`
      (brake_max 10), `max_speed_mps:=0.5`, `max_steer_rad` 0 or the minimum the mux allows.
    - Moatasem's written approval for the ground step, a free straight length checked on site, hand on the
@@ -208,6 +210,14 @@ Analysis (terminal B); `<pattern>` e.g. `t1b_stop_v1.00_brake5A`:
 python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*<pattern>* | head -1)
 python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py --table
 python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py <folder> --stop-plot 1
+```
+
+T4 ground, 0.5 m/s, brake 5 A (terminal A, then B; disarmed dry run: `enable_real_actuation:=false`
+and no `--live`; `m` = placement readout):
+```bash
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.5 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t1b_erpm4630.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0
+python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t4_straight --speed 0.5 --t1-passed-confirmed --live
+python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py --t4
 ```
 
 Disarmed dry run (no `--live`, `enable_real_actuation:=false`):

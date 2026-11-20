@@ -98,6 +98,15 @@ ground_check:                       # needed = v^2/(2*ramp) + steady + v^2/(2*de
   margin_m: 0.5
   front_window_deg: 3.0             # median LiDAR range in +/- this window around 0 rad
 
+t4:                                 # T4 straight line on the ground (run_test.py t4_straight), design 20 Nov
+  mux_gate_m: 0.80                  # physical_drive_mux.py front_evidence stop_m (MANUAL): nearest finite < 0.80 m
+  mux_sector_deg: 20.0              # ... in +/- this sector (from the laser). The runner watches the same nearest
+  gate_guard_m: 0.10                # runner brakes at >= gate + guard: the mux gate stays the backstop
+  reaction_s: 0.20                  # scan age + runner 50 Hz + mux 20 Hz + converter 50 Hz + serial (worst case)
+  max_approach_m: 3.0               # arm refused if the brake point is further than this (uncertain steering centre)
+  time_slack_s: 1.0                 # hard time limit = expected time to the brake point + this
+  wall_fit_deg: 10.0                # analyze.py: wall line fit in +/- this window (distance + heading to the wall)
+
 noise:                              # measurement R per sensor: T5/T6
   vesc_vx_var: null
   rf2o_vx_var: null

@@ -62,6 +62,32 @@ T1b (stop-method comparison) uses `converter:=t1b stop_method:=speed0|brake|curr
 
 Before T1b: fill in `docs/real_car/T1_VESC_TOOL_CHECKLIST.md`.
 
+## T4: straight line on the ground (`t4_straight`, 20 Nov)
+
+Steer 0 toward a wall, brake 5 A, 3 counted repeats (up to 2 extra attempts), step 0.5 m/s only.
+Stack: `converter:=t1b stop_method:=brake brake_current_a:=5.0 max_speed_mps:=0.5`,
+`vesc_t1b_erpm4630.yaml`, mux steer cap at its default 0.10 (the runner refuses another method or
+steer cap). Runner: `run_test.py --test t4_straight --speed 0.5 --t1-passed-confirmed [--live]`.
+
+- **Brake point** (LiDAR range from the laser, `vehicle_params.yaml t4`): max(mux gate 0.80 +
+  guard 0.10, bumper 0.09 + v x reaction 0.20 s + v^2/(2 x 1.0) + margin 0.5) = **0.90 m at 0.5 m/s**.
+  The runner sends zero there; the mux 0.80 m gate is only the backstop.
+- **Range watched** = min(front median +/-3 deg, nearest return in the mux's +/-20 deg sector).
+- **Arm** only with that range in **2.15..3.90 m** (ramp 0.25 + steady 1.0 + brake point; max = brake
+  point + 3.0 m) and |ERPM| < 100. `m` prints the placement readout (range, window, side walls).
+- Drives until the brake point (no fixed time); time limit = expected time + 1 s. `FRONT_RANGE_LOST`
+  stops at once. Only `BRAKE_POINT` stops count; SPACE release still brakes but does not count.
+
+`analyze.py --t4 [folder ...]` (default: latest T4 folder; several = pooled summary as well), also
+written to the folder README: per repeat stop distance (LiDAR at the converter's brake command vs at
+standstill, VESC odom over the stop, and from the runner's zero), decel v^2/2d (LiDAR and VESC),
+drive distance LiDAR / VESC / RF2O -> suggested `speed_to_erpm_gain` = gain x d_VESC / d_LiDAR,
+start delay (converter DRIVE -> ERPM >= 150 / LiDAR -2 cm), side drift (wall fit, side walls, RF2O)
+and heading change, F-01 ground rebound. LiDAR distance uses a line fit to the wall (+/-10 deg:
+perpendicular distance + heading) when it fits on >= 90 % of scans, else the front median.
+Flags: pre-start not still, standstill noisy, curved > 5 deg, no motion. Nothing is written to
+`vehicle_params.yaml`: values change only through a results row.
+
 ## T2: servo sweep (servo-only stack)
 
 Motor phase wires disconnected. **Servo power:** the servo is powered by the 6 A UBEC (fed from the

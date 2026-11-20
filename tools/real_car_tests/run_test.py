@@ -6,7 +6,8 @@ Publishes /manual/drive, /joy (button 5 = deadman) and /control/request_mode at
 /commands/*. Records its own ros2 bag. Not an emergency stop: the battery
 disconnect / kill switch stays in the operator's hand.
 
-Keys over SSH (no Enter): n = arm, hold SPACE = drive, s = skip, q = quit.
+Keys over SSH (no Enter): n = arm, hold SPACE = drive, s = skip, q = quit,
+m = placement readout (ground profiles: range ahead, arm window, brake point, side walls).
 SPACE is a deadman from terminal auto-repeat: 0.7 s after the first press,
 then 0.25 s between repeats. No fresh SPACE -> zero, and zero is kept >= 1 s.
 
@@ -57,6 +58,14 @@ PROFILES = {
     't2_servo_sweep': dict(
         kind='servo', live_allowed=True,
         note='T2 servo sweep, servo-only launch, motor phases disconnected (t2_servo_sweep.py).'),
+    # T4 drives until the brake point (vehicle_params t4), not for a fixed time; steady_s is the
+    # minimum (ground_check steady 1.0 m at 0.5 m/s). Only stops AT the brake point count.
+    # Steps 1.0 / 1.5 are added only after 0.5 passed, with the measured decel (Moatasem).
+    't4_straight': dict(
+        place='ground', steps=[0.5], steer=0.0, steady_s=2.0, repeats=3, extra_repeats=2,
+        post_zero_s=4.0, live_allowed=True, converter='t1b_stop_converter',
+        brake_at_range=True, stop_method='brake5A', default_steer_cap=True,
+        note='T4 ground, straight (steer 0) toward a wall, automatic brake 5 A at the brake point. 3 repeats.'),
 }
 STEP_TOL = 1e-6
 SPEED_MAX_ROUNDING = 5.0  # ERPM: yaml values are rounded (4630 for 4627.7)
@@ -121,16 +130,17 @@ def required_length(v, ramp_accel, decel, steady_m, margin_m, bumper_m):
     return v * v / (2 * ramp_accel) + steady_m + v * v / (2 * decel) + margin_m + bumper_m
 
 
-def front_range(scan, half_width_deg):
-    """Median finite range around 0 rad (car front; LiDAR yaw is 0). From reference script."""
+def window_ranges(scan, half_width_deg, center_deg=0.0):
+    """[(angle_rad, range)] of finite returns within +/- half_width around center
+    (REP-103: 0 = car front, +90 deg = left; LiDAR yaw is 0)."""
     if scan is None or not scan.angle_increment:
-        return float('nan')
+        return []
     n = len(scan.ranges)
     full = (scan.angle_max - scan.angle_min) > 6.2
-    hw = math.radians(half_width_deg)
-    lo = int(math.floor((-hw - scan.angle_min) / scan.angle_increment))
-    hi = int(math.ceil((hw - scan.angle_min) / scan.angle_increment))
-    vals = []
+    c, hw = math.radians(center_deg), math.radians(half_width_deg)
+    lo = int(math.floor((c - hw - scan.angle_min) / scan.angle_increment))
+    hi = int(math.ceil((c + hw - scan.angle_min) / scan.angle_increment))
+    out = []
     for i in range(lo, hi + 1):
         if full:
             i %= n
@@ -138,8 +148,21 @@ def front_range(scan, half_width_deg):
             continue
         r = scan.ranges[i]
         if math.isfinite(r) and scan.range_min < r < scan.range_max:
-            vals.append(r)
+            out.append((scan.angle_min + i * scan.angle_increment, r))
+    return out
+
+
+def front_range(scan, half_width_deg, center_deg=0.0):
+    """Median finite range around center_deg (0 = car front). From reference script."""
+    vals = [r for _, r in window_ranges(scan, half_width_deg, center_deg)]
     return statistics.median(vals) if vals else float('nan')
+
+
+def sector_min(scan, half_width_deg):
+    """Nearest finite return in +/- half_width around the front: the value the mux gate uses
+    (physical_drive_mux.py front_evidence, MANUAL stop below 0.80 m)."""
+    vals = [r for _, r in window_ranges(scan, half_width_deg)]
+    return min(vals) if vals else float('nan')
 
 
 def interval_stats(dts):
@@ -255,8 +278,14 @@ class Machine:
         self.bumper = vp.bumper_ahead_of_lidar(p)
         g = vp.get(p, 'ground_check')
         self.steady_m, self.margin = float(g['steady_length_m']), float(g['margin_m'])
+        t4 = vp.get(p, 't4')
+        self.gate, self.guard = float(t4['mux_gate_m']), float(t4['gate_guard_m'])
+        self.reaction, self.slack = float(t4['reaction_s']), float(t4['time_slack_s'])
+        self.max_approach = float(t4['max_approach_m'])
         self.ground = prof['place'] == 'ground'
         self.ground_ok = ground_ok
+        # brake_at_range (T4): drive until the brake point; the time limit is set per repeat.
+        self.brake_at_range = bool(prof.get('brake_at_range'))
         v = float(prof['speed'])
         self.ramp_s = v / self.ramp
         self.steady_s = self.steady_m / v if self.ground else float(prof['steady_s'])
@@ -302,11 +331,43 @@ class Machine:
             return 'SCAN_STALE'
         return None
 
-    def ground_fit(self, w):
+    def brake_range(self, v):
+        """LiDAR range (from the laser) at which the runner sends zero at speed v: never later
+        than the stop rule (bumper + reaction travel + v^2/2a + margin) and always before the
+        mux gate, so the mux 0.80 m gate stays the backstop, not the stop."""
+        rule = self.bumper + v * self.reaction + v * v / (2 * self.decel) + self.margin
+        return max(self.gate + self.guard, rule)
+
+    @staticmethod
+    def ahead(w):
+        """Range the ground checks use: the smaller of the front median (+/-3 deg) and the
+        mux-style nearest in +/-20 deg. NaN if the front window has no return."""
+        f, s = w.get('front_m', float('nan')), w.get('sector_min_m', float('nan'))
+        if not math.isfinite(f):
+            return float('nan')
+        return min(f, s) if math.isfinite(s) else f
+
+    def ground_window(self):
+        """(need, max) LiDAR range ahead for arming. need = ramp + steady + brake point, and
+        never less than the baseline rule; max only for brake_at_range profiles."""
         v = float(self.prof['speed'])
-        need = required_length(v, self.ramp, self.decel, self.steady_m, self.margin, self.bumper)
-        have = w.get('front_m', float('nan'))
-        return (math.isfinite(have) and have >= need), need, have
+        need = max(required_length(v, self.ramp, self.decel, self.steady_m, self.margin, self.bumper),
+                   v * v / (2 * self.ramp) + self.steady_m + self.brake_range(v))
+        top = self.brake_range(v) + self.max_approach if self.brake_at_range else float('inf')
+        return need, top
+
+    def ground_fit(self, w):
+        need, top = self.ground_window()
+        have = self.ahead(w)
+        return (math.isfinite(have) and need <= have <= top), need, have
+
+    def placement(self, w):
+        need, top = self.ground_window()
+        return ('ahead %.2f m (front %.2f, nearest +/-20deg %.2f) | arm window %.2f..%.2f m | brake point '
+                '%.2f m | side L %.2f R %.2f m' % (
+                    self.ahead(w), w.get('front_m', float('nan')), w.get('sector_min_m', float('nan')),
+                    need, top, self.brake_range(float(self.prof['speed'])),
+                    w.get('left_m', float('nan')), w.get('right_m', float('nan'))))
 
     def finished(self):
         if 'extra_repeats' not in self.prof:
@@ -315,7 +376,8 @@ class Machine:
                 or self.repeat >= self.max_repeats)
 
     def stop(self, now, reason):
-        self.stop_steady = self.state == 'DRIVING' and getattr(self, 'steady_logged', False)
+        self.stop_steady = (self.state == 'DRIVING' and getattr(self, 'steady_logged', False)
+                            and (not self.brake_at_range or reason.startswith('BRAKE_POINT')))
         self.state = 'STOPPING'
         self.t_stop = now
         self.tracker = ReboundTracker(self.last_erpm)  # ERPM at the zero = the latest telemetry
@@ -340,6 +402,8 @@ class Machine:
                 self.repeat += 1
                 if self.finished():
                     self.state = 'DONE'
+            elif key == 'm' and self.ground:
+                self.log(now, 'PLACEMENT', self.placement(w))
             elif key == 'n':
                 reason = self.fault(w)
                 if reason is None and held:
@@ -347,11 +411,14 @@ class Machine:
                 if reason is None and self.ground:
                     if not self.ground_ok:
                         reason = 'GROUND_NEEDS_T1_PASS_CONFIRMED'
+                    elif w.get('erpm') is not None and abs(w['erpm']) >= UNDER_ERPM:
+                        reason = 'CAR_MOVING(%.0f ERPM)' % w['erpm']
                     else:
                         ok, need, have = self.ground_fit(w)
-                        self.log(now, 'SPEED_FIT', 'need=%.2f m have=%.2f m' % (need, have))
+                        top = self.ground_window()[1]
+                        self.log(now, 'SPEED_FIT', 'need=%.2f m have=%.2f m max=%.2f m' % (need, have, top))
                         if not ok:
-                            reason = 'SPEED_DOES_NOT_FIT(need %.2f m, have %.2f m)' % (need, have)
+                            reason = 'SPEED_DOES_NOT_FIT(need %.2f..%.2f m, have %.2f m)' % (need, top, have)
                 if reason:
                     self.log(now, 'ARM_REFUSED', reason)
                 else:
@@ -391,7 +458,19 @@ class Machine:
                 self.steady_logged = False
                 self.repeats.append(dict(repeat=self.repeat, target_mps=self.prof['speed'],
                                          steer_rad=self.prof['steer'], start_wall=time.time()))
-                self.log(now, 'DRIVE_START', 'target=%.2f m/s' % self.prof['speed'])
+                detail = 'target=%.2f m/s' % self.prof['speed']
+                if self.brake_at_range:
+                    # Time limit = expected time to the brake point + slack. A slower car (gain
+                    # off, wheel slip) or a lost front return stops early, never late.
+                    v = float(self.prof['speed'])
+                    ramp_m = v * v / (2 * self.ramp)
+                    d0 = self.ahead(w)
+                    approach = max(0.0, (d0 if math.isfinite(d0) else 0.0) - self.brake_range(v) - ramp_m)
+                    self.hard_s = self.ramp_s + approach / v + self.slack
+                    self.repeats[-1].update(ahead_at_start_m=d0, brake_point_m=self.brake_range(v))
+                    detail += ' ahead=%.2f m brake_point=%.2f m limit=%.1f s' % (
+                        d0, self.brake_range(v), self.hard_s)
+                self.log(now, 'DRIVE_START', detail)
             else:
                 return 0.0, 0.0, 0, None
         if self.state == 'DRIVING':
@@ -406,14 +485,16 @@ class Machine:
                 reason = 'QUIT'
             if reason is None and key == 's':
                 reason = 'SKIP'
-            if reason is None and elapsed >= self.ramp_s + self.steady_s:
+            if reason is None and not self.brake_at_range and elapsed >= self.ramp_s + self.steady_s:
                 reason = 'PROFILE_DONE'
             if reason is None and elapsed >= self.hard_s:
                 reason = 'HARD_TIME_LIMIT'
             if reason is None and self.ground:
-                have = w.get('front_m', float('nan')) - self.bumper
-                if not math.isfinite(have) or have <= v * v / (2 * self.decel) + self.margin:
-                    reason = 'WALL_STOP_DISTANCE(%.2f m)' % have
+                have = self.ahead(w)
+                if not math.isfinite(have):
+                    reason = 'FRONT_RANGE_LOST'
+                elif have <= self.brake_range(v):
+                    reason = 'BRAKE_POINT(ahead %.2f m <= %.2f m)' % (have, self.brake_range(v))
             if reason:
                 return self.stop(now, reason)
             if not self.steady_logged and v >= float(self.prof['speed']):
@@ -441,14 +522,18 @@ class Machine:
             if self.stop_steady:
                 self.steady_count += 1
             elif 'extra_repeats' in self.prof:
-                detail += ' | ended before steady speed: NOT counted'
+                detail += (' | not stopped at the brake point: NOT counted' if self.brake_at_range
+                           else ' | ended before steady speed: NOT counted')
             self.log(now, 'REPEAT_END', detail)
             self.repeat += 1
             self.reset_deadman = True
             self.state = 'DONE' if self.finished() else 'IDLE'
             if self.state == 'IDLE' and 'extra_repeats' in self.prof:
-                self.message = '%s | steady stops %d/%d, repeat %d of max %d: release SPACE, press n.' % (
-                    detail, self.steady_count, self.prof['repeats'], self.repeat + 1, self.max_repeats)
+                self.message = '%s | %s stops %d/%d, repeat %d of max %d: release SPACE, press n.' % (
+                    detail, 'brake-point' if self.brake_at_range else 'steady', self.steady_count,
+                    self.prof['repeats'], self.repeat + 1, self.max_repeats)
+                if self.brake_at_range:
+                    self.message += ' Carry the car back to the start marks, hands off ~2 s, m to check.'
             elif self.state == 'IDLE':
                 self.message = '%s | Repeat %d/%d: release SPACE, press n to arm.' % (
                     detail, self.repeat + 1, self.prof['repeats'])
@@ -539,9 +624,84 @@ def self_test():
     g.step(0.2, None, False, world(front_m=6.0, scan_age=0.05, st=dict(mode='MANUAL_READY', last_mode_request='MANUAL')))
     g.step(0.3, None, True, world(front_m=6.0, scan_age=0.05, st=dict(mode='MANUAL_READY')))
     assert g.step(1.3, None, True, world(front_m=1.5, scan_age=0.05, st=dict(mode='MANUAL_ACTIVE')))[0] > 0
-    # 0.55 m/s: stop zone 0.55^2/2 + 0.5 = 0.65 m from the bumper; 0.6 m LiDAR = 0.51 m bumper
+    # 0.55 m/s: brake point max(mux 0.80 + 0.10, 0.09 + 0.11 + 0.15 + 0.5) = 0.90 m LiDAR
     assert g.step(1.4, None, True, world(front_m=0.6, scan_age=0.05, st=dict(mode='MANUAL_ACTIVE')))[0] == 0.0
-    assert g.events[-1]['detail'].startswith('WALL_STOP_DISTANCE')
+    assert g.events[-1]['detail'].startswith('BRAKE_POINT')
+    # ---- T4 (t4_straight): brake point, arm window, placement, counting, time limit
+    tp = resolve_profile('t4_straight', 0.5)
+    for bad in (None, 1.0):
+        try:
+            resolve_profile('t4_straight', bad)
+        except SystemExit:
+            continue
+        raise AssertionError('t4 resolved %s' % bad)
+    t4 = Machine(tp, p, live=False, ground_ok=True)
+    assert abs(t4.brake_range(0.5) - 0.90) < 1e-9, t4.brake_range(0.5)       # mux gate + guard rules
+    assert t4.brake_range(0.5) > t4.gate                                   # runner always before the mux
+    rule_only = t4.bumper + 1.5 * t4.reaction + 1.5 ** 2 / (2 * t4.decel) + t4.margin
+    assert abs(t4.brake_range(1.5) - rule_only) < 1e-9 and rule_only > 0.9  # faster: stop rule rules
+    need, top = t4.ground_window()
+    assert abs(need - 2.15) < 1e-9 and abs(top - 3.90) < 1e-9, (need, top)
+    assert need >= required_length(0.5, t4.ramp, t4.decel, t4.steady_m, t4.margin, t4.bumper)
+
+    def gw(front, sector=None, mode='STOP', **kw):
+        st = dict(mode=mode, last_mode_request='MANUAL')
+        return world(front_m=front, sector_min_m=front if sector is None else sector, scan_age=0.05,
+                     left_m=1.0, right_m=1.2, st=st, **kw)
+    t4.step(0.0, 'm', False, gw(2.6))
+    assert t4.state == 'IDLE' and t4.events[-1]['event'] == 'PLACEMENT' and 'arm window 2.15..3.90' in \
+        t4.events[-1]['detail'], t4.events[-1]
+    for front, sector, why in ((2.0, None, 'SPEED_DOES_NOT_FIT'), (4.2, None, 'SPEED_DOES_NOT_FIT'),
+                               (2.8, 1.2, 'SPEED_DOES_NOT_FIT'),    # object in the mux +/-20 deg sector
+                               (float('nan'), None, 'SPEED_DOES_NOT_FIT')):
+        t4.step(0.0, 'n', False, gw(front, sector))
+        assert t4.state == 'IDLE' and why in t4.events[-1]['detail'], t4.events[-1]
+    t4.step(0.0, 'n', False, gw(2.8, erpm=400.0))
+    assert t4.state == 'IDLE' and t4.events[-1]['detail'].startswith('CAR_MOVING')
+
+    def t4_repeat(t, d0, release_at=None, front_at=None):
+        """One repeat from d0 at the commanded speed; front_at(elapsed) overrides the range."""
+        t4.step(t, 'n', False, gw(d0))
+        assert t4.state == 'ARMING', t4.events[-1]
+        t4.step(t + 0.05, None, False, gw(d0, mode='MANUAL_READY'))
+        t4.step(t + 0.1, None, True, gw(d0, mode='MANUAL_READY'))
+        assert t4.state == 'DRIVING'
+        k, d = 0.0, d0
+        while t4.state == 'DRIVING' and k < 30.0:
+            k += 0.02
+            d -= ramp_speed(0.5, k, t4.ramp) * 0.02
+            held = release_at is None or k < release_at
+            r = front_at(k) if front_at else d
+            t4.step(t + 0.1 + k, None, held, gw(r, mode='MANUAL_ACTIVE'))
+        reason = [e for e in t4.events if e['event'] == 'ZERO_COMMAND'][-1]['detail']
+        t4.step(t + k + 0.5, None, False, gw(d))
+        t4.step(t + k + 10.0, None, False, gw(d))                            # post-zero over
+        return t + k + 11.0, k, reason
+    t, k, why = t4_repeat(0.0, 2.8)
+    assert why.startswith('BRAKE_POINT') and t4.steady_count == 1, why
+    # expected 1.0 s ramp (0.25 m) + (2.8 - 0.9 - 0.25) / 0.5 = 4.3 s; no PROFILE_DONE at ramp + steady (3.0 s)
+    assert 4.2 < k < 4.4 and abs(t4.hard_s - 5.3) < 1e-9, (k, t4.hard_s)
+    assert t4.repeats[-1]['brake_point_m'] == 0.9 and t4.state == 'IDLE'
+    t, k, why = t4_repeat(t, 2.8, release_at=2.0)                           # operator released SPACE
+    assert why == 'DEADMAN_RELEASED' and t4.steady_count == 1 and 'brake point: NOT counted' in t4.message
+    t, k, why = t4_repeat(t, 2.8, front_at=lambda e: 2.8)                    # never closer (no motion)
+    assert why == 'HARD_TIME_LIMIT' and abs(k - (1.0 + 1.65 / 0.5 + 1.0)) < 0.05 and t4.steady_count == 1, k
+    t, k, why = t4_repeat(t, 2.8, front_at=lambda e: 2.0 if e < 1.0 else float('nan'))
+    assert why == 'FRONT_RANGE_LOST' and t4.steady_count == 1
+    assert t4.state == 'IDLE' and t4.repeat == 4                            # 3 + 2 extra: one attempt left
+    t, k, why = t4_repeat(t, 3.0)
+    assert t4.state == 'DONE' and t4.steady_count == 2                      # cap reached at 5 attempts
+    # sector_min = the mux's nearest in +/-20 deg; side ranges at +/-90 deg (REP-103: +90 = left)
+    s = Scan()
+    s.ranges = [5.0] * 1440
+    s.ranges[720 + 60] = 1.0                                                 # +15 deg
+    s.ranges[720 + 100] = 0.5                                                # +25 deg: outside the sector
+    s.ranges[720 + 360] = 0.7                                                # +90 deg (left)
+    assert front_range(s, 3.0) == 5.0 and sector_min(s, 20.0) == 1.0
+    assert front_range(s, 3.0, 90.0) == 5.0 and min(r for _, r in window_ranges(s, 3.0, 90.0)) == 0.7
+    s.ranges[720 - 360 - 2: 720 - 360 + 3] = [0.8] * 5                      # -90 deg (right)
+    assert front_range(s, 0.6, -90.0) == 0.8
+    assert math.isnan(sector_min(None, 20.0))
     # lost terminal while idle -> DONE (no endless idle loop)
     m = Machine(prof, p, live=False)
     m.step(0.0, None, False, world(keyboard_lost=True))
@@ -666,6 +826,9 @@ def self_test():
     print('      no protected topic in the bag list, audit-log parsing, step resolution,')
     print('      step/yaml/cap match, step gate (rebound, unanalysed, too few, not steady, fault, method), live rebound,')
     print('      unsteady repeats not counted (extra repeats, capped).')
+    print('PASS: T4 brake point 0.90 m (> mux gate 0.80 m), arm window 2.15..3.90 m, object in the mux')
+    print('      sector / car moving refused, placement readout, drive to the brake point (no fixed time),')
+    print('      only brake-point stops count, time limit, front range lost, sector min / side ranges.')
     # Clean shutdown on every exit path, in child processes on an isolated domain
     # (ROS_DOMAIN_ID 77, localhost only). The probe node has no publishers.
     env = dict(os.environ, ROS_DOMAIN_ID='77', ROS_LOCALHOST_ONLY='1')
@@ -917,6 +1080,7 @@ def run(args):
     if mism:
         raise SystemExit('config/real_car disagrees with vehicle_params.yaml:\n  ' + '\n  '.join(mism))
     r = vp.get(p, 'runner')
+    mux_sector = float(vp.get(p, 't4.mux_sector_deg'))
 
     class RunnerNode(Node):
         def __init__(self):
@@ -989,6 +1153,10 @@ def run(args):
                          vesc_fault=(self.tele or {}).get('fault'),
                          scan_age=(now - self.scan_at) if self.scan_at else 1e9,
                          front_m=front_range(self.scan, half_width))
+                if prof['place'] == 'ground':
+                    w.update(sector_min_m=sector_min(self.scan, mux_sector),
+                             left_m=front_range(self.scan, half_width, 90.0),
+                             right_m=front_range(self.scan, half_width, -90.0))
                 w['erpm'] = (self.tele or {}).get('erpm')
             return w
 
@@ -1043,6 +1211,13 @@ def drive_session(args, p, prof, r, node):
             method = 'brake%gA' % converter_params.get('brake_current_a')
         if not method:
             raise SystemExit('t1b_stop_converter parameters unreadable: %s' % converter_params)
+    if prof.get('stop_method') and method != prof['stop_method']:
+        raise SystemExit('%s needs stop method %s, the converter runs %s (launch converter:=t1b '
+                         'stop_method:=brake brake_current_a:=5.0)' % (args.test, prof['stop_method'], method))
+    default_steer = float(vp.get(p, 'caps.mux_default_max_steer_rad'))
+    if prof.get('default_steer_cap') and abs(steer_cap - default_steer) > 1e-9:
+        raise SystemExit('%s keeps the mux steer cap at its default %.2f rad (mux has %.2f): '
+                         'do not pass max_steer_rad' % (args.test, default_steer, steer_cap))
     gate = 'not a stepped profile'
     if 'steps' in prof:
         bad = step_mismatch(prof['speed'], cap, speed_max, gain, float(vp.get(p, 'caps.vesc_speed_max_margin')))
@@ -1107,6 +1282,11 @@ def drive_session(args, p, prof, r, node):
         if bag.poll() is not None:
             raise SystemExit('ros2 bag record exited; see %s' % (out / 'bag.log'))
         say('\n%s -> %s' % (args.test, out))
+        if machine.ground:
+            need, top = machine.ground_window()
+            say('Ground: arm only with %.2f..%.2f m free ahead (LiDAR); runner brakes at %.2f m '
+                '(mux gate %.2f m = backstop). m = placement readout.' % (
+                    need, top, machine.brake_range(prof['speed']), machine.gate))
         say('Keys: n = arm, hold SPACE = drive, s = skip, q = quit. ' + machine.message)
         last_msg = None
         graph = None
@@ -1210,7 +1390,7 @@ def main():
     ap.add_argument('--out-root', help='results root (default ~/f1tenth_hw_evidence/real_car_tests)')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--list', action='store_true')
-    ap.add_argument('--speed', type=float, help='stepped profiles (t1_stop, t1b_stop): this step, m/s')
+    ap.add_argument('--speed', type=float, help='stepped profiles (t1_stop, t1b_stop, t4_straight): this step, m/s')
     ap.add_argument('--shutdown-probe', choices=['normal', 'systemexit', 'keyboardinterrupt'],
                     help=argparse.SUPPRESS)
     args, rest = ap.parse_known_args()
