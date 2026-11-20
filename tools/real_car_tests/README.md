@@ -86,6 +86,12 @@ steer cap). Runner: `run_test.py --test t4_straight --speed 0.5 --t1-passed-conf
 - Drives until the brake point (no fixed time); time limit = expected time + 1 s. `FRONT_RANGE_LOST`
   stops at once. Only `BRAKE_POINT` stops count; SPACE release still brakes but does not count.
 
+`t4_yaw_plot.py <T4 folder> [...]` (20 Nov): yaw rate (BMI160 gz, bias from the 1 s before the
+command, base_link = -gz; RF2O pose derivative) vs time and vs distance per counted repeat, curvature
+yaw rate / VESC vx with a one / two-level / linear test (STEP, CONSTANT, OSCILLATING, GRADUAL),
+turning points, motion / ramp-end / brake marks. A frozen IMU (identical samples) switches that repeat
+to RF2O. Writes `t4_yaw.png` and `t4_yaw.json` into the folder; reads the bag only.
+
 `analyze.py --t4 [folder ...]` (default: latest T4 folder; several = pooled summary as well), also
 written to the folder README: per repeat stop distance (LiDAR at the converter's brake command vs at
 standstill, VESC odom over the stop, and from the runner's zero), decel v^2/2d (LiDAR and VESC),
