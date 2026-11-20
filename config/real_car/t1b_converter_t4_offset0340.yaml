@@ -1,0 +1,13 @@
+# T4-ONLY test parameters for tools/real_car_tests/t1b_stop_converter.py (Moatasem, 20 Nov).
+# Straight-ahead servo 0.340, between the baseline 0.320 (carpet: +13.5 deg left) and 0.358
+# (carpet: +6.5 deg left, hard tile: -6.5 deg RF2O / -8.9 deg wall, right). The tile yaw-rate profile
+# (constant curvature -0.04..-0.09 1/m at 0.358, T2 gain ~-0.96) puts straight on tile at ~0.336-0.348.
+# Gain -0.50 unchanged, steering command 0. NOT a baseline change: vehicle_params.yaml
+# steering.servo_offset stays 0.320 until a results row decides. The converter refuses values more
+# than 0.05 from the baseline or outside the T2 driving clip 0.10-0.68.
+# vesc_to_odom (/odom_vesc_observe) still uses 0.320, so its yaw is wrong in this run; analyze.py --t4
+# uses only its speed (vx).
+# Use: real_car_test.launch.py converter:=t1b ... converter_params_file:=<this file>
+t1b_stop_converter:
+  ros__parameters:
+    servo_offset: 0.340
