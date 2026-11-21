@@ -29,7 +29,10 @@ imu:                            # base_link -> imu_link
   x_m: 0.091
   y_m: 0.057
   z_m: 0.046
-  roll_rad: 3.141592653589793   # mounted upside down
+  roll_rad: 3.141592653589793   # mounted upside down. 21 Nov (T4 bags): forward accel reads on IMU -x, so x points
+                                # BACKWARD (pitch pi or roll pi + yaw pi, not roll pi), and the mount is tilted ~9-10 deg
+                                # (still specific force 1.6-1.8 / -0.5 / -10.0 m/s^2). gz sign (base = -gz) unaffected.
+                                # NOT changed: decide with Zaid; y sign needs a turn (T3). Results doc, Phase F.
   pitch_rad: 0.0
   yaw_rad: 0.0
   gyro_z_bias_dps: null         # T5. Bench value -0.067 deg/s was the ESP32 board, not the car (baseline C-6)
@@ -38,6 +41,9 @@ imu:                            # base_link -> imu_link
 
 drivetrain:
   speed_to_erpm_gain: 8414.0    # Standard, baseline 14 Nov (1/(pi*0.065)*60*4.09*7 = 8412). Ground scale: T4
+  # DECIDED 21 Nov (Moatasem): keep 8414. The T4 candidate ~8700 is WITHDRAWN: it came from a distance that
+  # includes the start ramp, where the sensorless VESC reads ahead below ~2000 ERPM. Cruise-only (latency-free,
+  # LiDAR range slope): carpet 8276-8311, tile 8444-8484 -> 8414 within 1.5 % on both floors. Results doc, Phase F.
   speed_to_erpm_offset: 0.0
 
 steering:

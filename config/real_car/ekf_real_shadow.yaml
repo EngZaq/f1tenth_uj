@@ -1,27 +1,27 @@
-# Real-car SHADOW EKF (Phase F, 2026-11-21). Observation only: publish_tf false, output /ekf_shadow/odom
-# (remap odometry/filtered:=/ekf_shadow/odom). RF2O + SLAM stay the only TF authorities. Not for driving.
+# Real-car SHADOW EKF variants (Phase F, 21 Nov 2026). Observation only: publish_tf false, output
+# /ekf_shadow/odom (remap odometry/filtered:=/ekf_shadow/odom). RF2O + SLAM stay the only TF authorities.
+# RECOMMENDED (21 Nov, results doc "Phase F step 2"): ekf_real_shadow_c1. A / B / C0 / C2 kept for comparison.
+# Generated once from a single Q so the blocks differ ONLY in their sensor lines; edit all blocks together.
 # Derived from src/f1tenth_bringup/config/ekf_moatasem_vesc_imu_shadow.yaml (sim Config C).
 #
-# Two variants, identical except the RF2O block:
-#   ekf_real_shadow       A: VESC vx + vy = 0 constraint + BMI160 yaw rate
-#   ekf_real_shadow_rf2o  B: A + RF2O vx and vyaw
-#
-# Inputs (built by tools/real_car_tests/ekf_shadow_replay.py from the T4 bags; all already in base_link,
-# so no TF is needed; header stamps = sensor time, RF2O arrives ~51 ms late -> smooth_lagged_data):
-#   /ekf_shadow/in/vesc  Odometry  vx = ERPM / speed_to_erpm_gain (8700 CANDIDATE, baseline 8414), vy = 0
-#   /ekf_shadow/in/imu   Imu       base_link yaw rate = -(gz - bias): IMU upside down (roll pi);
-#                                  bias = mean over the 1 s before the drive command
-#   /ekf_shadow/in/rf2o  Odometry  /odom_rf2o twist (its covariance fields are 0 in the bag)
-# R (inside the messages) = (2 x robust std of sensor - reference)^2, T4 cruise phase, carpet + tile pooled
-# (sim rule, k = 2). Same bags as the evaluation, and the LiDAR-slope reference adds ~0.03 m/s, so the vx
-# values are upper bounds. Replace with T5/T6 values when measured.
-#   VESC vx 5.0e-3 (sigma 0.071)   vy = 0 constraint 4.0e-4 (sigma 0.02, model: no slip at the rear axle)
-#   IMU vyaw 8.0e-3 (sigma 0.089; driving vibration, still 0.0009)
-#   RF2O vx 1.0e-2 (sigma 0.10)     RF2O vyaw 1.2e-2 (sigma 0.11)
+# Inputs: tools/real_car_tests/ekf_shadow_inputs.py (one definition for the live node and the offline
+# replay ekf_shadow_replay.py). All in base_link (no TF needed); header stamp = sensor time; RF2O arrives
+# ~51 ms late -> smooth_lagged_data.
+#   /ekf_shadow/in/vesc     vx = ERPM / speed_to_erpm_gain (vehicle_params: 8414; 8700 withdrawn 21 Nov), vy = 0
+#   /ekf_shadow/in/vesc_dw  same, vx variance x100 while braking (converter STOP_BRAKE) or 0 < |ERPM| < 2000
+#   /ekf_shadow/in/imu      yaw rate -(gz - bias); forward accel = specific force on the IMU -x axis made
+#                           perpendicular to the still gravity (IMU x points backward, mount tilted ~9-10 deg)
+#   /ekf_shadow/in/rf2o     /odom_rf2o twist
+# R (inside the messages) = (2 x robust std of sensor - reference)^2, T4 cruise, carpet + tile pooled (sim rule
+# k = 2). Same bags as the evaluation; the LiDAR-slope reference adds ~0.03 m/s, so vx values are upper bounds.
+#   VESC vx 5.0e-3   vy = 0 constraint 4.0e-4 (model: no slip at the rear axle)   IMU vyaw 8.0e-3
+#   IMU forward accel 0.32 (sigma 0.57 m/s^2, motor vibration)   RF2O vx 1.0e-2   RF2O vyaw 1.2e-2
+# Q: template defaults except vx (index 6) = 0.05 and vyaw (index 11) = 0.02. No gates.
 #
 # State order for every *_config vector (15 values):
 #   x  y  z | roll pitch yaw | vx vy vz | vroll vpitch vyaw | ax ay az
 
+# A: VESC vx (not de-weighted) + vy=0 + gyro. Reference.
 ekf_real_shadow:
   ros__parameters:
     frequency: 30.0
@@ -38,106 +38,263 @@ ekf_real_shadow:
     transform_timeout: 0.0
     smooth_lagged_data: true
     history_length: 0.5
-    # No *_rejection_threshold lines: no gates (as the sim config; revisit after T6).
-
     odom0: /ekf_shadow/in/vesc   # vx + vy (vy = 0 constraint)
     odom0_config: [false, false, false,
                    false, false, false,
-                   true,  true,  false,
+                   true, true, false,
                    false, false, false,
                    false, false, false]
     odom0_differential: false
     odom0_relative: false
     odom0_queue_size: 10
-
-    imu0: /ekf_shadow/in/imu     # vyaw only
+    imu0: /ekf_shadow/in/imu   # yaw rate
     imu0_config: [false, false, false,
-                  false, false, false,
-                  false, false, false,
-                  false, false, true,
-                  false, false, false]
+                   false, false, false,
+                   false, false, false,
+                   false, false, true,
+                   false, false, false]
     imu0_differential: false
     imu0_relative: false
     imu0_queue_size: 20
-    imu0_remove_gravitational_acceleration: false
+    imu0_remove_gravitational_acceleration: false   # gravity already removed by projection
+    process_noise_covariance: [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.015]
 
-    # Q: template defaults except vx (index 6) = 0.05 and vyaw (index 11) = 0.02.
-    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.05,  0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.025, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.04, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.015]
-
+# B: A + RF2O vx, vyaw. Reference.
 ekf_real_shadow_rf2o:
   ros__parameters:
     frequency: 30.0
     sensor_timeout: 0.2
     two_d_mode: true
-    publish_tf: false
+    publish_tf: false            # shadow: never a TF authority
     publish_acceleration: false
     print_diagnostics: true
     map_frame: map
     odom_frame: odom
-    base_link_frame: base_link
+    base_link_frame: base_link   # rear axle centre
     world_frame: odom
     transform_time_offset: 0.0
     transform_timeout: 0.0
     smooth_lagged_data: true
-    history_length: 0.5          # RF2O ~51 ms late: inside the window
-
-    odom0: /ekf_shadow/in/vesc
+    history_length: 0.5
+    odom0: /ekf_shadow/in/vesc   # vx + vy
     odom0_config: [false, false, false,
                    false, false, false,
-                   true,  true,  false,
+                   true, true, false,
                    false, false, false,
                    false, false, false]
     odom0_differential: false
     odom0_relative: false
     odom0_queue_size: 10
-
-    imu0: /ekf_shadow/in/imu
+    imu0: /ekf_shadow/in/imu   # yaw rate
     imu0_config: [false, false, false,
-                  false, false, false,
-                  false, false, false,
-                  false, false, true,
-                  false, false, false]
+                   false, false, false,
+                   false, false, false,
+                   false, false, true,
+                   false, false, false]
     imu0_differential: false
     imu0_relative: false
     imu0_queue_size: 20
-    imu0_remove_gravitational_acceleration: false
-
-    odom1: /ekf_shadow/in/rf2o   # vx + vyaw (pose not fused: it is its own integral)
+    imu0_remove_gravitational_acceleration: false   # gravity already removed by projection
+    odom1: /ekf_shadow/in/rf2o   # RF2O vx + vyaw
     odom1_config: [false, false, false,
                    false, false, false,
-                   true,  false, false,
+                   true, false, false,
                    false, false, true,
                    false, false, false]
     odom1_differential: false
     odom1_relative: false
     odom1_queue_size: 10
+    process_noise_covariance: [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.015]
 
-    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.05,  0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.025, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.04, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
-                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.015]
+# C0 (check): A with the VESC de-weighted, no second speed source.
+ekf_real_shadow_c0:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: false            # shadow: never a TF authority
+    publish_acceleration: false
+    print_diagnostics: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link   # rear axle centre
+    world_frame: odom
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    smooth_lagged_data: true
+    history_length: 0.5
+    odom0: /ekf_shadow/in/vesc_dw   # vx (de-weighted) + vy
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true, true, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+    imu0: /ekf_shadow/in/imu   # yaw rate
+    imu0_config: [false, false, false,
+                   false, false, false,
+                   false, false, false,
+                   false, false, true,
+                   false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 20
+    imu0_remove_gravitational_acceleration: false   # gravity already removed by projection
+    process_noise_covariance: [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.015]
+
+# C1: A with the VESC de-weighted + RF2O vx as the fallback speed source.
+ekf_real_shadow_c1:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: false            # shadow: never a TF authority
+    publish_acceleration: false
+    print_diagnostics: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link   # rear axle centre
+    world_frame: odom
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    smooth_lagged_data: true
+    history_length: 0.5
+    odom0: /ekf_shadow/in/vesc_dw   # vx (de-weighted) + vy
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true, true, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+    imu0: /ekf_shadow/in/imu   # yaw rate
+    imu0_config: [false, false, false,
+                   false, false, false,
+                   false, false, false,
+                   false, false, true,
+                   false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 20
+    imu0_remove_gravitational_acceleration: false   # gravity already removed by projection
+    odom1: /ekf_shadow/in/rf2o   # RF2O vx only
+    odom1_config: [false, false, false,
+                   false, false, false,
+                   true, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_differential: false
+    odom1_relative: false
+    odom1_queue_size: 10
+    process_noise_covariance: [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.015]
+
+# C2: A with the VESC de-weighted + BMI160 forward accel (no RF2O).
+ekf_real_shadow_c2:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: false            # shadow: never a TF authority
+    publish_acceleration: false
+    print_diagnostics: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link   # rear axle centre
+    world_frame: odom
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    smooth_lagged_data: true
+    history_length: 0.5
+    odom0: /ekf_shadow/in/vesc_dw   # vx (de-weighted) + vy
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true, true, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+    imu0: /ekf_shadow/in/imu   # yaw rate + forward accel
+    imu0_config: [false, false, false,
+                   false, false, false,
+                   false, false, false,
+                   false, false, true,
+                   true, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 20
+    imu0_remove_gravitational_acceleration: false   # gravity already removed by projection
+    process_noise_covariance: [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.015]

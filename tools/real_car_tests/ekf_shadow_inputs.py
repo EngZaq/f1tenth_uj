@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Real-car SHADOW EKF inputs (Phase F, 21 Nov). ONE definition for the offline replay
+(ekf_shadow_replay.py builds its input bags with these functions) and the live node (main() here).
+
+Observation only: subscribes /sensors/core, /imu/data_raw, /odom_rf2o, /t1b_stop_converter/status and
+publishes ONLY /ekf_shadow/in/{vesc,vesc_dw,imu,rf2o}. Never /drive, /commands/*, TF or parameters.
+Not a replacement for Zaid's tools/shadow_covariance_adapter.py (his sim-port topics /shadow_inputs/*).
+
+Inputs (all already in base_link, so the EKF needs no TF; header stamp = sensor time):
+- vesc     vx = ERPM / speed_to_erpm_gain (vehicle_params, 8414), vy = 0 constraint (R_VY).
+- vesc_dw  same, vx variance x DEWEIGHT while the brake is active (converter phase STOP_BRAKE) or
+           0 < |ERPM| < SENSORLESS_ERPM (T4 bags: below ~2000 ERPM the VESC reads +0.08..+0.12 m/s ahead
+           in the start ramp; in braking it drops to 0 while the car still moves 0.2-0.4 m/s).
+           Exactly 0 ERPM outside braking stays trusted: it is the standstill (zero-velocity) cue.
+- imu      yaw rate = -(gz - bias) (z axis down); forward accel = specific force projected on the
+           IMU -x axis made perpendicular to the still gravity vector, scaled by 9.80665 / |g_still|
+           (21 Nov: IMU x points BACKWARD - forward accel reads negative on +x - and the mount is
+           tilted ~9-10 deg; the static TF says roll pi only). Gravity is removed by the projection.
+- rf2o     /odom_rf2o twist vx, vyaw (its covariance fields are 0).
+Still calibration (gyro bias + gravity): replay = the 1 s before each drive command; live = at start-up,
+StillCalib.SECONDS of samples with gyro std <= GYRO_STILL_STD; retried with a log line until the car is
+still (F-18 lesson: never exit on motion).
+  ekf_shadow_inputs.py [--no-rf2o]            live node (stack running; shadow only)
+  ekf_shadow_inputs.py --self-test
+"""
+import argparse
+import json
+import math
+import os
+import statistics
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import params as vp  # noqa: E402
+
+SENSORLESS_ERPM = 2000.0   # T4 bags 21 Nov: |ERPM| bins 500-1999 read +0.08..+0.12 m/s; >= 2000 within 0.03
+DEWEIGHT = 100.0           # vx variance factor while de-weighted
+BRAKE_PHASES = ('STOP_BRAKE',)
+G0 = 9.80665
+IMU_FORWARD = (-1.0, 0.0, 0.0)   # IMU axis that points forward (measured 21 Nov, T4 ramps and brakes)
+# Variances inside the messages; source and method: config/real_car/ekf_real_shadow.yaml header.
+R_VESC_VX, R_VY, R_IMU_WZ, R_RF_VX, R_RF_WZ, R_AX = 5.0e-3, 4.0e-4, 8.0e-3, 1.0e-2, 1.2e-2, 0.32
+BIG = 1.0e6
+GYRO_STILL_STD = math.radians(0.5)    # rad/s, same limit as the bmi160 driver's own calibration
+TOPICS = dict(vesc='/ekf_shadow/in/vesc', vesc_dw='/ekf_shadow/in/vesc_dw', imu='/ekf_shadow/in/imu',
+              rf2o='/ekf_shadow/in/rf2o')
+
+
+def gain_from_params():
+    return float(vp.get(vp.load(), 'drivetrain.speed_to_erpm_gain'))
+
+
+# ---------------------------------------------------------------- pure logic
+
+def vesc_vx(erpm, gain):
+    return erpm / gain       # ERPM > 0 = forward on this car (T4 bags)
+
+
+def brake_active(status_text):
+    """t1b converter status JSON -> True while it commands the brake. Unknown text -> False."""
+    try:
+        return json.loads(status_text).get('phase') in BRAKE_PHASES
+    except (ValueError, AttributeError):
+        return False
+
+
+def vesc_deweighted(erpm, braking):
+    return bool(braking) or 0.0 < abs(erpm) < SENSORLESS_ERPM
+
+
+def vesc_vx_variance(erpm, braking, deweight):
+    return R_VESC_VX * (DEWEIGHT if deweight and vesc_deweighted(erpm, braking) else 1.0)
+
+
+def yaw_rate(gz, bias):
+    return -(gz - bias)      # IMU z points down
+
+
+class StillCalib:
+    """Gyro z bias and gravity vector from still samples (SAMPLES = 2 s at 100 Hz; count-based so the
+    live node and the replay use exactly the same samples)."""
+    SECONDS = 2.0
+    SAMPLES = 200
+
+    def __init__(self):
+        self.g, self.a = [], []
+
+    def add(self, gyro, accel):
+        self.g.append(tuple(gyro))
+        self.a.append(tuple(accel))
+
+    def result(self):
+        """dict(bias_gz, gravity, forward, g_norm, gyro_std) or None if too few samples / moving."""
+        if len(self.g) < 20:
+            return None
+        gstd = max(statistics.pstdev(v[i] for v in self.g) for i in range(3))
+        if gstd > GYRO_STILL_STD:
+            return dict(moving=True, gyro_std=gstd)
+        grav = [statistics.mean(v[i] for v in self.a) for i in range(3)]
+        n = math.sqrt(sum(x * x for x in grav))
+        gh = [x / n for x in grav]
+        dot = sum(f * g for f, g in zip(IMU_FORWARD, gh))
+        fwd = [f - dot * g for f, g in zip(IMU_FORWARD, gh)]
+        fn = math.sqrt(sum(x * x for x in fwd))
+        return dict(moving=False, bias_gz=statistics.mean(v[2] for v in self.g), gravity=grav, g_norm=n,
+                    forward=[x / fn for x in fwd], gyro_std=gstd,
+                    tilt_deg=math.degrees(math.asin(min(1.0, abs(dot)))))
+
+
+def forward_accel(accel, cal):
+    return sum(a * f for a, f in zip(accel, cal['forward'])) * G0 / cal['g_norm']
+
+
+# ---------------------------------------------------------------- messages (ROS imported lazily)
+
+def _diag(cov, n, big=BIG):
+    for i in range(n):
+        cov[(n + 1) * i] = big
+
+
+def vesc_msg(header_stamp, erpm, braking, gain, deweight):
+    from nav_msgs.msg import Odometry
+    o = Odometry()
+    o.header.stamp, o.header.frame_id, o.child_frame_id = header_stamp, 'odom', 'base_link'
+    o.twist.twist.linear.x = vesc_vx(erpm, gain)
+    _diag(o.pose.covariance, 6)
+    _diag(o.twist.covariance, 6)
+    o.twist.covariance[0] = vesc_vx_variance(erpm, braking, deweight)
+    o.twist.covariance[7] = R_VY
+    return o
+
+
+def imu_msg(header_stamp, gz, accel, cal):
+    from sensor_msgs.msg import Imu
+    o = Imu()
+    o.header.stamp, o.header.frame_id = header_stamp, 'base_link'
+    o.angular_velocity.z = yaw_rate(gz, cal['bias_gz'])
+    o.angular_velocity_covariance = [BIG, 0.0, 0.0, 0.0, BIG, 0.0, 0.0, 0.0, R_IMU_WZ]
+    o.linear_acceleration.x = forward_accel(accel, cal)
+    o.linear_acceleration_covariance = [R_AX, 0.0, 0.0, 0.0, BIG, 0.0, 0.0, 0.0, BIG]
+    o.orientation_covariance[0] = -1.0
+    return o
+
+
+def rf2o_msg(src):
+    from nav_msgs.msg import Odometry
+    o = Odometry()
+    o.header.stamp, o.header.frame_id, o.child_frame_id = src.header.stamp, 'odom', 'base_link'
+    o.twist.twist.linear.x = src.twist.twist.linear.x
+    o.twist.twist.angular.z = src.twist.twist.angular.z
+    _diag(o.pose.covariance, 6)
+    _diag(o.twist.covariance, 6)
+    o.twist.covariance[0], o.twist.covariance[35] = R_RF_VX, R_RF_WZ
+    return o
+
+
+def self_test():
+    assert abs(vesc_vx(4207.0, 8414.0) - 0.5) < 1e-12
+    assert brake_active('{"phase":"STOP_BRAKE","out":"brake"}') and not brake_active('{"phase":"DRIVE"}')
+    assert not brake_active('garbage') and not brake_active('{"phase":"RELEASED"}')
+    assert vesc_deweighted(1500.0, False) and vesc_deweighted(-1999.0, False) and vesc_deweighted(4200.0, True)
+    assert not vesc_deweighted(0.0, False) and not vesc_deweighted(2000.0, False) and not vesc_deweighted(4200.0, False)
+    assert vesc_vx_variance(1000.0, False, True) == R_VESC_VX * DEWEIGHT
+    assert vesc_vx_variance(1000.0, False, False) == R_VESC_VX
+    assert yaw_rate(-0.1 + 0.003, 0.003) == 0.1
+    # Tilted, upside-down IMU with x backward: still specific force (1.8, -0.55, -10.02) (T4 tile bag).
+    c = StillCalib()
+    for i in range(200):
+        c.add((1e-4 * (i % 3), 0.0, 0.003 + 1e-4 * (i % 2)), (1.8, -0.55, -10.02))
+    cal = c.result()
+    assert not cal['moving'] and abs(cal['bias_gz'] - 0.00305) < 1e-6
+    assert abs(forward_accel((1.8, -0.55, -10.02), cal)) < 1e-9                  # gravity removed
+    # 0.5 m/s^2 forward = along -x_imu (perpendicular to gravity): reads +0.5 after the g scaling.
+    f = cal['forward']
+    a = [g + 0.5 * cal['g_norm'] / G0 * fi for g, fi in zip((1.8, -0.55, -10.02), f)]
+    assert abs(forward_accel(a, cal) - 0.5) < 1e-9
+    a = [g + 0.3 * gi / cal['g_norm'] for g, gi in zip((1.8, -0.55, -10.02), (1.8, -0.55, -10.02))]
+    assert abs(forward_accel(a, cal)) < 1e-9                                       # vertical bump: no leak
+    assert 9.0 < cal['tilt_deg'] < 11.0, cal['tilt_deg']
+    m = StillCalib()
+    for i in range(200):
+        m.add((0.0, 0.0, 0.05 * (-1) ** i), (1.8, -0.55, -10.02))                  # 2.9 deg/s: moving
+    assert m.result()['moving']
+    print('PASS: VESC vx/gain, brake phase parse, de-weight rule (brake, 0 < |ERPM| < %.0f, 0 trusted),'
+          % SENSORLESS_ERPM)
+    print('      yaw sign/bias, still calibration (moving -> retry), forward accel: gravity and vertical')
+    print('      removed on a tilted, x-backward IMU.')
+
+
+# ---------------------------------------------------------------- live node
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--no-rf2o', action='store_true', help='do not forward /odom_rf2o')
+    ap.add_argument('--self-test', action='store_true')
+    args, _ = ap.parse_known_args()
+    if args.self_test:
+        self_test()
+        return 0
+    import rclpy
+    from nav_msgs.msg import Odometry
+    from rclpy.node import Node
+    from rclpy.qos import qos_profile_sensor_data
+    from sensor_msgs.msg import Imu
+    from std_msgs.msg import String
+    from vesc_msgs.msg import VescStateStamped
+    gain = gain_from_params()
+
+    class Inputs(Node):
+        def __init__(self):
+            super().__init__('ekf_shadow_inputs')
+            self.pub = {k: self.create_publisher(Imu if k == 'imu' else Odometry, t, 20)
+                        for k, t in TOPICS.items() if not (k == 'rf2o' and args.no_rf2o)}
+            self.calib, self.cal, self.braking, self.status_at = StillCalib(), None, False, None
+            self.create_subscription(VescStateStamped, '/sensors/core', self.on_core, qos_profile_sensor_data)
+            self.create_subscription(Imu, '/imu/data_raw', self.on_imu, qos_profile_sensor_data)
+            self.create_subscription(String, '/t1b_stop_converter/status', self.on_status, 10)
+            if not args.no_rf2o:
+                self.create_subscription(Odometry, '/odom_rf2o', self.on_rf2o, qos_profile_sensor_data)
+            self.t_start = self.get_clock().now()
+            self.create_timer(5.0, self.check_status)
+            self.get_logger().warning('SHADOW ONLY: publishes /ekf_shadow/in/* only. gain %.0f. '
+                                      'Keep the car still: IMU still calibration %.0f s.' % (gain, StillCalib.SECONDS))
+
+        def on_status(self, msg):
+            self.braking, self.status_at = brake_active(msg.data), self.get_clock().now()
+
+        def check_status(self):
+            if self.status_at is None or (self.get_clock().now() - self.status_at).nanoseconds > 1e9:
+                self.get_logger().warning('No /t1b_stop_converter/status: brake de-weighting OFF '
+                                          '(|ERPM| < %.0f rule only).' % SENSORLESS_ERPM)
+                self.braking = False
+
+        def on_core(self, m):
+            for key, dw in (('vesc', False), ('vesc_dw', True)):
+                self.pub[key].publish(vesc_msg(m.header.stamp, m.state.speed, self.braking, gain, dw))
+
+        def on_imu(self, m):
+            g, a = m.angular_velocity, m.linear_acceleration
+            if self.cal is None:
+                self.calib.add((g.x, g.y, g.z), (a.x, a.y, a.z))
+                if len(self.calib.g) >= StillCalib.SAMPLES:
+                    r = self.calib.result()
+                    if r and not r['moving']:
+                        self.cal = r
+                        self.get_logger().info('IMU still calibration OK: gz bias %.5f rad/s, tilt %.1f deg, '
+                                               '|g| %.3f' % (r['bias_gz'], r['tilt_deg'], r['g_norm']))
+                    else:
+                        self.get_logger().warning('IMU still calibration: MOTION (gyro std %.2f deg/s). Keep '
+                                                  'the car still; retrying.' % math.degrees((r or {}).get('gyro_std', 0.0)))
+                        self.calib = StillCalib()
+                return
+            self.pub['imu'].publish(imu_msg(m.header.stamp, g.z, (a.x, a.y, a.z), self.cal))
+
+        def on_rf2o(self, m):
+            self.pub['rf2o'].publish(rf2o_msg(m))
+
+    rclpy.init()
+    node = Inputs()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

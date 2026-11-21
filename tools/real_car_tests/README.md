@@ -99,13 +99,20 @@ yaw rate / VESC vx with a one / two-level / linear test (STEP, CONSTANT, OSCILLA
 turning points, motion / ramp-end / brake marks. A frozen IMU (identical samples) switches that repeat
 to RF2O. Writes `t4_yaw.png` and `t4_yaw.json` into the folder; reads the bag only.
 
-`ekf_shadow_replay.py [folder ...] [--gain 8700] [--variants A B]` (21 Nov, Phase F, offline only, refuses if a car
-stack runs): rebuilds EKF inputs from a T4 bag (VESC vx from `/sensors/core` / gain + vy = 0, BMI160 yaw rate with
-the 1 s pre-command bias, RF2O twist; R in `config/real_car/ekf_real_shadow.yaml`), runs `robot_localization`
-`ekf_node` per repeat in isolated domain 88 with `use_sim_time` + `ros2 bag play --clock`, and compares
-`/ekf_shadow/odom` (laser point along the start wall normal) with the `analyze.py --t4` LiDAR references per phase
-(ramp, brake, total) and heading, plus a latency-free cruise gain. Default folders: the two healthy-IMU T4 sessions.
-Writes `ekf_shadow_replay.json` into each folder. `--self-test` checks the geometry and signs.
+`ekf_shadow_inputs.py` (21 Nov, Phase F): live shadow EKF input node, observation only: subscribes `/sensors/core`,
+`/imu/data_raw`, `/odom_rf2o`, `/t1b_stop_converter/status`; publishes only `/ekf_shadow/in/{vesc,vesc_dw,imu,rf2o}`
+(base_link, no TF): VESC vx = ERPM / 8414 + vy = 0; `vesc_dw` de-weighted x100 while braking or 0 < |ERPM| < 2000;
+yaw rate -(gz - bias) and gravity-free forward accel (IMU x points backward, mount tilted ~10 deg) from a start-up
+still calibration (200 samples, retried with a log line until still); RF2O twist. The replay uses the same functions.
+Not Zaid's `tools/shadow_covariance_adapter.py` (his `/shadow_inputs/*`, unchanged).
+
+`ekf_shadow_replay.py [folder ...] [--variants A B C0 C1 C2] [--calib pre|startup]` (21 Nov, Phase F, offline only,
+refuses if a car stack runs): builds the inputs from a T4 bag with `ekf_shadow_inputs.py`, runs `robot_localization`
+`ekf_node` per repeat and variant (`config/real_car/ekf_real_shadow.yaml`) in isolated domain 88 with `use_sim_time`
++ `ros2 bag play --clock`, and compares `/ekf_shadow/odom` (laser point along the start wall normal) with the
+`analyze.py --t4` LiDAR references: total, start-ramp and brake-phase error, heading vs RF2O, hold drift, ekf_node CPU,
+latency-free cruise gain. `--live-check`: runs the live node on a bag and compares every message with the replay
+inputs. `--rf2o-cpu`: rf2o CPU on this machine from a bag's /scan. Writes `ekf_shadow_replay[_startup].json`.
 
 `analyze.py --t4 [folder ...]` (default: latest T4 folder; several = pooled summary as well), also
 written to the folder README: per repeat stop distance (LiDAR at the converter's brake command vs at

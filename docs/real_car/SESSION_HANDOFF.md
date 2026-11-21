@@ -12,8 +12,8 @@ For Moatasem and for the next Claude Code session. Read this, then
   stops ~0.08 / ~0.70), max left 17.15 deg, right 18.38 deg (R 0.84 / 0.78 m). Fitted gain **~-0.96 NOT
   applied** (converter stays -0.50 / 0.320): the centre is uncertain because of left-wheel play.
 - **20 Nov:** T4 at 0.5 m/s done (carpet + tile, brake 5 A, no F-01 rebound); **steering offset 0.330
-  PROVISIONAL baseline** (tile; was 0.320; re-measure after the play fix); gain candidate ~8700 not
-  adopted (8414 stays); F-18 IMU freeze guarded in the runner and preflight.
+  PROVISIONAL baseline** (tile; was 0.320; re-measure after the play fix); gain candidate ~8700 **withdrawn 21 Nov**
+  (8414 kept: cruise-only 8280-8480); F-18 IMU freeze guarded in the runner and preflight.
 - **Next:** section 4, steps 1-3. Steering findings for Zaid: section 4a.
 
 ## 1. Safety rules and standing approvals (Moatasem)
@@ -85,7 +85,7 @@ distance (T4) before it can be considered.
    results row (`servo_gain` -0.50 and `servo_offset` 0.320 change only then, in both converter and
    vesc_to_odom yamls). If the horn is re-mounted, the full T2 (limits too) is redone.
 3. **T4 on the ground, 0.5 m/s, brake 5 A: DONE 20 Nov** (results doc: tile stop ~0.137 m, decel ~0.9,
-   gain candidate ~8700, provisional tile centre ~0.330, all test-only; F-18 IMU freeze found and guarded).
+   gain candidate ~8700 (withdrawn 21 Nov, 8414 kept), provisional tile centre ~0.330, all test-only; F-18 IMU freeze found and guarded).
    Next: the left-wheel play fix (Zaid), then the centre re-measure; `decel_mps2` before 1.0 m/s.
    Original plan:
    - **T4 runner profile written 20 Nov** (`t4_straight`, `analyze.py --t4`, see
@@ -135,7 +135,7 @@ distance (T4) before it can be considered.
    scripts from `~/Data/kf_practice/imu/`), 2 min wheels spinning on the stand.
 6. **T6** offline on T3/T4/T5 bags: VESC vx vs RF2O vs LiDAR, gyro vs RF2O yaw rate, time offsets
    (cross-correlation), R per sensor -> `vehicle_params.yaml noise`.
-7. **Phase F (shadow only, no TF authority):** **21 Nov: first step done offline** (results doc row "Phase F"): `config/real_car/ekf_real_shadow.yaml` (A: VESC + vy=0 + gyro; B: + RF2O) replayed on the two healthy-IMU T4 sessions with `tools/real_car_tests/ekf_shadow_replay.py`. Both under-read distance by ~0.1 m per run, mostly in the brake phase (VESC ~0 while sliding); cruise gain 8280-8480 (8700 not supported). Next: variant C with VESC R inflated while braking / at low speed; live adapter (`tools/shadow_covariance_adapter.py` has no vy=0 / gyro bias yet); T3 for vy=0.
+7. **Phase F (shadow only, no TF authority):** **21 Nov: offline variants done, C1 recommended** (results doc rows "Phase F" + "Phase F step 2"). C1 = VESC vx (8414) + vy=0 + gyro, VESC de-weighted x100 while braking (t1b `STOP_BRAKE`) or 0 < |ERPM| < 2000, RF2O vx as fallback: total error +0.005 m (-0.010..+0.025) on 7 T4 repeats vs -0.054 (A). Live inputs: `tools/real_car_tests/ekf_shadow_inputs.py` (same functions as the replay; `--live-check` identical on all 4 topics). Not yet run live. Next: live shadow run on the stack (section 7), T3 for vy=0, IMU mount (axes + tilt) with Zaid before any accel fusion (C2).
    - `config/real_car/ekf_real_shadow.yaml` from `src/f1tenth_bringup/config/ekf_moatasem_vesc_imu_shadow.yaml`:
      VESC vx + **vy = 0** (via `tools/shadow_covariance_adapter.py`) + BMI160 yaw rate (bias removed,
      scale from T5), `two_d_mode: true`, R from T5/T6, Q_vx 0.05, Q_vyaw 0.02, no gates,
@@ -178,7 +178,7 @@ distance (T4) before it can be considered.
 | Battery | Charged: >= 12.3 V during both 16 Nov runs (11.1 V idle on 14 Nov after a power loss). |
 | Stand LiDAR | Front valid fraction ~0.83 vs the 0.75 MANUAL gate; an operator hand at 0.10-0.12 m (+10..+19 deg) latches `OBSTACLE_NEAR`. |
 | F-13 | Runner input gaps never exceeded 44 ms; the keyboard GUI's latch was not reproduced (GUI not re-tested). |
-| IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. |
+| IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. **21 Nov (T4 bags): IMU x points BACKWARD** (forward accel reads on -x: pitch pi or roll pi + yaw pi) **and the mount is tilted 8-10 deg**; gz sign unaffected. Not changed (Zaid); y sign needs T3. The shadow inputs handle it themselves (no TF). |
 | Team notes | Repo configs still at offset 0.361; do not use `vesc.launch.py` (`config/vesc.yaml` brake 200000 A); listed in the results doc. |
 | T1b converter | Test-only (approved with conditions: one command per tick, brake/current only after a zero request, new nonzero request returns to speed at once, method logged per stop). |
 
@@ -248,9 +248,17 @@ ros2 launch ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py servo_min:
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py --extend-right <folder>
 ```
 
+Shadow EKF, live (Phase F, C1; observation only, publishes /ekf_shadow/* only; with the stack up and the car
+STILL for the first 2 s of the inputs node; terminal C, then D):
+```bash
+python3 ~/f1tenth_uj/tools/real_car_tests/ekf_shadow_inputs.py
+ros2 run robot_localization ekf_node --ros-args -r __node:=ekf_real_shadow_c1 --params-file /home/ftenth/f1tenth_uj/config/real_car/ekf_real_shadow.yaml -r odometry/filtered:=/ekf_shadow/odom
+```
+Offline (Claude may run, stack down, domain 88): `ekf_shadow_replay.py` (variants), `--live-check`, `--rf2o-cpu`.
+
 Self-tests (Claude may run; the runner's shutdown probe uses isolated domain 77, no publishers):
 ```bash
-for t in run_test analyze t1b_stop_converter t2_servo_sweep; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
+for t in run_test analyze t1b_stop_converter t2_servo_sweep ekf_shadow_inputs ekf_shadow_replay; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py --self-test
 python3 ~/f1tenth_uj/src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
 ```
