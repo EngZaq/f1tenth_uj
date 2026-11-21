@@ -18,6 +18,10 @@ stopped by TURNS_DONE is "counted"):
   centripetal v x yaw rate (+ toward the circle centre = base +y in a left turn): ratio ~ +1 -> IMU y = base y,
   ~ -1 -> IMU y = -base y. Body roll in the turn adds to the magnitude with the same sign.
 Across runs: ground per-side gain g = (servo - centre) / delta_real (centre = vehicle_params servo_offset).
+FULL LOCK runs (run_test.py --full-lock, servo exactly at the clip 0.10 / 0.68) are reported in their own table:
+real minimum turning radius at the rear axle (circle fit and v / yaw rate), real wheel angle vs the T2 stand angle
+at that clip (steering.max_left_rad / max_right_rad), and the radius swept by the outer front body corner. They are
+not used for the gain (the command is a clip, not an angle).
 Writes t3.json into each run folder.
   t3_analyze.py <t3 folder> [...] [--shadow <ekf_shadow_live folder>] [--t2 <T2 folder>]
   t3_analyze.py --self-test
@@ -187,7 +191,10 @@ def analyze_run(folder, data, ekf, p, fit_t2):
     info = json.loads((folder / 'run_info.json').read_text())
     circ = info.get('circle') or {}
     steer = float(circ.get('steer_rad', info['profile'].get('steer')))
+    lock = circ.get('full_lock') or info['profile'].get('full_lock')
     side = 1.0 if steer > 0 else -1.0
+    veh = vp.get(p, 'vehicle')
+    hw, front_x = float(veh['body_width_m']) / 2.0, float(veh['front_bumper_x_m'])
     L = float(vp.get(p, 'vehicle.wheelbase_m'))
     gain = float(vp.get(p, 'drivetrain.speed_to_erpm_gain'))
     centre = float(circ.get('servo_offset', vp.get(p, 'steering.servo_offset')))
@@ -213,7 +220,7 @@ def analyze_run(folder, data, ekf, p, fit_t2):
         a = t_drive + START_DELAY_S + v_cmd / ramp + SETTLE_S
         b = tz - 0.1
         res = dict(drive_start=t_drive, zero=tz, reason=reason, counted=reason.startswith('TURNS_DONE'),
-                   steer_cmd_rad=steer, window_s=b - a)
+                   steer_cmd_rad=steer, full_lock=lock, window_s=b - a)
         if b - a < 3.0:
             res['note'] = 'steady window < 3 s: not analysed'
             out.append(res)
@@ -257,7 +264,11 @@ def analyze_run(folder, data, ekf, p, fit_t2):
             delta_real_v_deg=math.degrees(d_v), delta_cmd_deg=math.degrees(steer),
             servo_sent=servo_sent, servo_planned=circ.get('servo_planned'),
             delta_t2_deg=math.degrees(t2_angle(fit_t2, servo_sent)) if (fit_t2 and servo_sent) else None,
-            ground_gain=((servo_sent - centre) / (d_fit if d_fit is not None else d_v)) if servo_sent else None,
+            ground_gain=(((servo_sent - centre) / (d_fit if d_fit is not None else d_v))
+                         if (servo_sent and not lock) else None),
+            delta_t2_clip_deg=(math.degrees(float(vp.get(p, 'steering.max_left_rad' if side > 0 else
+                                                         'steering.max_right_rad'))) if lock else None),
+            r_outer_corner=math.hypot((R_fit if R_fit else R_v.get('ekf', R_v['rf2o'])) + hw, front_x),
             slip_beta_deg=math.degrees(statistics.mean(beta)) if beta else None,
             slip_beta_sd_deg=math.degrees(statistics.pstdev(beta)) if len(beta) > 1 else None,
             vy_mps=v_ref * math.sin(statistics.mean(beta)) if beta else None,
@@ -309,6 +320,8 @@ def print_table(rows, p):
           'R v/w EKF m | R fit RF2O m (rms) | R fit EKF m | delta real fit / v deg | delta T2 deg | ground gain | '
           'slip beta deg (vy m/s) | IMU y ratio |')
     print('|' + '---|' * 14)
+    locks = [(run, r) for run, r in rows if r.get('full_lock')]
+    rows = [(run, r) for run, r in rows if not r.get('full_lock')]
     for run, r in rows:
         if 'yaw_rate_gyro' not in r:
             print('| %s | %s | %+.1f | - | %s |' % (run, 'y' if r['counted'] else 'n', math.degrees(r['steer_cmd_rad']),
@@ -328,6 +341,21 @@ def print_table(rows, p):
             print('Ground %s gain (servo - centre) / delta_real: %s -> mean %.3f (T2 stand fit %s, converter T3 %.3f)'
                   % (name, ', '.join('%.3f' % x for x in g), statistics.mean(g),
                      {'left': -0.874, 'right': -1.062}[name], float(vp.get(p, 't3.servo_gain_%s' % name))))
+    if locks:
+        print('\nFULL LOCK (servo at the T2 driving clip; minimum turning radius, not a gain):')
+        print('| run | cnt | side | servo | v EKF / RF2O m/s | yaw rate gyro rad/s | R min fit RF2O m (rms) | R v/w EKF m | '
+              'delta real fit / v deg | delta T2 at the clip deg | outer front corner radius m | slip deg | IMU y |')
+        print('|' + '---|' * 13)
+        for run, r in locks:
+            if 'yaw_rate_gyro' not in r:
+                print('| %s | %s | %s | - | %s |' % (run, 'y' if r['counted'] else 'n', r['full_lock'], r.get('note', '-')))
+                continue
+            print('| %s | %s | %s | %s | %s / %.3f | %+.3f | %s (%s) | %s | %s / %+.1f | %+.1f | %.3f | %s | %s |' % (
+                run, 'y' if r['counted'] else 'n', r['full_lock'], f(r['servo_sent'], '%.3f'), f(r['v_ekf'], '%.3f'),
+                r['v_rf2o'], r['yaw_rate_gyro'], f(r['R_fit_rf2o'], '%.3f'), f(r['fit_rf2o_rms'], '%.3f'),
+                f(r['R_v'].get('ekf'), '%.3f'), f(r['delta_real_fit_deg'], '%+.1f'), r['delta_real_v_deg'],
+                r['delta_t2_clip_deg'], r['r_outer_corner'], f(r['slip_beta_deg'], '%+.1f'), f(r['imu_y_ratio'], '%+.2f')))
+        rows = rows + locks                                       # IMU y sign from every run
     signs = [r['imu_y_sign'] for _, r in rows if r.get('imu_y_sign')]
     if signs:
         print('IMU y axis: %s -> %s' % (' '.join(signs), 'IMU +y = base +y' if set(signs) == {'+'} else

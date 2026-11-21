@@ -134,17 +134,23 @@ distance (T4) before it can be considered.
 3. **T3** loaded steering on the stand, then mini-circles on the ground at 0.5 (then 1.0) m/s at 50 % and
    90 % of the measured max steer (`max_steer_rad` launch arg, approved per test); delta = atan(0.260 / R)
    vs T2. Runner profile not written yet.
-3a. **T3 PREPARED 21 Nov (not run):** `t3_circle` runner profile, T3 converter / VESC yamls, `t3_analyze.py`,
-   hall checklist `T3_HALL_CHECKLIST.md`. Commands +/-0.26 (90 %, left limited by the 0.10 clip) and +/-0.18
-   rad (0.15 needs a 5.1 m clear disk). **Open decision before running:** the battery-disconnect rule cannot be
-   kept while circling; a frozen Jetson stops only by the VESC timeout (~1 s, coasting): set the VESC timeout /
-   brake first or accept it with extra space (checklist section 0).
+3a. **T3 PREPARED 21 Nov (not run), updated the same evening:** `t3_circle` runner profile, T3 converter / VESC
+   yamls, `t3_analyze.py`, hall checklist `T3_HALL_CHECKLIST.md`. Order: disarmed rehearsal, +/-0.18, then per-side
+   ~90 % (left +0.26 / servo 0.108, right -0.31 / servo 0.664), then `--full-lock left|right` (servo exactly
+   0.10 / 0.68: real minimum radius, own table in `t3_analyze.py`). Per-side limits 0.27 / 0.325 rad, mux cap
+   `max_steer_rad:=0.33`. **Before the hall: VESC timeout 250 ms + brake 5 A (decided), verified on the stand
+   with `vesc_timeout_check`** (checklist section 0). Until a PASS the runner enforces the fallback (disk +1 m,
+   0.3 m/s first); in a 5 x 5 m hall that excludes +/-0.18 and +0.26.
 4. **T4** (0.5 m/s is next step 3) straight line 0.5/1.0/1.5 m/s toward a wall, 3 repeats each (runner ground check): LiDAR vs VESC
    vs RF2O distance -> `speed_to_erpm_gain` (same value in both converter and vesc_to_odom), lateral drift
    -> steering offset, start delay, stopping distance and deceleration with the chosen stop method. Profile
    not written yet.
-5. **T5** IMU on the car: 10 min static (bias, R, Allan), 8 x 360 deg hand turns (scale, Moatasem's bench
-   scripts from `~/Data/kf_practice/imu/`), 2 min wheels spinning on the stand.
+5. **T5** IMU on the car. **(a) done 21 Nov** (results doc "T5 (a)"): still gz noise = bench (5.3e-7), driving
+   ~80x (tile) to ~550x (carpet); recommended driving R_gz 1.2e-3 vs C1's 8e-3 (not applied: after T3 + T5a,
+   replay first). **(b) T5b** stand 0.5 m/s 90 s: `run_test.py --test t5b_stand_imu --speed 0.5 --live`, then
+   `t5_imu_analyze.py stand`. **(c) T5a** 15 min static (IMU-only launch + `ros2 bag record`), then
+   `t5_imu_analyze.py static` (bias, R, Allan, drift, frozen check). Hand turns (scale) later; T3 gives the gyro
+   / RF2O ratio on the ground.
 6. **T6** offline on T3/T4/T5 bags: VESC vx vs RF2O vs LiDAR, gyro vs RF2O yaw rate, time offsets
    (cross-correlation), R per sensor -> `vehicle_params.yaml noise`.
 7. **Phase F (shadow only, no TF authority):** **21 Nov: offline variants done, C1 recommended** (results doc rows "Phase F" + "Phase F step 2"). C1 = VESC vx (8414) + vy=0 + gyro, VESC de-weighted x100 while braking (t1b `STOP_BRAKE`) or 0 < |ERPM| < 2000, RF2O vx as fallback: total error +0.005 m (-0.010..+0.025) on 7 T4 repeats vs -0.054 (A). Live inputs: `tools/real_car_tests/ekf_shadow_inputs.py` (same functions as the replay; `--live-check` identical on all 4 topics). Not yet run live. Next: live shadow run on the stack (section 7), T3 for vy=0, IMU mount (axes + tilt) with Zaid before any accel fusion (C2).
@@ -183,7 +189,7 @@ distance (T4) before it can be considered.
 |---|---|
 | Live rebound display | **Fixed** (`ae9a36f`, shared `ReboundTracker`: rises count only after ERPM fell to half its value at the zero). Confirmed on the current0 run: live = analysis on all 5 stops. Live peak times are ~0.06 s later than the analysis (live clock starts at the runner's zero, analysis at the converter's). |
 | Brake 10 A vs `l_current_min` | Requesting 10 A did not raise the measured motor current above the 5 A runs (<= 4.2 vs <= 3.7 A). Either the ~0.1 s stop is missed by 50 Hz telemetry or the firmware brake current limit caps it: check `l_current_min` (checklist row 11). |
-| VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). |
+| VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). **21 Nov decided:** timeout 250 ms + timeout brake current 5 A with Zaid, after noting the current values; verify with `vesc_timeout_check` (T3 checklist section 0). |
 | Brake hold release | Every brake stop (also 16 Nov at 1.0 / 1.5 m/s: 88-101 ERPM at +2.09-2.15 s) shows a 77-100 ERPM rise at +2.1-2.2 s: the 2.0 s hold ending (switch to current 0). Tune the hold / release in the permanent fix. |
 | Servo horn off-centre (Zaid) | Straight = servo 0.320 = 1320 us, not 1500 us (VESC 0..1 = 1000-2000 us): left at most 0.32 of travel, right 0.68. Re-mount so straight is near 0.5 for symmetric travel; **redo T2 after that**. Zaid to decide. |
 | **F-18 BMI160 freeze (Zaid)** | **Also (21 Nov): the node exits at start-up if the car moves during the 5 s gyro calibration** (std > 0.5 deg/s, exit code 0, "finished cleanly"); runner/preflight print `IMU node not running: restart the stack and keep the car still for 10 s`. Proposal for both causes: [IMU_DRIVER_PROPOSAL_F18.md](IMU_DRIVER_PROPOSAL_F18.md). After one `I2C read failed: [Errno 110]` the stream repeats one sample at 100 Hz until the node restarts (2 of 4 T4 sessions, 20 Nov; results doc). Guard: runner refuses to arm on `IMU_FROZEN` / `IMU_STALE`, `preflight.sh stack` checks 2 s; recovery = restart the stack. **Proposed driver fix (imu_driver, Zaid's package):** after an `OSError`, redo the soft reset + configuration (keep the gyro bias), and a watchdog that resets on N identical samples. **Diagnostic at the next freeze** (stack stopped first, before relaunching; read-only): `i2cget -y 7 0x69 0x03` (PMU_STATUS), `0x02` (ERR_REG), and `0x18`-`0x1A` (SENSORTIME) twice, a second apart: SENSORTIME not advancing = the sensor stopped converting (register addresses from the BMI160 datasheet; verify). |

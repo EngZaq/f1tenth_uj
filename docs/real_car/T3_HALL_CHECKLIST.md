@@ -1,89 +1,174 @@
-# T3 in a hall: constant-steering circles (checklist, prepared 21 Nov)
+# T3 in a hall: constant-steering circles (checklist, prepared 21 Nov, updated 21 Nov evening)
 
-For Moatasem (operator). Purpose: real steering angle vs command on the ground (per side), yaw-rate /
-speed / radius consistency, lateral slip (judges the EKF vy = 0), IMU y-axis sign. Code:
-`run_test.py --test t3_circle`, `t3_analyze.py` (README T3). Numbers: `vehicle_params.yaml` `t3`.
+For Moatasem (operator). Purpose: real steering angle vs command on the ground (per side), real minimum
+turning radius (full lock), yaw-rate / speed / radius consistency, lateral slip (judges the EKF vy = 0),
+IMU y-axis sign. Code: `run_test.py --test t3_circle`, `t3_analyze.py`, `vesc_timeout_check.py`
+(README T3). Numbers: `vehicle_params.yaml` blocks `t3` and `vesc_timeout_check`.
 
-## 0. Decide before the session
+## 0. Before the hall: VESC firmware timeout (decided 21 Nov)
 
-- **Battery disconnect:** the T4 rule "hand on the battery disconnect" cannot be kept while the car circles
-  (radius 1-2 m, 25-45 s per run). Software stops: SPACE release / KILL key (runner -> mux -> brake 5 A,
-  ~0.14 m), mux 0.80 m front gate, runner geofence / turn check / IMU / RF2O checks. **A frozen Jetson is only
-  stopped by the VESC timeout (~1 s, then coasting: 24 Oct stand test).** Either set the VESC Tool timeout
-  ~250 ms + timeout brake current ~5 A first (pending backlog item, then a T1 stand check), or accept it with
-  >= 1 m free beyond the clear disk and a spotter outside it. **Your decision; T3 is not run before it.**
-- Written approval for the ground step (0.5 m/s, steer up to 0.26 rad, mux cap 0.30).
+Why: the hand-on-the-battery-disconnect rule from T4 cannot be kept while the car circles for 15-45 s.
+Software stops cover:
+- SPACE release and the KILL key (runner -> mux -> brake 5 A);
+- the mux 0.80 m front gate;
+- the runner's geofence, turn, IMU and RF2O checks.
 
-## 1. Commands and space
+A frozen Jetson or a dead converter is stopped only by the VESC's own timeout: today ~1 s, then coasting
+(24 Oct). Decision: **timeout 250 ms + timeout brake current 5 A**, coordinated with Zaid
+(converter proposal section 9).
 
-T3 converter gains = T2 per-side fit (left -0.874, right -1.062), centre 0.335: the commanded angle should be
-the real angle. "90 %" is **0.26 rad**: 0.27 left would need servo 0.099, outside the 0.10 driving clip.
+1. [ ] **Read and note (change nothing yet):**
+   - VESC Tool (Windows): save the motor config and the app config as XML
+     (`T1_VESC_TOOL_CHECKLIST.md` "First").
+   - Write down App Settings > General `timeout_msec` and `timeout_brake_current` (row 14 there) in the
+     results doc.
+   - Tell Zaid what will change.
+2. [ ] **Before-check on the stand** (recommended: proves the method). Do it with the current values,
+   using the stand commands below. Expected result: `FAIL: timeout onset ~1.0 s ... released / coasting`.
+3. [ ] **Set** `timeout_msec` = 250 and `timeout_brake_current` = 5.0, then Write App Configuration.
+   Re-read both values and note them.
+4. [ ] **Stand check, after the change** (car on the stand, wheels free; same commands). Expected result:
+   `PASS: timeout onset ~0.25-0.30 s ..., BRAKED`.
+   This `timeout_check.json` lifts the T3 fallback rules automatically.
+5. [ ] **Optional USB check** (the frozen-Jetson case; no telemetry):
+   - relaunch the stack and start the runner again;
+   - during steady, pull the VESC USB cable;
+   - the wheels must stop within ~0.3 s instead of running on ~1 s (a phone slow-motion video is the
+     record);
+   - plug the cable back in, check that `ls /dev/serial/by-id/` shows the ChibiOS port again, then relaunch.
 
-| Run | `--steer` | Servo planned | R nominal | Clear disk (diameter) | Disk centre from the rear axle |
-|---|---|---|---|---|---|
-| left 90 % | +0.26 | 0.108 | 0.98 m | 3.31 m | 1.22 m to the LEFT |
-| right 90 % | -0.26 | 0.611 | 0.98 m | 3.31 m | 1.22 m to the RIGHT |
-| left ~60 % | +0.18 | 0.178 | 1.43 m | 4.42 m | 1.79 m to the LEFT |
-| right ~60 % | -0.18 | 0.526 | 1.43 m | 4.42 m | 1.79 m to the RIGHT |
-| (left 50 %) | +0.15 | 0.204 | 1.72 m | 5.14 m | 2.15 m to the LEFT |
+Stand commands (each terminal: source ROS + workspace, `ROS_DOMAIN_ID=42`,
+`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`):
+```bash
+# T1 stack: T1b brake 5 A at the T1b-passed 0.5 m/s step (stays running)
+~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.5 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t1b_erpm4630.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0
+# T2 runner: n, hold SPACE (20 s steady)
+~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test vesc_timeout_check --speed 0.5 --live
+# T3, ~5 s into steady while SPACE is held: kill ONLY the converter (vesc_driver keeps reporting)
+pkill -9 -f t1b_stop_converter.py
+# then release SPACE, q in T2, Ctrl-C T1 (the stack has no converter any more: relaunch before anything else)
+python3 ~/f1tenth_uj/tools/real_car_tests/vesc_timeout_check.py $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*_vesc_timeout_check_*_armed | head -1)
+```
 
-The clear disk covers every real radius from 0.8 to 1.25 x nominal (circles from the same start are
-nested) plus the body corner and 0.30 m. **In a 5 x 5 m area 0.15 rad does not fit: use 0.18 as "~50 %"**
-(the runner refuses 0.15 by itself if it does not fit). Do the 0.26 runs first (smallest space).
-Optional 0.3 m/s: same commands, other stack (section 3).
+**Until a PASS exists, the fallback rules apply.** The runner enforces the first two:
+- the clear disk is 1 m larger in radius;
+- 0.5 m/s only after a counted 0.3 m/s run of the same command;
+- a spotter stands outside the disk (that one is yours).
+
+Also before the session: written approval for the ground step (0.5 m/s, steer up to 0.325 rad, mux cap 0.33).
+
+## 1. Commands, order and space
+
+Converter gains = the T2 per-side fit (left -0.874, right -1.062), centre 0.335. A `--steer` run should
+produce that real angle. Per-side limits are 0.27 left / 0.325 right (`vehicle_params` steering note).
+`--full-lock` commands exactly the limit, so the converter clamp sends the clip itself (0.10 / 0.68).
+
+| # | Run | Runner argument | Servo | R nominal | Clear disk, verified | ... with fallback | Disk centre from the rear axle |
+|---|---|---|---|---|---|---|---|
+| 0 | disarmed rehearsal | (section 3) | - | - | - | - | - |
+| 1 | left ~60 % | `--steer 0.18` | 0.178 | 1.43 m | 4.42 m | 6.42 m | 1.79 m LEFT |
+| 2 | right ~60 % | `--steer -0.18` | 0.526 | 1.43 m | 4.42 m | 6.42 m | 1.79 m RIGHT |
+| 3 | left ~90 % | `--steer 0.26` | 0.108 | 0.98 m | 3.31 m | 5.31 m | 1.22 m LEFT |
+| 4 | right ~90 % | `--steer -0.31` | 0.664 | 0.81 m | 2.91 m | 4.91 m | 1.01 m RIGHT |
+| 5 | full lock left | `--full-lock left` | 0.100 | 0.84 m (T2) | 2.98 m | 4.98 m | 1.05 m LEFT |
+| 6 | full lock right | `--full-lock right` | 0.680 | 0.78 m (T2) | 2.84 m | 4.84 m | 0.98 m RIGHT |
+
+The space needed is the same at 0.3 and 0.5 m/s. The clear disk covers every real radius from 0.8 to
+1.25 x nominal (circles from the same start are nested), plus the outer body corner and 0.30 m. The runner
+measures it with the LiDAR and refuses to arm if anything is inside.
+
+**In a 5 x 5 m hall, ±0.18 and +0.26 fit only after the timeout PASS** (fallback 6.42 / 5.31 m). Without the
+PASS, only runs 4-6 fit, and only at 0.3 m/s first.
+
+Full lock measures the minimum turning radius, not a gain. Its geometry and turn check use the T2 angle.
+If the real lock is much weaker (R > 1.25 x 0.84 m), the geofence stops it: that is a result too.
 
 ## 2. Hall preparation
 
 - [ ] Hard, flat, clean floor; nothing loose (cables, tape edges) inside the area.
-- [ ] Mark the disk centre with tape at the middle of the free area; for each run place the car with its
-      rear axle at the "centre offset" from the table on the side AWAY from the turn, pointing tangentially
-      (perpendicular to the line to the centre). Mark each start with tape (repeat from the same mark).
-- [ ] **No one inside the clear disk** while armed; operator at the laptop outside it, spotter outside it.
-- [ ] **Mux visibility** (the mux stops MANUAL below 75 % finite returns in its +/-20 deg front window; the
-      LiDAR reports up to 100 m, so hall walls count): the runner predicts it for every heading of the
-      circle and refuses below 0.80. Problem directions are open doors, glass, black curtains. Fix: close
-      the door, or put LiDAR-visible boxes (cardboard, >= 0.3 m tall: the beam is ~0.18 m above the floor)
-      in that direction **outside the clear disk + 0.8 m** (2.5 m or more from the disk centre for 0.26 rad;
-      for 0.18 rad this needs > 6 m, so prefer a position where the hall walls are visible).
-- [ ] **Do NOT use the mux low-visibility mode** (`manual_allow_reduced_visibility`): it is a gate change
-      (standing rule: gates never change), not in the test launch, and it lets "no return" pass as free
-      space. The 0.80 m obstacle check stays as it is.
-- [ ] `m` in the runner (after the stack is up) shows: clear disk, clearance (worst bearing), visibility
-      (worst heading), RF2O. Arm only when all are OK.
+- [ ] Mark the disk centre with tape at the middle of the free area. For each run, place the car with its
+      rear axle at the "disk centre" distance from the table, on the side AWAY from the turn, pointing
+      tangentially (perpendicular to the line to the centre). Mark each start with tape; repeats start
+      from the same mark.
+- [ ] **No one inside the clear disk** while armed. The operator sits at the laptop outside it; the spotter
+      stands outside it.
+- [ ] **Mux visibility.** The mux stops MANUAL below 75 % finite returns in its ±20 deg front window, and
+      the LiDAR reports up to 100 m, so hall walls count.
+  - The runner predicts the visibility for every heading on the circle and refuses to arm below 0.80.
+  - Problem directions are open doors, glass and black curtains.
+  - Fix: close the door, or put LiDAR-visible boxes (cardboard, >= 0.3 m tall: the beam is ~0.18 m above
+    the floor) in that direction **outside the clear disk + 0.8 m**.
+- [ ] **Do NOT use the mux low-visibility mode** (`manual_allow_reduced_visibility`). It is a gate change
+      (standing rule: gates never change), it is not in the test launch, and it lets "no return" pass as
+      free space. The 0.80 m obstacle check stays as it is.
+- [ ] Press `m` in the runner (once the stack is up). It shows the clear disk (and FALLBACK if it applies),
+      the clearance at the worst bearing, the visibility at the worst heading, and RF2O. Arm only when all
+      are OK.
 
 ## 3. Terminals (each: source ROS + workspace, `ROS_DOMAIN_ID=42`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`)
 
-1. **Stack** (stays running; car still 10 s after launch):
+1. **Stack** (stays running; keep the car still for 10 s after launch):
    ```bash
    ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
-   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.5 max_steer_rad:=0.30 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t3_erpm4630.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_t3_t2gain.yaml
+   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.5 max_steer_rad:=0.33 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t3_erpm4630.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_t3_t2gain.yaml
    ```
-   0.3 m/s instead: `max_speed_mps:=0.3` and `vesc_t3_erpm2780.yaml` (relaunch).
-2. **Checks, then runner** (one runner per command; the stack stays up):
+   - **0.3 m/s** (fallback first, or by choice): relaunch with `max_speed_mps:=0.3` and
+     `vesc_t3_erpm2780.yaml`.
+   - **Disarmed rehearsal (run 0, first):** the same launch with `enable_real_actuation:=false`.
+2. **Checks, then the runner** (one runner per command; the stack stays up; `q` ends each runner):
    ```bash
    ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
-   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t3_circle --speed 0.5 --steer 0.26 --t1-passed-confirmed --live
+   # run 0, disarmed: no --live. Check: m readout, arm refusals, gyro / RF2O / visibility values. The car does
+   # not move, so it ends with TURN_CHECK_FAILED: expected.
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t3_circle --speed 0.5 --steer 0.18 --t1-passed-confirmed
+   # runs 1-6, armed, in this order:
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t3_circle --speed 0.5 --steer 0.18 --t1-passed-confirmed --live
    ```
-   then `--steer -0.26`, `--steer 0.18`, `--steer -0.18` (q ends each runner).
-3. **Shadow inputs** (stays running; car still for its first 2 s):
+   Then repeat it with `--steer -0.18`, `--steer 0.26`, `--steer -0.31`, `--full-lock left` and
+   `--full-lock right` in place of `--steer 0.18`. Fallback: run `--speed 0.3` first on the 0.3 stack.
+3. **Shadow inputs** (stays running; keep the car still for its first 2 s):
    `python3 ~/f1tenth_uj/tools/real_car_tests/ekf_shadow_inputs.py`
 4. **C1 shadow EKF** (stays running):
    `ros2 run robot_localization ekf_node --ros-args -r __node:=ekf_real_shadow_c1 --params-file /home/ftenth/f1tenth_uj/config/real_car/ekf_real_shadow.yaml -r odometry/filtered:=/ekf_shadow/odom`
 5. **Record the shadow EKF** (stays running):
    `ros2 bag record -o ~/f1tenth_hw_evidence/real_car_tests/$(date +%Y%m%d_%H%M%S)_ekf_shadow_live/bag /ekf_shadow/odom /ekf_shadow/in/vesc /ekf_shadow/in/vesc_dw /ekf_shadow/in/imu /ekf_shadow/in/rf2o`
 
-Per run: place at the start mark, `m`, **hands off >= 2 s** (gyro bias = the 1 s before the start), `n`,
-hold SPACE. The runner brakes by itself after 2 gyro turns (`TURNS_DONE`, counted); any other stop is not
-counted (one counted run per command; up to 2 extra attempts). Stops you may see: `GEOFENCE` (circle much
-larger than planned), `TURN_CHECK_FAILED` (wrong direction / not turning), `CIRCLE_RF2O_STALE`,
-`CIRCLE_IMU_PROBLEM`, `MUX_LEFT_MANUAL_MODE` (mux gate), `HARD_TIME_LIMIT`. Shutdown: q, Ctrl-C 5, 4, 3, 1.
+Per run:
+1. Place the car at the start mark and press `m`.
+2. **Hands off for >= 2 s** (the gyro bias is the 1 s before the start).
+3. Press `n` and hold SPACE.
+
+The runner brakes by itself after 2 gyro turns (`TURNS_DONE`, counted). Any other stop is not counted (one
+counted run per command; up to 2 extra attempts). Stops you may see:
+- `GEOFENCE`: the circle is much larger than planned.
+- `TURN_CHECK_FAILED`: wrong direction, or not turning.
+- `CIRCLE_RF2O_STALE` or `CIRCLE_IMU_PROBLEM`: a sensor stream failed.
+- `MUX_LEFT_MANUAL_MODE`: the mux gate.
+- `HARD_TIME_LIMIT`.
+
+Shutdown order: q, then Ctrl-C in 5, 4, 3, 1.
 
 ## 4. Afterwards (reads bags only)
 
 ```bash
-python3 ~/f1tenth_uj/tools/real_car_tests/t3_analyze.py $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*_t3_circle_*_armed | head -4)
-for f in $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*_t3_circle_*_armed | head -4); do python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py "$f"; done
+python3 ~/f1tenth_uj/tools/real_car_tests/t3_analyze.py $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*_t3_circle_*_armed | head -6)
+for f in $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*_t3_circle_*_armed | head -6); do python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py "$f"; done
 ```
-`t3_analyze.py` finds the shadow recording that covers each run. Per run: yaw rate (gyro, and gyro / RF2O),
-v (C1 EKF / RF2O / VESC), R = v / yaw rate and R from circle fits (RF2O, EKF), real angle atan(0.26 / R) vs
-command and vs T2, ground gain per side, slip angle and vy, IMU y sign. `analyze.py` gives the brake stops.
+
+`t3_analyze.py` finds the shadow recording that covers each run.
+
+Main table (`--steer` runs), per run:
+- yaw rate (gyro, and gyro / RF2O);
+- speed (C1 EKF / RF2O / VESC);
+- R = v / yaw rate, and R from circle fits (RF2O, EKF);
+- the real angle atan(0.26 / R) vs the command and vs T2;
+- the ground gain per side;
+- slip angle and vy;
+- the IMU y sign.
+
+**FULL LOCK table:** per side, the real minimum radius, the real wheel angle vs the T2 angle at that clip,
+and the radius swept by the outer front corner.
+
+`analyze.py` gives the brake stops.

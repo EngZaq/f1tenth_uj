@@ -36,8 +36,8 @@ The stop logic is the T1b `StopLogic`, unchanged in behaviour, because that is w
 - A new nonzero request in `BRAKE_HOLD` or `RELEASED` returns to `DRIVE` on the same tick.
 - Brake only after a zero request, never while a speed is requested.
 - Servo: `servo_offset + servo_gain * steer`; stale `/drive` -> straight ahead.
-- Parameters come from `config/real_car/vehicle_params.yaml` (gain 8414, offset 0.320, servo gain
-  -0.50, brake 5 A, hold 2.0 s). This also removes the 0.361 offset still in
+- Parameters come from `config/real_car/vehicle_params.yaml` (gain 8414, offset 0.335 PROVISIONAL since 21 Nov, servo gain
+  -0.50 or the per-side gains of section 8, brake 5 A, hold 2.0 s). This also removes the 0.361 offset still in
   `src/f1tenth_bringup/config/ackermann_to_vesc.yaml` (F-17).
 - Start-up validation as in T1b: brake in (0, 10] A, hold in (0, 5] s, otherwise the node refuses to
   start. On exit: current 0 (best effort, not a safe stop).
@@ -116,3 +116,46 @@ without a T1 repeat.
 5. `teleop.launch.py` / `teleop_mapping.launch.py` / `vesc.launch.py` still use `ackermann_to_vesc` with
    speed 0 and `config/vesc.yaml` (`brake_max 200000`, `speed_max 10000`): switch them to the new
    converter, or mark them sensors/disarmed only?
+6. Per-side steering gains and radian limits in the converter (section 8): OK?
+7. VESC Tool timeout 250 ms + timeout brake current 5 A (section 9), set together with you: OK?
+
+## 8. Steering: per-side gains and radian limits (added 21 Nov, Moatasem)
+
+T2 (19 Nov, stand) shows the steering is **asymmetric in servo units, not at the wheels**:
+
+| | Servo travel from centre to the driving clip | Wheel angle there (T2) | Fitted gain (servo per rad) |
+|---|---|---|---|
+| Left | 0.335 -> 0.10 = **0.235** | 17.2 deg (0.2994 rad), R 0.84 m | **-0.874** |
+| Right | 0.335 -> 0.68 = **0.345** | 18.4 deg (0.3208 rad), R 0.78 m | **-1.062** |
+
+The wheels reach nearly the same angle on both sides; the servo needs ~47 % more travel to the right
+(servo horn off-centre on the spline + linkage geometry). One symmetric gain cannot be right on both
+sides. Today's -0.50 makes every steering command about half of what the wheels really do.
+
+Proposal for the converter (replaces `servo_offset + servo_gain * steer`):
+
+```
+steer = clamp(steer, -limit_right, +limit_left)        # radians, before the gain
+servo = offset + (gain_left if steer > 0 else gain_right) * steer
+servo = clamp(servo, 0.10, 0.68)                       # T2 driving clip, never past it
+```
+
+- `gain_left -0.874`, `gain_right -1.062`: T2 per-side fit, **to be confirmed by T3** (ground circles,
+  `t3_analyze.py` "ground gain" per side). The test converter `t1b_stop_converter.py` already has these
+  two parameters (T3 only).
+- `limit_left 0.27`, `limit_right 0.325` rad: the first angle that reaches each clip
+  (0.235 / 0.874 = 0.269, 0.345 / 1.062 = 0.325). They are the real per-side steering limits a planner or
+  controller should know; `vesc_to_odom` needs the same per-side inverse for its yaw rate.
+- Re-mounting the horn one spline tooth would make the servo more symmetric, but it is **optional** and
+  only worth doing together with the steering-play fix, because either one needs a T2 redo. The per-side
+  gains work with the horn as it is.
+
+## 9. VESC firmware timeout (added 21 Nov, Moatasem)
+
+The converter keeps the VESC from timing out while it runs (50 Hz). If the Jetson or the converter dies,
+only the VESC's own timeout stops the car. Today that releases the motor after ~1 s and lets it coast
+(24 Oct stand test). Moatasem's decision: **App Settings > General: `timeout_msec` 250, `timeout_brake_current`
+5.0 A**, after backing up the config (`T1_VESC_TOOL_CHECKLIST.md`) and noting the current values, set
+together with you. Verified on the stand with `run_test.py --test vesc_timeout_check` and
+`vesc_timeout_check.py` (converter killed with SIGKILL while the wheels spin; pass = drive current gone within
+0.40 s and a braking current). It matters for every future ground test, not only T3.

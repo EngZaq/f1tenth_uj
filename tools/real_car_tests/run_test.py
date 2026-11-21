@@ -77,6 +77,19 @@ PROFILES = {
         extra_repeats=2, post_zero_s=4.0, live_allowed=True, converter='t1b_stop_converter',
         stop_method='brake5A', circle=True, count_reason='TURNS_DONE',
         note='T3 ground circles: constant steering, brake 5 A after target_turns of gyro heading. 1 counted run.'),
+    # T5b (21 Nov): IMU noise with the motor running and the car NOT moving (stand), steady 0.5 m/s for 90 s,
+    # brake 5 A. Hands off the car >= 5 s before n (still reference). Analysis: t5_imu_analyze.py stand.
+    't5b_stand_imu': dict(
+        place='stand', steps=[0.5], steer=0.0, steady_s=90.0, repeats=1, extra_repeats=1, post_zero_s=4.0,
+        live_allowed=True, converter='t1b_stop_converter', stop_method='brake5A',
+        note='T5b, wheels off the ground: 0.5 m/s steady for 90 s (IMU vibration noise), brake 5 A. 1 run.'),
+    # VESC timeout check (21 Nov): stand, 0.5 m/s steady 20 s; during steady the operator kills the converter
+    # (pkill -9, vesc_driver keeps reporting) so the VESC gets no command: its own timeout must brake.
+    # Analysis: vesc_timeout_check.py (writes timeout_check.json; a pass unlocks T3 without the fallback rules).
+    'vesc_timeout_check': dict(
+        place='stand', steps=[0.5], steer=0.0, steady_s=20.0, repeats=1, extra_repeats=1, post_zero_s=4.0,
+        live_allowed=True, converter='t1b_stop_converter', stop_method='brake5A',
+        note='VESC timeout, wheels off the ground: 0.5 m/s, kill -9 the converter during steady. 1 run.'),
 }
 STEP_TOL = 1e-6
 SPEED_MAX_ROUNDING = 5.0  # ERPM: yaml values are rounded (4630 for 4627.7)
@@ -221,16 +234,38 @@ def sector_min(scan, half_width_deg):
 # around (0, side R_max). So one clear disk around the largest plausible circle covers every real radius
 # in [r_factor_min, r_factor_max] x L / tan(steer), and the same disk is the drive geofence.
 
-def t3_geometry(steer, t3, wheelbase, body_length, body_width, front_x):
-    """Clear-disk geometry in the start base_link frame (x forward, y left; + steer = left)."""
+def t3_geometry(steer, t3, wheelbase, body_length, body_width, front_x, extra_m=0.0):
+    """Clear-disk geometry in the start base_link frame (x forward, y left; + steer = left). steer = the
+    EXPECTED real angle (the command, or for full lock the T2 angle at the clip). extra_m widens the clear
+    disk only (VESC timeout fallback), not the geofence."""
     side = 1.0 if steer > 0 else -1.0
     r_nom = wheelbase / math.tan(abs(steer))
     r_min, r_max = r_nom * float(t3['r_factor_min']), r_nom * float(t3['r_factor_max'])
     hw, rear_x = body_width / 2.0, front_x - body_length
     reach = max(math.hypot(r_max + hw, front_x), math.hypot(r_max + hw, rear_x))   # outer body corner
-    clear_r = reach + float(t3['clear_margin_m'])
+    clear_r = reach + float(t3['clear_margin_m']) + float(extra_m)
     return dict(side=side, r_nom=r_nom, r_min=r_min, r_max=r_max, center=(0.0, side * r_max), reach=reach,
-                clear_r=clear_r, diameter_m=2.0 * clear_r, inner_free_r=max(0.0, r_min - hw))
+                clear_r=clear_r, diameter_m=2.0 * clear_r, inner_free_r=max(0.0, r_min - hw), extra_m=extra_m)
+
+
+def t3_command(t3, steering, steer=None, full_lock=None):
+    """T3 command -> (commanded steer, expected real angle). --steer: within the per-side radian limits;
+    --full-lock left|right: the per-side limit itself (converter clamp -> servo exactly at the clip), expected
+    angle = the T2 angle at that clip (steering.max_left_rad / max_right_rad). SystemExit on a bad command."""
+    lo = float(t3['steer_min_rad'])
+    lim = {1.0: float(t3['steer_max_left_rad']), -1.0: float(t3['steer_max_right_rad'])}
+    if (steer is None) == (full_lock is None):
+        raise SystemExit('t3_circle needs exactly one of --steer (+ = left) or --full-lock left|right')
+    if full_lock is not None:
+        if full_lock not in ('left', 'right'):
+            raise SystemExit('--full-lock must be left or right')
+        side = 1.0 if full_lock == 'left' else -1.0
+        return side * lim[side], float(steering['max_left_rad' if side > 0 else 'max_right_rad'])
+    side = 1.0 if steer > 0 else -1.0
+    if not (math.isfinite(steer) and lo - 1e-9 <= abs(steer) <= lim[side] + 1e-9):
+        raise SystemExit('t3_circle needs --steer in +%.2f..+%.3f (left) or -%.2f..-%.3f (right) rad'
+                         % (lo, lim[1.0], lo, lim[-1.0]))
+    return float(steer), float(steer)
 
 
 def scan_points_base(scan, laser_x):
@@ -358,6 +393,45 @@ def step_mismatch(speed, mux_cap, speed_max, gain, margin):
     return None
 
 
+def timeout_verified(root):
+    """VESC firmware timeout verified on the stand: an armed vesc_timeout_check run whose timeout_check.json
+    (vesc_timeout_check.py) passed. -> (ok, reason)."""
+    seen = []
+    for f in sorted(Path(root).expanduser().glob('*_vesc_timeout_check_*_armed/timeout_check.json'), reverse=True):
+        try:
+            res = json.loads(f.read_text())
+        except ValueError:
+            continue
+        if res.get('pass') is True:
+            return True, 'VESC timeout verified in %s' % f.parent.name
+        seen.append('%s: %s' % (f.parent.name, res.get('verdict', 'not passed')))
+    return False, 'VESC timeout NOT verified (%s)' % ('; '.join(seen[:3]) or 'no analysed vesc_timeout_check run')
+
+
+def t3_slow_gate(root, prof, slow=0.3):
+    """VESC-timeout fallback: 0.5 m/s only after a counted (TURNS_DONE) live run of the same command at
+    `slow` m/s. -> (ok, reason)."""
+    if prof['speed'] <= slow + STEP_TOL:
+        return True, '%.2f m/s is the fallback speed' % prof['speed']
+    for info_path in sorted(Path(root).expanduser().glob('*_t3_circle_v%.2f_*_armed/run_info.json' % slow)):
+        try:
+            info = json.loads(info_path.read_text())
+        except ValueError:
+            continue
+        pr = info.get('profile', {})
+        if (not info.get('live') or pr.get('full_lock') != prof.get('full_lock')
+                or abs(float(pr.get('steer', 99)) - float(prof['steer'])) > 1e-6):
+            continue
+        ev = info_path.parent / 'runner_events.csv'
+        if ev.exists():
+            with open(ev) as fp:
+                if any(e['event'] == 'ZERO_COMMAND' and e['detail'].startswith('TURNS_DONE')
+                       for e in csv.DictReader(fp)):
+                    return True, 'counted %.2f m/s run of this command: %s' % (slow, info_path.parent.name)
+    return False, ('VESC timeout not verified: %.2f m/s needs a counted %.2f m/s run of the same command first'
+                   % (prof['speed'], slow))
+
+
 def step_gate(root, test, method, speed, steps, repeats):
     """Step N+1 only after step N passed: an analysed, armed run of the same test and stop
     method at the previous speed with >= `repeats` measured stops, none rebounding
@@ -425,8 +499,10 @@ class Machine:
             self.t3 = vp.get(p, 't3')
             veh = vp.get(p, 'vehicle')
             self.wheelbase = float(veh['wheelbase_m'])
-            self.geom = t3_geometry(float(prof['steer']), self.t3, self.wheelbase, float(veh['body_length_m']),
-                                    float(veh['body_width_m']), float(veh['front_bumper_x_m']))
+            self.expect_steer = float(prof.get('expect_steer', prof['steer']))   # full lock: T2 angle at the clip
+            self.geom = t3_geometry(self.expect_steer, self.t3, self.wheelbase, float(veh['body_length_m']),
+                                    float(veh['body_width_m']), float(veh['front_bumper_x_m']),
+                                    float(prof.get('clear_extra_m', 0.0)))
             self.target_rad = 2 * math.pi * float(self.t3['target_turns'])
             self.min_visible = 0.75 + float(self.t3['visibility_margin'])   # updated from the mux status
         self.ground_ok = ground_ok
@@ -511,10 +587,13 @@ class Machine:
 
     def circle_text(self, w):
         g, c, v = self.geom, w.get('t3_clear'), w.get('t3_vis')
-        return ('circle %s steer %+.2f rad: R nominal %.2f m (assumed %.2f..%.2f), clear disk %.2f m diameter, centre '
+        what = ('FULL LOCK (command %+.3f rad, expected %+.3f)' % (self.prof['steer'], self.expect_steer)
+                if self.prof.get('full_lock') else 'steer %+.2f rad' % self.prof['steer'])
+        fb = (' incl. +%.1f m VESC-timeout FALLBACK' % g['extra_m']) if g.get('extra_m') else ''
+        return ('circle %s %s: R nominal %.2f m (assumed %.2f..%.2f), clear disk %.2f m diameter%s, centre '
                 '%.2f m to the %s | clearance %s | mux visibility min %s (needs >= %.2f) | RF2O %s' % (
-                    'LEFT' if g['side'] > 0 else 'RIGHT', self.prof['steer'], g['r_nom'], g['r_min'], g['r_max'],
-                    g['diameter_m'], g['r_max'], 'left' if g['side'] > 0 else 'right',
+                    'LEFT' if g['side'] > 0 else 'RIGHT', what, g['r_nom'], g['r_min'], g['r_max'],
+                    g['diameter_m'], fb, g['r_max'], 'left' if g['side'] > 0 else 'right',
                     '-' if c is None else '%+.2f m (worst at %s deg)' % (c['min_m'], '-' if c['bearing_deg'] is None
                                                                        else '%.0f' % c['bearing_deg']),
                     '-' if v is None else '%.2f at heading %.0f deg' % (v['min_fraction'], v['heading_deg']),
@@ -570,7 +649,7 @@ class Machine:
             return 'GEOFENCE(%.2f m outside the largest circle)' % out
         side = self.geom['side']
         if elapsed >= float(t3['turn_check_s']) and v > 0.1:
-            expect = v * math.tan(abs(float(self.prof['steer']))) / self.wheelbase
+            expect = v * math.tan(abs(self.expect_steer)) / self.wheelbase
             mean = sum(x for _, x in self.wz_hist) / len(self.wz_hist)
             if side * mean < float(t3['turn_check_fraction']) * expect:
                 return 'TURN_CHECK_FAILED(yaw rate %+.3f rad/s, expected %+.3f)' % (mean, side * expect)
@@ -697,7 +776,8 @@ class Machine:
                 self.t_drive = now
                 self.steady_logged = False
                 self.repeats.append(dict(repeat=self.repeat, target_mps=self.prof['speed'],
-                                         steer_rad=self.prof['steer'], start_wall=time.time()))
+                                         steer_rad=self.prof['steer'], full_lock=self.prof.get('full_lock'),
+                                         start_wall=time.time()))
                 detail = 'target=%.2f m/s' % self.prof['speed']
                 if self.brake_at_range:
                     # Time limit = expected time to the brake point + slack. A slower car (gain
@@ -962,17 +1042,27 @@ def self_test():
     assert sd.events[-1]['detail'].startswith('MUX_LEFT_MANUAL_MODE') and sd.steady_count == 0
 
     # ---- T3 (t3_circle): steer validation, geometry, clearance, visibility, geofence, drive stops
-    for bad_steer in (None, 0.04, 0.31, float('nan')):
+    # per-side limits (21 Nov): left <= 0.27, right <= 0.325; exactly one of --steer / --full-lock
+    for bad_steer, lock_ in ((None, None), (0.04, None), (0.28, None), (-0.33, None), (float('nan'), None),
+                             (0.2, 'left'), (None, 'up')):
         try:
-            resolve_profile('t3_circle', 0.5, bad_steer, p)
+            resolve_profile('t3_circle', 0.5, bad_steer, p, lock_)
         except SystemExit:
             continue
-        raise AssertionError('t3 resolved steer %s' % bad_steer)
-    try:
-        resolve_profile('t4_straight', 0.5, 0.1, p)
-        raise AssertionError('t4 accepted --steer')
-    except SystemExit:
-        pass
+        raise AssertionError('t3 resolved steer %s / full lock %s' % (bad_steer, lock_))
+    for ok_steer in (0.27, -0.31, -0.325, 0.05):
+        pr_ = resolve_profile('t3_circle', 0.5, ok_steer, p)
+        assert pr_['steer'] == ok_steer == pr_['expect_steer'] and pr_['full_lock'] is None
+    fl_l, fl_r = (resolve_profile('t3_circle', 0.3, None, p, s_) for s_ in ('left', 'right'))
+    assert (fl_l['steer'], fl_r['steer']) == (0.27, -0.325), (fl_l['steer'], fl_r['steer'])
+    assert (fl_l['expect_steer'], fl_r['expect_steer']) == (float(vp.get(p, 'steering.max_left_rad')),
+                                                            float(vp.get(p, 'steering.max_right_rad')))
+    for t_, st_, fl_ in (('t4_straight', 0.1, None), ('t4_straight', None, 'left')):
+        try:
+            resolve_profile(t_, 0.5, st_, p, fl_)
+            raise AssertionError('t4 accepted --steer / --full-lock')
+        except SystemExit:
+            pass
     t3p = vp.get(p, 't3')
     veh = vp.get(p, 'vehicle')
     L = float(veh['wheelbase_m'])
@@ -989,6 +1079,8 @@ def self_test():
             assert math.hypot(px - g3['center'][0], py - g3['center'][1]) <= g3['r_max'] + 1e-9
     g26 = t3_geometry(0.26, t3p, L, *body)
     assert 3.2 < g26['diameter_m'] < 3.4, g26                       # hall: ~3.3 m for +/-0.26 rad
+    g26f = t3_geometry(0.26, t3p, L, *body, extra_m=1.0)            # VESC-timeout fallback: disk only
+    assert abs(g26f['diameter_m'] - g26['diameter_m'] - 2.0) < 1e-9 and g26f['r_max'] == g26['r_max']
 
     class Scan3:
         angle_min, angle_max = -math.pi, math.pi
@@ -1025,10 +1117,11 @@ def self_test():
                      t3_clear=dict(min_m=clear, bearing_deg=45.0, n=1440),
                      t3_vis=dict(min_fraction=vis, heading_deg=10.0), **kw)
 
-    def circle_run(steer, r_true_factor=1.0, turn_sign=1.0, fail_at=None, fail_kw=None, limit=80.0):
+    def circle_run(steer, r_true_factor=1.0, turn_sign=1.0, fail_at=None, fail_kw=None, limit=80.0, lock=None):
         """Kinematic car on a circle (r_true = factor x nominal, turning turn_sign x commanded side);
         raw gz = -(yaw rate) + bias (IMU z down). Returns (machine, zero reason, elapsed)."""
-        prof3 = resolve_profile('t3_circle', 0.5, steer, p)
+        prof3 = resolve_profile('t3_circle', 0.5, steer, p, lock)
+        steer = prof3['steer']
         m3 = Machine(prof3, p, live=False, ground_ok=True)
         x, y, yaw, bias = 0.0, 0.0, 0.0, 0.003
         m3.step(0.0, 'n', False, c3world((x, y, yaw), bias))
@@ -1063,6 +1156,13 @@ def self_test():
     assert m3.hard_s > k and abs(m3.repeats[-1]['gyro_bias'] - 0.003) < 1e-12
     m3, why, k = circle_run(-0.26)
     assert why.startswith('TURNS_DONE') and m3.steady_count == 1                       # right circle
+    for lk_ in ('left', 'right'):                     # full lock: geometry + turn check from the T2 angle
+        m3, why, k = circle_run(None, lock=lk_)
+        assert why.startswith('TURNS_DONE') and m3.steady_count == 1, (lk_, why)
+        assert abs(m3.geom['r_nom'] - L / math.tan(abs(m3.expect_steer))) < 1e-12 and m3.expect_steer != m3.prof['steer']
+        assert m3.repeats[-1]['full_lock'] == lk_
+    m3, why, k = circle_run(None, lock='left', r_true_factor=1.6)                     # lock much weaker: fence
+    assert why.startswith('GEOFENCE') and m3.steady_count == 0, why
     m3, why, k = circle_run(0.26, turn_sign=-1.0)                                      # turns the wrong way
     # wrong way: the circle on the other side leaves the disk first (GEOFENCE ~1.5 s), the turn check by 2 s
     assert why.startswith(('GEOFENCE', 'TURN_CHECK_FAILED')) and k < 2.1 and m3.steady_count == 0, (why, k)
@@ -1086,6 +1186,12 @@ def self_test():
     a3 = Machine(pr3, p, live=False, ground_ok=True)
     a3.step(0.0, 'm', False, c3world((0, 0, 0), 0.003))
     assert 'clear disk 3.31 m diameter' in a3.events[-1]['detail'], a3.events[-1]['detail']
+    a3f = Machine(dict(pr3, clear_extra_m=1.0), p, live=False, ground_ok=True)
+    a3f.step(0.0, 'm', False, c3world((0, 0, 0), 0.003))
+    assert 'clear disk 5.31 m diameter incl. +1.0 m VESC-timeout FALLBACK' in a3f.events[-1]['detail']
+    a3l = Machine(resolve_profile('t3_circle', 0.5, None, p, 'right'), p, live=False, ground_ok=True)
+    a3l.step(0.0, 'm', False, c3world((0, 0, 0), 0.003))
+    assert 'FULL LOCK (command -0.325 rad, expected -0.321)' in a3l.events[-1]['detail'], a3l.events[-1]['detail']
     a3.step(0.0, 'n', False, c3world((0, 0, 0), 0.003, sector=0.85))   # the T4 mux-sector rule still applies
     assert a3.events[-1]['detail'].startswith('MUX_SECTOR_OBJECT'), a3.events[-1]
     t3c = dict(servo_gain_left=-0.874, servo_gain_right=-1.062, servo_offset=0.335)
@@ -1105,15 +1211,76 @@ def self_test():
         except SystemExit as e:
             assert why_ in str(e), (why_, str(e))
     try:
-        t3_precheck(resolve_profile('t3_circle', 0.5, 0.30, p), p, 0.30, t3c, 0.335, wide)  # needs 0.073 < 0.10
+        t3_precheck(resolve_profile('t3_circle', 0.5, 0.27, p), p, 0.33, t3c, 0.335, wide)  # needs 0.099 < 0.10
         raise AssertionError('servo below the converter clip accepted')
     except SystemExit as e:
-        assert 'converter clip' in str(e)
+        assert 'converter clip' in str(e) and '--full-lock' in str(e)
+    ci = t3_precheck(resolve_profile('t3_circle', 0.5, -0.31, p), p, 0.33, t3c, 0.335, wide)   # right ~90 %
+    assert abs(ci['servo_planned'] - 0.66422) < 1e-9 and ci['full_lock'] is None
+    for lk_, clip_ in (('left', 0.10), ('right', 0.68)):          # full lock: servo exactly at the clip
+        ci = t3_precheck(resolve_profile('t3_circle', 0.3, None, p, lk_), p, 0.33, t3c, 0.335, wide)
+        assert ci['servo_planned'] == clip_ and ci['full_lock'] == lk_, ci['servo_planned']
+        assert abs(ci['geometry']['r_nom'] - L / math.tan(abs(ci['expect_steer_rad']))) < 1e-12
+    try:                                                           # lock command that does not reach the clip
+        t3_precheck(dict(resolve_profile('t3_circle', 0.3, None, p, 'left'), steer=0.25), p, 0.33, t3c, 0.335, wide)
+        raise AssertionError('full lock below the clip accepted')
+    except SystemExit as e:
+        assert 'not the clip' in str(e), str(e)
+    try:
+        t3_precheck(resolve_profile('t3_circle', 0.3, None, p, 'left'), p, 0.33, t3c, 0.335,
+                    dict(servo_min=0.27, servo_max=0.37))
+        raise AssertionError('full lock with the T4 VESC clip accepted')
+    except SystemExit as e:
+        assert 'vesc_driver clip' in str(e)
+    # VESC timeout evidence + fallback 0.3 m/s gate (folders as the runner / vesc_timeout_check.py write them)
+    import tempfile
+    with tempfile.TemporaryDirectory() as tdir:
+        root = Path(tdir)
+        assert not timeout_verified(root)[0]
+        d = root / '20261122_100000_vesc_timeout_check_v0.50_brake5A_erpmmax4630_armed'
+        d.mkdir()
+        (d / 'timeout_check.json').write_text(json.dumps({'pass': False, 'verdict': 'FAIL onset 1.02 s'}))
+        ok_, why_ = timeout_verified(root)
+        assert not ok_ and 'FAIL onset 1.02 s' in why_, why_
+        d2 = root / '20261122_101000_vesc_timeout_check_v0.50_brake5A_erpmmax4630_armed'
+        d2.mkdir()
+        (d2 / 'timeout_check.json').write_text(json.dumps({'pass': True}))
+        assert timeout_verified(root)[0]
+        p18 = resolve_profile('t3_circle', 0.5, 0.18, p)
+        assert not t3_slow_gate(root, p18)[0] and t3_slow_gate(root, resolve_profile('t3_circle', 0.3, 0.18, p))[0]
+
+        def t3run(name, steer, lock, reason, live=True):
+            d_ = root / name
+            d_.mkdir()
+            (d_ / 'run_info.json').write_text(json.dumps(dict(live=live, profile=dict(steer=steer, full_lock=lock))))
+            with open(d_ / 'runner_events.csv', 'w', newline='') as fp:
+                wr = csv.DictWriter(fp, ['wall', 'mono', 'repeat', 'state', 'event', 'detail'])
+                wr.writeheader()
+                wr.writerow(dict(wall=1, mono=1, repeat=1, state='STOPPING', event='ZERO_COMMAND', detail=reason))
+        t3run('1_t3_circle_v0.30_brake5A_erpmmax2780_armed', 0.18, None, 'GEOFENCE(0.3 m outside)')  # not counted
+        t3run('2_t3_circle_v0.30_brake5A_erpmmax2780_armed', -0.18, None, 'TURNS_DONE(gyro 720 deg)')  # other side
+        t3run('3_t3_circle_v0.30_brake5A_erpmmax2780_armed', 0.18, None, 'TURNS_DONE(gyro 720 deg)', live=False)
+        assert not t3_slow_gate(root, p18)[0]
+        t3run('4_t3_circle_v0.30_brake5A_erpmmax2780_armed', 0.18, None, 'TURNS_DONE(gyro 720 deg)')
+        assert t3_slow_gate(root, p18)[0]
+        assert not t3_slow_gate(root, resolve_profile('t3_circle', 0.5, None, p, 'left'))[0]
+        t3run('5_t3_circle_v0.30_brake5A_erpmmax2780_armed', 0.27, 'left', 'TURNS_DONE(gyro 720 deg)')
+        assert t3_slow_gate(root, resolve_profile('t3_circle', 0.5, None, p, 'left'))[0]
+        assert not t3_slow_gate(root, resolve_profile('t3_circle', 0.5, 0.27, p))[0]     # --steer 0.27 != lock
+    # T5b / VESC timeout check: stand profiles at the T1b-passed 0.5 m/s, brake 5 A
+    for t_, st_ in (('t5b_stand_imu', 90.0), ('vesc_timeout_check', 20.0)):
+        pr_ = resolve_profile(t_, 0.5, None, p)
+        assert pr_['place'] == 'stand' and pr_['steady_s'] == st_ and pr_['stop_method'] == 'brake5A'
+        m5 = Machine(pr_, p, live=False)
+        assert abs(m5.hard_s - (1.0 + st_ + 0.5)) < 1e-9 and not m5.ground
     print('PASS: T3 circle: --steer limits, nested clear disk, clearance (box, own body), visibility gap,')
     print('      geofence; drives: 2 gyro turns counted (L/R, bias removed), wrong direction / straight ->')
     print('      GEOFENCE or TURN_CHECK_FAILED by 2.1 s, too large -> GEOFENCE, RF2O stale, IMU fault, mux STOP')
     print('      backstop; arm refusals (not clear, low visibility, RF2O stale, no gyro, mux sector object);')
     print('      pre-run refusals (steer cap, converter gains, converter clip, VESC clip / T4 yaml).')
+    print('      21 Nov: per-side limits 0.27 / 0.325, --full-lock (servo exactly 0.10 / 0.68, geometry and turn')
+    print('      check from the T2 angle), fallback disk +1 m, VESC timeout evidence, 0.3-first gate; T5b /')
+    print('      vesc_timeout_check stand profiles.')
 
     # ---- KILL: any key but SPACE while arming / armed / driving / stopping -> zero, latched until n
     def armed(m, front=2.8):
@@ -1547,18 +1714,16 @@ def say(text):
 
 # ---------------------------------------------------------------- ROS
 
-def resolve_profile(test, speed, steer=None, p=None):
+def resolve_profile(test, speed, steer=None, p=None, full_lock=None):
     """Profile with its speed fixed: stepped profiles need --speed equal to one step; circle profiles
-    need --steer (+ = left) within t3.steer_min_rad..steer_max_rad."""
+    need --steer (+ = left, per-side limits t3.steer_max_left_rad / steer_max_right_rad) or --full-lock."""
     prof = dict(PROFILES[test])
     if prof.get('circle'):
-        t3 = vp.get(p or vp.load(), 't3')
-        lo, hi = float(t3['steer_min_rad']), float(t3['steer_max_rad'])
-        if steer is None or not (math.isfinite(steer) and lo - 1e-9 <= abs(steer) <= hi + 1e-9):
-            raise SystemExit('%s needs --steer with |steer| in %.2f..%.2f rad (+ = left)' % (test, lo, hi))
-        prof['steer'] = float(steer)
-    elif steer is not None:
-        raise SystemExit('%s has a fixed steering angle; do not pass --steer' % test)
+        p = p or vp.load()
+        prof['steer'], prof['expect_steer'] = t3_command(vp.get(p, 't3'), vp.get(p, 'steering'), steer, full_lock)
+        prof['full_lock'] = full_lock
+    elif steer is not None or full_lock is not None:
+        raise SystemExit('%s has a fixed steering angle; do not pass --steer / --full-lock' % test)
     if 'steps' in prof:
         if speed is None or not any(abs(speed - s) <= STEP_TOL for s in prof['steps']):
             raise SystemExit('%s needs --speed, one of %s' % (test, prof['steps']))
@@ -1581,7 +1746,15 @@ def run(args):
         VescStateStamped = None
 
     p = vp.load(args.params)
-    prof = resolve_profile(args.test, args.speed, args.steer, p)
+    prof = resolve_profile(args.test, args.speed, args.steer, p, args.full_lock)
+    if prof.get('circle'):
+        # VESC timeout fallback (21 Nov): until a passed vesc_timeout_check, the clear disk grows by
+        # t3.fallback_extra_m and 0.5 m/s needs a counted 0.3 m/s run of the same command (drive_session).
+        ok, why = timeout_verified(args.out_root or vp.evidence_root())
+        prof['vesc_timeout'] = dict(verified=ok, reason=why)
+        prof['clear_extra_m'] = 0.0 if ok else float(vp.get(p, 't3.fallback_extra_m'))
+        say(why + ('' if ok else ': FALLBACK rules: clear disk +%.1f m, 0.3 m/s first, spotter outside the disk'
+                   % prof['clear_extra_m']))
     if args.live and not prof['live_allowed']:
         raise SystemExit('profile %s never runs with real actuation' % args.test)
     if prof['place'] == 'ground' and not args.t1_passed_confirmed:
@@ -1594,7 +1767,8 @@ def run(args):
     laser_x = float(vp.get(p, 'lidar.x_m'))
     veh = vp.get(p, 'vehicle')
     body = (float(veh['body_length_m']), float(veh['body_width_m']), float(veh['front_bumper_x_m']))
-    t3_geom = (t3_geometry(prof['steer'], vp.get(p, 't3'), float(veh['wheelbase_m']), *body)
+    t3_geom = (t3_geometry(prof['expect_steer'], vp.get(p, 't3'), float(veh['wheelbase_m']), *body,
+                           extra_m=prof['clear_extra_m'])
                if prof.get('circle') else None)
 
     class RunnerNode(Node):
@@ -1727,15 +1901,16 @@ def run(args):
 
 
 def t3_precheck(prof, p, steer_cap, converter_params, base_off, clip):
-    """T3 refusals before anything is armed (SystemExit with the fix): mux steer cap <= t3.steer_max_rad,
-    converter per-side gains = the T3 values, planned servo inside the converter clip (not clamped) and
-    inside the vesc_driver servo clip. -> circle info for run_info.json."""
+    """T3 refusals before anything is armed (SystemExit with the fix): mux steer cap <= t3.mux_cap_max_rad,
+    converter per-side gains = the T3 values, planned servo inside the vesc_driver servo clip and, for a
+    --steer run, inside the converter clip (not clamped: the command is an angle); for --full-lock exactly
+    at the converter clip of that side (the clamp is the point). -> circle info for run_info.json."""
     import t1b_stop_converter as conv
     t3, veh = vp.get(p, 't3'), vp.get(p, 'vehicle')
-    steer = float(prof['steer'])
-    if steer_cap > float(t3['steer_max_rad']) + 1e-9:
-        raise SystemExit('t3_circle: mux max_steer_rad %.2f > t3.steer_max_rad %.2f (launch max_steer_rad:=0.30)'
-                         % (steer_cap, float(t3['steer_max_rad'])))
+    steer, lock = float(prof['steer']), prof.get('full_lock')
+    if steer_cap > float(t3['mux_cap_max_rad']) + 1e-9:
+        raise SystemExit('t3_circle: mux max_steer_rad %.2f > t3.mux_cap_max_rad %.2f (launch max_steer_rad:=%.2f)'
+                         % (steer_cap, float(t3['mux_cap_max_rad']), float(t3['mux_cap_max_rad'])))
     gl, gr = converter_params.get('servo_gain_left'), converter_params.get('servo_gain_right')
     if (gl is None or gr is None or abs(float(gl) - float(t3['servo_gain_left'])) > 1e-6
             or abs(float(gr) - float(t3['servo_gain_right'])) > 1e-6):
@@ -1746,17 +1921,26 @@ def t3_precheck(prof, p, steer_cap, converter_params, base_off, clip):
     off = float(converter_params.get('servo_offset') or base_off)
     gside = float(gl) if steer > 0 else float(gr)
     servo = conv.servo_command(off, float(gl), float(gr), steer)
-    if abs(servo - (off + gside * steer)) > 1e-9:
-        raise SystemExit('t3_circle: steer %+.2f rad needs servo %.3f, outside the converter clip %s: '
-                         'choose a smaller --steer' % (steer, off + gside * steer, conv.SERVO_DRIVE_CLIP))
+    linear = off + gside * steer
+    if lock:
+        clip_side = conv.SERVO_DRIVE_CLIP[0] if steer > 0 else conv.SERVO_DRIVE_CLIP[1]
+        if abs(servo - clip_side) > 1e-9:
+            raise SystemExit('t3_circle --full-lock %s: steer %+.3f rad gives servo %.4f, not the clip %.2f '
+                             '(t3.steer_max_*_rad / converter gains disagree)' % (lock, steer, servo, clip_side))
+    elif abs(servo - linear) > 1e-9:
+        raise SystemExit('t3_circle: steer %+.3f rad needs servo %.4f, outside the converter clip %s: '
+                         'choose a smaller --steer, or --full-lock for the clip itself'
+                         % (steer, linear, conv.SERVO_DRIVE_CLIP))
     if (len(clip) < 2 or None in clip.values()
             or not (float(clip['servo_min']) - 1e-9 <= servo <= float(clip['servo_max']) + 1e-9)):
         raise SystemExit('t3_circle: planned servo %.3f outside the vesc_driver clip %s (launch '
                          'vesc_yaml:=.../vesc_t3_erpm<N>.yaml)' % (servo, clip))
-    return dict(steer_rad=steer, servo_planned=servo, servo_offset=off, servo_gain_side=gside,
-                vesc_servo_clip=clip, t3=t3,
-                geometry=t3_geometry(steer, t3, float(veh['wheelbase_m']), float(veh['body_length_m']),
-                                     float(veh['body_width_m']), float(veh['front_bumper_x_m'])))
+    expect = float(prof.get('expect_steer', steer))
+    return dict(steer_rad=steer, full_lock=lock, expect_steer_rad=expect, servo_planned=servo, servo_offset=off,
+                servo_gain_side=gside, vesc_servo_clip=clip, t3=t3, vesc_timeout=prof.get('vesc_timeout'),
+                geometry=t3_geometry(expect, t3, float(veh['wheelbase_m']), float(veh['body_length_m']),
+                                     float(veh['body_width_m']), float(veh['front_bumper_x_m']),
+                                     float(prof.get('clear_extra_m', 0.0))))
 
 
 def drive_session(args, p, prof, r, node):
@@ -1816,10 +2000,17 @@ def drive_session(args, p, prof, r, node):
         circle_info = t3_precheck(prof, p, steer_cap, converter_params, base_off,
                                   node.get_params('vesc_driver', ['servo_min', 'servo_max']))
         g = circle_info['geometry']
-        say('T3 circle %s %+.2f rad -> servo %.3f; R nominal %.2f m; clear disk %.2f m diameter, centre %.2f m '
-            'to the %s of the start' % ('LEFT' if prof['steer'] > 0 else 'RIGHT', prof['steer'],
-                                        circle_info['servo_planned'], g['r_nom'], g['diameter_m'], g['r_max'],
-                                        'left' if prof['steer'] > 0 else 'right'))
+        say('T3 circle %s %s%+.3f rad -> servo %.3f; R nominal %.2f m; clear disk %.2f m diameter%s, centre %.2f m '
+            'to the %s of the start' % ('LEFT' if prof['steer'] > 0 else 'RIGHT',
+                                        'FULL LOCK ' if prof.get('full_lock') else '', prof['steer'],
+                                        circle_info['servo_planned'], g['r_nom'], g['diameter_m'],
+                                        ' (incl. fallback +%.1f m)' % g['extra_m'] if g['extra_m'] else '',
+                                        g['r_max'], 'left' if prof['steer'] > 0 else 'right'))
+        if args.live and not prof['vesc_timeout']['verified']:
+            ok, why = t3_slow_gate(args.out_root or vp.evidence_root(), prof)
+            if not ok:
+                raise SystemExit('T3 fallback gate: ' + why)
+            say('T3 fallback gate: ' + why)
     gate = 'not a stepped profile'
     if 'steps' in prof:
         bad = step_mismatch(prof['speed'], cap, speed_max, gain, float(vp.get(p, 'caps.vesc_speed_max_margin')))
@@ -2004,6 +2195,8 @@ def main():
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--steer', type=float, help='t3_circle: constant steering angle, rad (+ = left)')
+    ap.add_argument('--full-lock', choices=['left', 'right'],
+                    help='t3_circle: servo exactly at the T2 driving clip of that side (minimum radius)')
     ap.add_argument('--speed', type=float, help='stepped profiles (t1_stop, t1b_stop, t4_straight): this step, m/s')
     ap.add_argument('--shutdown-probe', choices=['normal', 'systemexit', 'keyboardinterrupt'],
                     help=argparse.SUPPRESS)

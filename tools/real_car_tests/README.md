@@ -96,16 +96,24 @@ steer cap). Runner: `run_test.py --test t4_straight --speed 0.5 --t1-passed-conf
 ## T3: constant-steering circles on the ground (`t3_circle`, prepared 21 Nov)
 
 Hall checklist, commands and decisions: `docs/real_car/T3_HALL_CHECKLIST.md`. Values: `vehicle_params.yaml t3`.
-Stack: as T4 plus `max_steer_rad:=0.30`, `vesc_t3_erpm4630.yaml` (or `2780` for 0.3 m/s; servo clip 0.10-0.68)
+Stack: as T4 plus `max_steer_rad:=0.33`, `vesc_t3_erpm4630.yaml` (or `2780` for 0.3 m/s; servo clip 0.10-0.68)
 and `converter_params_file:=config/real_car/t1b_converter_t3_t2gain.yaml` (T2 per-side gains -0.874 / -1.062,
 centre 0.335; the converter now clamps its servo output to 0.10-0.68). Runner:
-`run_test.py --test t3_circle --speed 0.5 --steer <+/-rad> --t1-passed-confirmed [--live]`.
+`run_test.py --test t3_circle --speed 0.5 (--steer <+/-rad> | --full-lock left|right) --t1-passed-confirmed [--live]`.
 
-- **Pre-run refusals:** mux steer cap > 0.30, converter gains not the T3 values, planned servo outside the
-  converter clip (e.g. +0.30 rad -> 0.073) or the vesc_driver clip (a T4 yaml).
+- **Commands (21 Nov evening):** `--steer` within the per-side limits +0.05..+0.27 / -0.05..-0.325 rad (the
+  first angles that reach the servo clips 0.10 / 0.68); `--full-lock left|right` commands exactly that limit,
+  so the converter clamp sends the clip itself (real minimum radius). Full lock geometry and turn check use the
+  T2 angle at the clip (`steering.max_left_rad` / `max_right_rad`).
+- **Pre-run refusals:** mux steer cap > `t3.mux_cap_max_rad` 0.33, converter gains not the T3 values, a
+  `--steer` servo the converter would clamp (e.g. +0.27 -> 0.099: use `--full-lock`), a full lock that is
+  not exactly at the clip, or a servo outside the vesc_driver clip (a T4 yaml).
+- **VESC timeout fallback:** without a passed `vesc_timeout_check` (`timeout_check.json`, see below) the clear
+  disk grows by `t3.fallback_extra_m` (1 m radius) and, live, 0.5 m/s needs a counted (`TURNS_DONE`) 0.3 m/s
+  run of the same command (`--steer` value or `--full-lock` side) first.
 - **Clear disk:** circles from the same start and heading are nested, so one disk around the largest plausible
-  circle (1.25 x L / tan(steer); smallest 0.8 x) + body corner + 0.30 m covers them all: +/-0.26 rad 3.31 m,
-  +/-0.18 4.42 m, +/-0.15 5.14 m diameter. Arm refused if any LiDAR return (car body excluded) is inside it.
+  circle (1.25 x L / tan(steer); smallest 0.8 x) + body corner + 0.30 m covers them all: +/-0.18 rad 4.42 m,
+  +0.26 3.31 m, -0.31 2.91 m, full lock 2.98 / 2.84 m diameter (fallback: +2 m each). Arm refused if any LiDAR return (car body excluded) is inside it.
 - **Mux visibility:** arm refused if, for any heading of the circle, the +/-20 deg window has fewer finite returns
   than the mux `manual_min_front_valid` + 0.05. The mux gate itself is unchanged and stays the backstop.
 - **Drive stops:** `TURNS_DONE` (gyro heading = 2 turns, bias from the 1 s before the start; the only counted
@@ -119,6 +127,24 @@ RF2O), v (C1 EKF / RF2O / VESC), R = v / yaw rate and Kasa circle fits (RF2O, EK
 vs command and vs the T2 per-side fit at the servo actually sent, ground gain per side, slip angle / vy (RF2O
 path vs yaw), IMU y sign (gravity-perpendicular +y vs v x yaw rate). Writes `t3.json`. Synthetic end-to-end
 check 21 Nov (R 1.10 m, 2 deg slip, tilted IMU): R 1.100, angle 13.3 deg, slip -1.9 deg, IMU y +1.00.
+Full-lock runs get their own table (minimum radius from fit and v / yaw rate, real wheel angle vs the T2 angle at
+the clip, outer front corner radius) and never enter the gain; synthetic check (right lock R 0.80 m): R 0.800,
+-18.0 deg, corner 0.949 m.
+
+## VESC timeout check and T5 (IMU noise), 21 Nov
+
+- `run_test.py --test vesc_timeout_check --speed 0.5 --live` (stand, T1b stack, 20 s steady): during steady,
+  `pkill -9 -f t1b_stop_converter.py` (vesc_driver keeps reporting). Then `vesc_timeout_check.py <folder>`
+  (source the workspace: vesc_msgs): onset = first `/sensors/core` sample after the converter's last status with
+  the drive current < 25 % (or ERPM < 90 %); PASS = onset <= 0.40 s and current <= -1.5 A right after it (brake 5
+  A, not coasting). Writes `timeout_check.json`; INVALID if the converter was not in DRIVE or came back.
+- `run_test.py --test t5b_stand_imu --speed 0.5 --live` (stand, T1b stack): 90 s steady, brake 5 A. Hands off
+  >= 5 s before `n`.
+- `t5_imu_analyze.py driving <T4 folders>` (T5a from existing bags), `stand <T5b folder>`, `static <T5a folder>`:
+  exact duplicate samples dropped (>= 10 in a row = frozen; frozen bags skipped), white noise per sample from the
+  second difference, gz vs RF2O yaw rate (best lag), Allan deviation (ARW, bias instability), 60 s block drift,
+  integrated heading drift, vibration spectrum peaks vs wheel frequency. Writes `t5_<mode>.json`. The bmi160 node
+  subtracts its own start-up bias, so every bias here is the residual.
 
 `t4_yaw_plot.py <T4 folder> [...]` (20 Nov): yaw rate (BMI160 gz, bias from the 1 s before the
 command, base_link = -gz; RF2O pose derivative) vs time and vs distance per counted repeat, curvature

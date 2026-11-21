@@ -52,8 +52,15 @@ steering:
   servo_offset: 0.335           # PROVISIONAL 21 Nov, tile T4 20261121_210557 (spot B -0.94 deg/m; results doc row
                                 # "Steering centre 0.335"); session-to-session variation not yet tested; re-measure
                                 # after the play fix. Was 0.330 (20 Nov), 0.320 (14 Nov), 0.361 before
-  max_left_rad: 0.2994          # T2 19 Nov, servo 0.10 (left driving clip; stop ~0.08); R 0.84 m. Record only
-  max_right_rad: -0.3208        # T2 19 Nov, servo 0.68 (right driving clip; stop ~0.70); R 0.78 m. Record only
+  max_left_rad: 0.2994          # T2 19 Nov, servo 0.10 (left driving clip; stop ~0.08); R 0.84 m. Record; also the
+  max_right_rad: -0.3208        # T2 19 Nov, servo 0.68 (right driving clip; stop ~0.70); R 0.78 m.  T3 full-lock
+                                # expected angle (space check). T3 full lock measures the real ground values.
+  # ASYMMETRY (decided 21 Nov, Moatasem): it is in SERVO units, not at the wheels. Wheels at the clips are nearly
+  # symmetric (17.2 / 18.4 deg), but the servo travel to reach them is 0.235 left vs 0.345 right (horn off-centre +
+  # linkage) -> per-side gains -0.874 left / -1.062 right (T2 fit; to be confirmed by T3 on the ground) with radian
+  # limits 0.27 left / 0.325 right (= first angle that reaches each clip: 0.235/0.874 = 0.269, 0.345/1.062 = 0.325).
+  # Permanent converter proposal: docs/real_car/PERMANENT_STOP_CONVERTER_PROPOSAL.md section 8. Test-only values:
+  # t3 block. Re-mounting the horn: optional, only together with the play fix (then one T2 redo).
   backlash_servo: null          # T2 (play fixed 14 Nov; T2 confirms)
   # RECORD ONLY, not used: asymmetric trial adapter
   # (~/f1tenth_hw_evidence/steering_trial/steering_accel_adapter.py), measured BEFORE the 14 Nov play fix.
@@ -117,8 +124,13 @@ t4:                                 # T4 straight line on the ground (run_test.p
   wall_fit_deg: 10.0                # analyze.py: wall line fit in +/- this window (distance + heading to the wall)
 
 t3:                                 # T3 constant-steering circles on the ground (run_test.py t3_circle), design 21 Nov
-  steer_min_rad: 0.05               # --steer allowed |0.05..0.30| rad (+ = left); mux max_steer_rad must cover it
-  steer_max_rad: 0.30               # and stay <= this (mux ceiling 0.40)
+  steer_min_rad: 0.05               # --steer allowed: +0.05..+steer_max_left / -0.05..-steer_max_right rad (+ = left)
+  steer_max_left_rad: 0.27          # per-side radian limits (21 Nov, asymmetry note in steering): the first angle that
+  steer_max_right_rad: 0.325        #   reaches the servo clip 0.10 / 0.68. --full-lock commands exactly these (the
+                                    #   converter clamp then sends the clip); a --steer run must stay below the clamp
+  mux_cap_max_rad: 0.33             # launch max_steer_rad:=0.33 covers both limits (mux ceiling 0.40); arm refused above
+  fallback_extra_m: 1.0             # VESC timeout NOT verified (no passed vesc_timeout_check): clear disk radius + this,
+                                    #   and 0.5 m/s only after a counted 0.3 m/s run of the same command (+ spotter)
   servo_gain_left: -0.874           # T2 19 Nov per-side fit (fit.json left_gain), TEST-ONLY: T3 converter yaml only
   servo_gain_right: -1.062          # T2 19 Nov per-side fit (fit.json right_gain), TEST-ONLY
   target_turns: 2.0                 # stop (brake 5 A) once the gyro heading change reaches this many turns
@@ -131,6 +143,22 @@ t3:                                 # T3 constant-steering circles on the ground
   turn_check_fraction: 0.3          #   >= this share of v tan(steer) / L (else TURN_CHECK_FAILED)
   rf2o_stale_s: 0.3                 # drive: geofence source older than this -> stop
   time_slack_s: 3.0                 # hard time limit = ramp + target_turns x 2 pi x R_max / v + this
+
+vesc_timeout_check:                 # vesc_timeout_check.py (stand, converter killed during 0.5 m/s), design 21 Nov
+  timeout_ms_target: 250            # VESC Tool App Settings > General: timeout_msec (Moatasem 21 Nov; was ~1000?)
+  brake_current_target_a: 5.0       #   timeout_brake_current
+  onset_max_s: 0.40                 # PASS: drive current gone <= this after the converter's last message
+                                    #   (250 ms + telemetry 20 ms + converter tick 20 ms + margin)
+  brake_current_min_a: 1.5          # PASS: current_motor reaches <= -this right after the onset. Stand T1b 14 Nov:
+                                    #   brake 5 A -> -2.3..-3.7 A in the first 40 ms; release (current 0) -> 0.00 A
+  converter_gap_min_s: 1.0          # VALID only if the converter really stopped (no status for >= this) while in DRIVE
+
+t5:                                 # IMU noise (t5_imu_analyze.py), design 21 Nov
+  static_min_s: 600.0               # T5a: static recording at least this long (15 min planned)
+  block_s: 60.0                     # T5a drift: bias per block of this length
+  settle_s: 2.0                     # T5b: steady window starts this long after the ramp ends
+  still_s: 3.0                      # T5b: still reference = this long before the drive start (hands off >= 5 s)
+  bench_gz_var_rad2_s2: 5.4e-7      # 11 Nov bench (ESP32 board, baseline C-6): comparison only
 
 noise:                              # measurement R per sensor: T5/T6
   vesc_vx_var: null
