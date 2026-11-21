@@ -249,12 +249,17 @@ python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_sweep.py --extend-right <fold
 ```
 
 Shadow EKF, live (Phase F, C1; observation only, publishes /ekf_shadow/* only; with the stack up and the car
-STILL for the first 2 s of the inputs node; terminal C, then D):
+STILL for the first 2 s of the inputs node; terminals C, D, E stay running; the inputs node logs RF2O freshness
+every 10 s and warns at once when /odom_rf2o is older than 0.2 s):
 ```bash
 python3 ~/f1tenth_uj/tools/real_car_tests/ekf_shadow_inputs.py
 ros2 run robot_localization ekf_node --ros-args -r __node:=ekf_real_shadow_c1 --params-file /home/ftenth/f1tenth_uj/config/real_car/ekf_real_shadow.yaml -r odometry/filtered:=/ekf_shadow/odom
+ros2 bag record -o ~/f1tenth_hw_evidence/real_car_tests/$(date +%Y%m%d_%H%M%S)_ekf_shadow_live/bag /ekf_shadow/odom /ekf_shadow/in/vesc /ekf_shadow/in/vesc_dw /ekf_shadow/in/imu /ekf_shadow/in/rf2o
 ```
-Offline (Claude may run, stack down, domain 88): `ekf_shadow_replay.py` (variants), `--live-check`, `--rf2o-cpu`.
+Afterwards (reads bags only): `python3 ~/f1tenth_uj/tools/real_car_tests/ekf_shadow_replay.py --live <shadow folder> <T4 folder>`
+(after `analyze.py --t4`). Offline (Claude may run, stack down, domain 88): `ekf_shadow_replay.py` (variants),
+`--live-check`, `--rf2o-cpu`. Offline end-to-end test 21 Nov (inputs node + C1 ekf_node + record on the tile bag,
+sim time): live chain = replay within 1 mm (+0.026 / +0.016 / +0.000 m).
 
 Self-tests (Claude may run; the runner's shutdown probe uses isolated domain 77, no publishers):
 ```bash

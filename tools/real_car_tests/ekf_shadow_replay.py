@@ -22,6 +22,7 @@ Writes ekf_shadow_replay.json into each run folder; prints a per-variant summary
   ekf_shadow_replay.py [<folder> ...] [--variants A B C0 C1 C2] [--calib pre|startup] [--work DIR]
   ekf_shadow_replay.py --rf2o-cpu [<folder>]
   ekf_shadow_replay.py --live-check [<folder>]    live node (ekf_shadow_inputs.py) vs replay inputs
+  ekf_shadow_replay.py --live [<shadow bag>] [<T4 folder>]   recorded LIVE shadow EKF vs LiDAR (reads only)
   ekf_shadow_replay.py --self-test
 """
 import argparse
@@ -445,6 +446,69 @@ def live_check(folder, work, env, gain):
     return res
 
 
+def latest(pattern):
+    hits = sorted(vp.evidence_root().glob(pattern))
+    return hits[-1] if hits else None
+
+
+def live_compare(shadow_dir, folder):
+    """LIVE shadow EKF (recorded /ekf_shadow/odom) vs the LiDAR references of a T4 run (analyze.py --t4 first).
+    Reads bags only. RF2O freshness per repeat from the recorded /ekf_shadow/in/rf2o (receive gaps)."""
+    import analyze as A
+    p = vp.load()
+    laser_x = float(vp.get(p, 'lidar.x_m'))
+    wall_deg = float(vp.get(p, 't4.wall_fit_deg'))
+    bag = shadow_dir / 'bag' if (shadow_dir / 'bag' / 'metadata.yaml').exists() else shadow_dir
+    sb = A.read_bag(bag)
+    odom = sorted(((stamp(m), m.pose.pose.position.x, m.pose.pose.position.y,
+                    math.atan2(2 * (m.pose.pose.orientation.w * m.pose.pose.orientation.z
+                                    + m.pose.pose.orientation.x * m.pose.pose.orientation.y),
+                               1 - 2 * (m.pose.pose.orientation.y ** 2 + m.pose.pose.orientation.z ** 2)),
+                    m.twist.twist.linear.x, m.twist.twist.linear.y, m.twist.twist.angular.z)
+                   for _, m in sb.get('/ekf_shadow/odom', [])), key=lambda s: s[0])
+    rf_t = sorted(stamp(m) for _, m in sb.get(inp.TOPICS['rf2o'], []))   # scan time: works live and offline
+    if not odom:
+        raise SystemExit('no /ekf_shadow/odom in %s' % shadow_dir)
+    summ = json.loads((folder / 'summary.json').read_text())
+    if not (summ.get('t4') or {}).get('items'):
+        raise SystemExit('%s has no T4 items: run analyze.py --t4 on it first' % folder)
+    info = json.loads((folder / 'run_info.json').read_text())
+    hold = float((info.get('converter_params') or {}).get('brake_hold_s') or 2.0)
+    ramp = float(info.get('ramp_accel_mps2') or vp.get(p, 'runner.ramp_accel_mps2'))
+    speed = float(info.get('speed_mps') or info.get('mux_max_speed_mps') or 0.5)
+    data = A.read_bag(folder / 'bag')
+    scan_t = [t for t, _ in data['/scan']]
+    walls = [A.wall_fit(m, wall_deg) for _, m in data['/scan']]
+    print('live shadow %s (%d EKF samples, %.0f s) vs %s' % (shadow_dir.name, len(odom), odom[-1][0] - odom[0][0],
+                                                           folder.name))
+    rows, results = [], []
+    for x in summ['t4']['items']:
+        if not (x.get('moved') and x.get('stopped')) or (x.get('total_lidar_m') or 0) < MIN_TOTAL_M:
+            continue
+        ref = repeat_refs(A, x, scan_t, walls, hold, ramp, speed)
+        win = [s for s in odom if ref['tc'] - 1.0 <= s[0] <= ref['b'] + 0.3]
+        m = ekf_metrics(A, ref, win, laser_x, x.get('heading_change_rf2o_deg')) if len(win) > 10 else None
+        gaps = [b - a for a, b in zip(rf_t, rf_t[1:]) if ref['tc'] <= b and a <= ref['b']]
+        fresh = dict(max_gap_s=max(gaps) if gaps else None, n=len(gaps),
+                     ok=bool(gaps) and max(gaps) <= inp.RF2O_STALE_S)
+        res = dict(index=x['index'], counted=x.get('counted'), runner_reason=x.get('runner_reason'), lidar=ref,
+                   rf2o_heading_deg=x.get('heading_change_rf2o_deg'), rf2o_fresh=fresh,
+                   cruise=cruise_gain(A, ref, scan_t, walls, data['/sensors/core'], data['/odom_rf2o'],
+                                      inp.gain_from_params()), C1live=m)
+        print('  r%d %s: total err %s, RF2O max gap %s %s' % (
+            x['index'], 'counted' if x.get('counted') else 'not counted',
+            '-' if not m else '%+.3f m' % m['total_err'],
+            '-' if fresh['max_gap_s'] is None else '%.3f s' % fresh['max_gap_s'], 'OK' if fresh['ok'] else 'STALE/NONE'))
+        results.append(res)
+        rows.append((folder.name[:15], res))
+    out = shadow_dir / ('ekf_shadow_live_vs_%s.json' % folder.name[:15])
+    out.write_text(json.dumps(dict(shadow_bag=str(shadow_dir), t4_folder=str(folder), yaml=str(YAML),
+                                   repeats=results), indent=1))
+    print_tables(rows, ['C1live'], {'C1live': 'C1 LIVE (recorded /ekf_shadow/odom)'})
+    print('written: %s' % out)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('folders', nargs='*')
@@ -454,11 +518,20 @@ def main():
     ap.add_argument('--work', default=None, help='input bags + logs (default: a new temp dir)')
     ap.add_argument('--rf2o-cpu', action='store_true')
     ap.add_argument('--live-check', action='store_true', help='live node vs replay inputs on one bag')
+    ap.add_argument('--live', nargs='?', const='LATEST', default=None, metavar='SHADOW_BAG',
+                    help='compare a recorded LIVE shadow EKF bag (default: latest *_ekf_shadow_live) with the '
+                         'LiDAR of a T4 folder (positional; default: latest t4_straight armed folder)')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
     if args.self_test:
         self_test()
         return 0
+    if args.live:                                   # reads bags only: allowed while a stack runs
+        sd = latest('*_ekf_shadow_live') if args.live == 'LATEST' else Path(args.live).expanduser()
+        t4 = Path(args.folders[0]).expanduser() if args.folders else latest('*_t4_straight_*_armed')
+        if sd is None or t4 is None:
+            raise SystemExit('shadow bag or T4 folder not found')
+        return live_compare(sd, t4)
     busy = stack_running()
     if busy:
         print('REFUSED: a car stack (or another EKF) is running; offline replays only with the stack down:')
@@ -541,7 +614,8 @@ def main():
     return 0
 
 
-def print_tables(rows, variants):
+def print_tables(rows, variants, labels=None):
+    labels = labels or {k: v[1] for k, v in VARIANTS.items()}
     def rng(s, nd=3, unit=''):
         return '-' if s is None else '%+.*f (%+.*f..%+.*f)%s' % (nd, s['mean'], nd, s['min'], nd, s['max'], unit)
     print('\nPer variant over %d repeats: mean (min..max), errors = EKF - LiDAR (heading: EKF - RF2O)' % len(rows))
@@ -549,12 +623,13 @@ def print_tables(rows, variants):
     print('|---|---|---|---|---|---|---|')
     for v in variants:
         got = [r[v] for _, r in rows if r.get(v)]
-        cpu = sum(g['ekf_cpu_s'] for g in got) / max(1e-9, sum(g['play_s'] for g in got))
-        print('| %s %s | %s | %s | %s | %s | %s | %.1f |' % (
-            v, VARIANTS[v][1], rng(summarize([g['total_err'] for g in got])),
+        cpu = (sum(g['ekf_cpu_s'] for g in got) / max(1e-9, sum(g['play_s'] for g in got))
+               if got and all('ekf_cpu_s' in g for g in got) else None)
+        print('| %s %s | %s | %s | %s | %s | %s | %s |' % (
+            v, labels[v], rng(summarize([g['total_err'] for g in got])),
             rng(summarize([g['ramp_err'] for g in got])), rng(summarize([g['brake_err'] for g in got])),
             rng(summarize([g['heading_err_rf2o'] for g in got]), 1), rng(summarize([g['hold_drift'] for g in got])),
-            100 * cpu))
+            '-' if cpu is None else '%.1f' % (100 * cpu)))
     print('\nLiDAR per repeat: total / ramp / brake m, cruise gain')
     for run, r in rows:
         L, c = r['lidar'], r.get('cruise')

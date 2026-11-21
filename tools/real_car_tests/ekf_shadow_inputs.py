@@ -42,6 +42,7 @@ IMU_FORWARD = (-1.0, 0.0, 0.0)   # IMU axis that points forward (measured 21 Nov
 R_VESC_VX, R_VY, R_IMU_WZ, R_RF_VX, R_RF_WZ, R_AX = 5.0e-3, 4.0e-4, 8.0e-3, 1.0e-2, 1.2e-2, 0.32
 BIG = 1.0e6
 GYRO_STILL_STD = math.radians(0.5)    # rad/s, same limit as the bmi160 driver's own calibration
+RF2O_STALE_S = 0.2         # = EKF sensor_timeout: older than this, the EKF stops fusing RF2O (C1 -> C0)
 TOPICS = dict(vesc='/ekf_shadow/in/vesc', vesc_dw='/ekf_shadow/in/vesc_dw', imu='/ekf_shadow/in/imu',
               rf2o='/ekf_shadow/in/rf2o')
 
@@ -109,6 +110,47 @@ class StillCalib:
 
 def forward_accel(accel, cal):
     return sum(a * f for a, f in zip(accel, cal['forward'])) * G0 / cal['g_norm']
+
+
+class Rf2oFreshness:
+    """RF2O freshness: receive gaps (stale = no message for > RF2O_STALE_S) and latency (receive - header
+    stamp; RF2O stamps with the scan time). Times in seconds, wall clock live."""
+
+    def __init__(self):
+        self.last = None
+        self.n = 0
+        self.lat = []
+        self.max_gap = 0.0
+        self.stale_events = 0
+        self.stale = False
+        self.t0 = None
+
+    def add(self, t_recv, t_stamp):
+        if self.last is not None:
+            self.max_gap = max(self.max_gap, t_recv - self.last)
+        self.t0 = t_recv if self.t0 is None else self.t0
+        self.last, self.stale = t_recv, False
+        self.n += 1
+        self.lat.append(t_recv - t_stamp)
+
+    def check(self, now):
+        """-> age in s (None before the first message); counts a stale event once per gap."""
+        if self.last is None:
+            return None
+        age = now - self.last
+        if age > RF2O_STALE_S and not self.stale:
+            self.stale, self.stale_events = True, self.stale_events + 1
+        return age
+
+    def report(self, now):
+        """Summary since the last report; resets rate, latency and max gap."""
+        span = (now - self.t0) if self.t0 is not None else 0.0
+        lat = sorted(self.lat)
+        out = dict(hz=self.n / span if span > 0 else 0.0, n=self.n, max_gap_s=self.max_gap,
+                   lat_med_ms=1e3 * lat[len(lat) // 2] if lat else None, lat_max_ms=1e3 * lat[-1] if lat else None,
+                   stale_events=self.stale_events)
+        self.n, self.lat, self.max_gap, self.t0 = 0, [], 0.0, now
+        return out
 
 
 # ---------------------------------------------------------------- messages (ROS imported lazily)
@@ -181,6 +223,18 @@ def self_test():
     for i in range(200):
         m.add((0.0, 0.0, 0.05 * (-1) ** i), (1.8, -0.55, -10.02))                  # 2.9 deg/s: moving
     assert m.result()['moving']
+    fr = Rf2oFreshness()
+    assert fr.check(0.0) is None
+    for i in range(20):                                    # 20 Hz, 50 ms latency
+        fr.add(1.0 + 0.05 * i, 1.0 + 0.05 * i - 0.05)
+    assert fr.check(1.0 + 0.05 * 19 + 0.1) < RF2O_STALE_S and fr.stale_events == 0
+    assert fr.check(1.0 + 0.05 * 19 + 0.5) > RF2O_STALE_S and fr.stale_events == 1
+    fr.check(1.0 + 0.05 * 19 + 0.9)                        # same gap: counted once
+    fr.add(2.5, 2.45)
+    r = fr.report(2.5)
+    assert fr.stale_events == 1 and abs(r['max_gap_s'] - 0.55) < 1e-9 and abs(r['lat_med_ms'] - 50) < 1e-6
+    assert 13.0 < r['hz'] < 15.0, r
+    print('PASS: RF2O freshness: stale after %.1f s (once per gap), max gap, latency, rate.' % RF2O_STALE_S)
     print('PASS: VESC vx/gain, brake phase parse, de-weight rule (brake, 0 < |ERPM| < %.0f, 0 trusted),'
           % SENSORLESS_ERPM)
     print('      yaw sign/bias, still calibration (moving -> retry), forward accel: gravity and vertical')
@@ -219,6 +273,10 @@ def main():
                 self.create_subscription(Odometry, '/odom_rf2o', self.on_rf2o, qos_profile_sensor_data)
             self.t_start = self.get_clock().now()
             self.create_timer(5.0, self.check_status)
+            self.fresh = Rf2oFreshness()
+            if not args.no_rf2o:
+                self.create_timer(0.1, self.check_rf2o)
+                self.create_timer(10.0, self.report_rf2o)
             self.get_logger().warning('SHADOW ONLY: publishes /ekf_shadow/in/* only. gain %.0f. '
                                       'Keep the car still: IMU still calibration %.0f s.' % (gain, StillCalib.SECONDS))
 
@@ -253,7 +311,30 @@ def main():
             self.pub['imu'].publish(imu_msg(m.header.stamp, g.z, (a.x, a.y, a.z), self.cal))
 
         def on_rf2o(self, m):
+            self.fresh.add(self.now_s(), m.header.stamp.sec + m.header.stamp.nanosec * 1e-9)
             self.pub['rf2o'].publish(rf2o_msg(m))
+
+        def now_s(self):
+            return self.get_clock().now().nanoseconds * 1e-9
+
+        def check_rf2o(self):
+            n0 = self.fresh.stale_events
+            age = self.fresh.check(self.now_s())
+            if age is None:
+                if (self.get_clock().now() - self.t_start).nanoseconds > 5e9:
+                    self.get_logger().warning('RF2O MISSING: no /odom_rf2o yet: C1 has no fallback speed.',
+                                              throttle_duration_sec=5.0)
+            elif self.fresh.stale_events > n0:
+                self.get_logger().warning('RF2O STALE: no /odom_rf2o for %.2f s (> %.1f s = EKF sensor_timeout): '
+                                          'C1 has no fallback while the VESC is de-weighted.' % (age, RF2O_STALE_S))
+
+        def report_rf2o(self):
+            r = self.fresh.report(self.now_s())
+            lat = '-' if r['lat_med_ms'] is None else '%.0f / %.0f ms' % (r['lat_med_ms'], r['lat_max_ms'])
+            line = ('RF2O freshness (10 s): %.1f Hz, max gap %.2f s, latency median / max %s, stale events total %d'
+                    % (r['hz'], r['max_gap_s'], lat, r['stale_events']))
+            ok = r['hz'] >= 15.0 and r['max_gap_s'] <= RF2O_STALE_S
+            (self.get_logger().info if ok else self.get_logger().warning)(('OK   ' if ok else 'FAIL ') + line)
 
     rclpy.init()
     node = Inputs()

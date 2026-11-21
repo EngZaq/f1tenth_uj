@@ -112,7 +112,10 @@ refuses if a car stack runs): builds the inputs from a T4 bag with `ekf_shadow_i
 + `ros2 bag play --clock`, and compares `/ekf_shadow/odom` (laser point along the start wall normal) with the
 `analyze.py --t4` LiDAR references: total, start-ramp and brake-phase error, heading vs RF2O, hold drift, ekf_node CPU,
 latency-free cruise gain. `--live-check`: runs the live node on a bag and compares every message with the replay
-inputs. `--rf2o-cpu`: rf2o CPU on this machine from a bag's /scan. Writes `ekf_shadow_replay[_startup].json`.
+inputs. `--rf2o-cpu`: rf2o CPU on this machine from a bag's /scan. `--live <shadow folder> <T4 folder>`: a recorded
+LIVE `/ekf_shadow/odom` (`<stamp>_ekf_shadow_live/bag`) vs the T4 LiDAR, same metrics, plus RF2O max gap per repeat
+(scan stamps; stale > 0.2 s = C1 had no fallback); reads bags only. The live inputs node logs RF2O freshness
+(rate, max gap, latency) every 10 s and warns at once when `/odom_rf2o` is older than 0.2 s. Writes `ekf_shadow_replay[_startup].json`.
 
 `analyze.py --t4 [folder ...]` (default: latest T4 folder; several = pooled summary as well), also
 written to the folder README: per repeat stop distance (LiDAR at the converter's brake command vs at
