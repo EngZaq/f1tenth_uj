@@ -14,7 +14,8 @@ For Moatasem and for the next Claude Code session. Read this, then
 - **20 Nov:** T4 at 0.5 m/s done (carpet + tile, brake 5 A, no F-01 rebound); **steering offset 0.330
   PROVISIONAL baseline** (tile; was 0.320; re-measure after the play fix); gain candidate ~8700 **withdrawn 21 Nov**
   (8414 kept: cruise-only 8280-8480); F-18 IMU freeze guarded in the runner and preflight.
-- **Next:** section 4, steps 1-3. Steering findings for Zaid: section 4a.
+- **21 Nov:** F-18 second cause (IMU node exits on start-up motion; guard message added, driver proposal for Zaid). Phase F: shadow EKF **C1** (VESC de-weighted while braking / below 2000 ERPM + RF2O vx fallback) recommended offline and **validated live at 0.5 m/s straight** (total +0.029 m vs LiDAR, RF2O never stale). Gain 8414 kept. T4 tile at the default 0.330: heading -8.0 deg, non-monotonic vs 0.340 / 0.358 even within one start spot -> **steering play is the top blocker**; 0.330 stays PROVISIONAL. IMU x axis points backward + ~10 deg tilt (for Zaid).
+- **Next:** section 4, step 2 (play fix, then centre) is the top blocker. Steering findings for Zaid: section 4a.
 
 ## 1. Safety rules and standing approvals (Moatasem)
 
@@ -84,6 +85,10 @@ distance (T4) before it can be considered.
    elsewhere). If the centre readings agree (within ~1 deg), adopt gain/offset from the fit through a
    results row (`servo_gain` -0.50 and `servo_offset` 0.320 change only then, in both converter and
    vesc_to_odom yamls). If the horn is re-mounted, the full T2 (limits too) is redone.
+   **TOP BLOCKER (21 Nov):** tile T4 heading is non-monotonic in the offset (0.330 / 0.340 / 0.358) with a
+   constant servo command, so play dominates and the centre cannot be resolved further before the fix. Then a
+   T4 centre check: **one marked start spot** (21 Nov: start position alone shifted the heading by 2-3 deg/m),
+   >= 3 counted runs per offset, heading compared in deg/m (results doc, tile offset check row).
 3. **T4 on the ground, 0.5 m/s, brake 5 A: DONE 20 Nov** (results doc: tile stop ~0.137 m, decel ~0.9,
    gain candidate ~8700 (withdrawn 21 Nov, 8414 kept), provisional tile centre ~0.330, all test-only; F-18 IMU freeze found and guarded).
    Next: the left-wheel play fix (Zaid), then the centre re-measure; `decel_mps2` before 1.0 m/s.
