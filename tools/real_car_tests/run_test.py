@@ -7,7 +7,8 @@ Publishes /manual/drive, /joy (button 5 = deadman) and /control/request_mode at
 disconnect / kill switch stays in the operator's hand.
 
 Keys over SSH (no Enter): n = arm, hold SPACE = drive, s = skip (idle only), q = quit,
-m = placement readout (ground profiles: range ahead, arm window, brake point, side walls).
+m = placement readout (ground profiles: range ahead, arm window, brake point, side walls;
+t3_circle: clear disk, clearance, 360 deg mux visibility, RF2O).
 KILL: while arming, armed, driving or stopping, ANY key but SPACE = zero (converter brake), latched
 until n. q there kills too, then the runner ends.
 SPACE is a deadman from terminal auto-repeat: 0.7 s after the first press,
@@ -68,6 +69,14 @@ PROFILES = {
         post_zero_s=4.0, live_allowed=True, converter='t1b_stop_converter',
         brake_at_range=True, stop_method='brake5A', default_steer_cap=True,
         note='T4 ground, straight (steer 0) toward a wall, automatic brake 5 A at the brake point. 3 repeats.'),
+    # T3 (21 Nov): constant steering (--steer, + = left) at 0.5 (or 0.3) m/s until the gyro heading change
+    # reaches t3.target_turns, then brake 5 A. Needs the T3 converter gains, a VESC clip containing the
+    # planned servo and a mux steer cap |steer|..0.30. No step gate (<= the T4-passed 0.5 m/s).
+    't3_circle': dict(
+        place='ground', steps=[0.3, 0.5], no_step_gate=True, steer=None, steady_s=2.0, repeats=1,
+        extra_repeats=2, post_zero_s=4.0, live_allowed=True, converter='t1b_stop_converter',
+        stop_method='brake5A', circle=True, count_reason='TURNS_DONE',
+        note='T3 ground circles: constant steering, brake 5 A after target_turns of gyro heading. 1 counted run.'),
 }
 STEP_TOL = 1e-6
 SPEED_MAX_ROUNDING = 5.0  # ERPM: yaml values are rounded (4630 for 4627.7)
@@ -206,6 +215,89 @@ def sector_min(scan, half_width_deg):
     return min(vals) if vals else float('nan')
 
 
+# ---------------------------------------------------------------- T3 circle geometry (21 Nov)
+# Circles that start at the same point and heading and turn to the same side are NESTED: a circle of
+# radius r <= R_max (centre (0, side r) in the start base_link frame) lies inside the disk of radius R_max
+# around (0, side R_max). So one clear disk around the largest plausible circle covers every real radius
+# in [r_factor_min, r_factor_max] x L / tan(steer), and the same disk is the drive geofence.
+
+def t3_geometry(steer, t3, wheelbase, body_length, body_width, front_x):
+    """Clear-disk geometry in the start base_link frame (x forward, y left; + steer = left)."""
+    side = 1.0 if steer > 0 else -1.0
+    r_nom = wheelbase / math.tan(abs(steer))
+    r_min, r_max = r_nom * float(t3['r_factor_min']), r_nom * float(t3['r_factor_max'])
+    hw, rear_x = body_width / 2.0, front_x - body_length
+    reach = max(math.hypot(r_max + hw, front_x), math.hypot(r_max + hw, rear_x))   # outer body corner
+    clear_r = reach + float(t3['clear_margin_m'])
+    return dict(side=side, r_nom=r_nom, r_min=r_min, r_max=r_max, center=(0.0, side * r_max), reach=reach,
+                clear_r=clear_r, diameter_m=2.0 * clear_r, inner_free_r=max(0.0, r_min - hw))
+
+
+def scan_points_base(scan, laser_x):
+    """[(x, y, bearing_deg)] of finite returns in base_link (laser at (laser_x, 0), yaw 0)."""
+    if scan is None or not scan.angle_increment:
+        return []
+    out = []
+    for i, r in enumerate(scan.ranges):
+        if math.isfinite(r) and scan.range_min < r <= scan.range_max:
+            a = scan.angle_min + i * scan.angle_increment
+            out.append((laser_x + r * math.cos(a), r * math.sin(a), math.degrees(a)))
+    return out
+
+
+def own_body(x, y, body_length, body_width, front_x, pad=0.05):
+    return front_x - body_length - pad <= x <= front_x + pad and abs(y) <= body_width / 2.0 + pad
+
+
+def t3_clearance(scan, geom, laser_x, body_length, body_width, front_x):
+    """Smallest (distance to the clear-disk centre - clear radius) over all returns (car body excluded):
+    < 0 = something inside the space the car may sweep. -> dict(min_m, bearing_deg, n) or None (no scan)."""
+    pts = scan_points_base(scan, laser_x)
+    if not pts:
+        return None
+    cx, cy = geom['center']
+    best = None
+    for x, y, b in pts:
+        if own_body(x, y, body_length, body_width, front_x):
+            continue
+        d = math.hypot(x - cx, y - cy) - geom['clear_r']
+        if best is None or d < best[0]:
+            best = (d, b)
+    if best is None:
+        return dict(min_m=float('inf'), bearing_deg=None, n=0)
+    return dict(min_m=best[0], bearing_deg=best[1], n=len(pts))
+
+
+def t3_visibility(scan, half_width_deg=20.0, step_deg=5.0):
+    """Mux front-visibility prediction for every heading the car takes on a circle: the share of finite
+    returns in +/- half_width around each heading (laser frame, as physical_drive_mux front_evidence).
+    -> dict(min_fraction, heading_deg) or None."""
+    if scan is None or not scan.angle_increment or len(scan.ranges) < 100:
+        return None
+    n = len(scan.ranges)
+    ok = [1 if (math.isfinite(r) and scan.range_min < r <= scan.range_max) else 0 for r in scan.ranges]
+    half = int(round(math.radians(half_width_deg) / scan.angle_increment))
+    best = None
+    h = -180.0
+    while h < 180.0:
+        c = int(round((math.radians(h) - scan.angle_min) / scan.angle_increment))
+        idx = [(c + k) % n for k in range(-half, half + 1)]
+        f = sum(ok[i] for i in idx) / len(idx)
+        if best is None or f < best[0]:
+            best = (f, h)
+        h += step_deg
+    return dict(min_fraction=best[0], heading_deg=best[1])
+
+
+def t3_fence(start, geom, pose):
+    """Distance (m) of the base_link pose beyond the largest circle (> 0 = outside), all in the RF2O odom
+    frame; start = (x, y, yaw) at the drive start."""
+    x0, y0, h0 = start
+    cx = x0 - geom['center'][1] * math.sin(h0)
+    cy = y0 + geom['center'][1] * math.cos(h0)
+    return math.hypot(pose[0] - cx, pose[1] - cy) - geom['r_max']
+
+
 def interval_stats(dts):
     if not dts:
         return {'count': 0}
@@ -327,9 +419,21 @@ class Machine:
         self.reaction, self.slack = float(t4['reaction_s']), float(t4['time_slack_s'])
         self.max_approach = float(t4['max_approach_m'])
         self.ground = prof['place'] == 'ground'
+        # circle (T3): constant steering, stop after target_turns of gyro heading; clear disk + geofence.
+        self.circle = bool(prof.get('circle'))
+        if self.circle:
+            self.t3 = vp.get(p, 't3')
+            veh = vp.get(p, 'vehicle')
+            self.wheelbase = float(veh['wheelbase_m'])
+            self.geom = t3_geometry(float(prof['steer']), self.t3, self.wheelbase, float(veh['body_length_m']),
+                                    float(veh['body_width_m']), float(veh['front_bumper_x_m']))
+            self.target_rad = 2 * math.pi * float(self.t3['target_turns'])
+            self.min_visible = 0.75 + float(self.t3['visibility_margin'])   # updated from the mux status
         self.ground_ok = ground_ok
         # brake_at_range (T4): drive until the brake point; the time limit is set per repeat.
         self.brake_at_range = bool(prof.get('brake_at_range'))
+        # Only stops with this reason count (None = any stop from steady speed).
+        self.count_prefix = 'BRAKE_POINT' if self.brake_at_range else prof.get('count_reason')
         v = float(prof['speed'])
         self.ramp_s = v / self.ramp
         self.steady_s = self.steady_m / v if self.ground else float(prof['steady_s'])
@@ -405,13 +509,77 @@ class Machine:
         have = self.ahead(w)
         return (math.isfinite(have) and need <= have <= top), need, have
 
+    def circle_text(self, w):
+        g, c, v = self.geom, w.get('t3_clear'), w.get('t3_vis')
+        return ('circle %s steer %+.2f rad: R nominal %.2f m (assumed %.2f..%.2f), clear disk %.2f m diameter, centre '
+                '%.2f m to the %s | clearance %s | mux visibility min %s (needs >= %.2f) | RF2O %s' % (
+                    'LEFT' if g['side'] > 0 else 'RIGHT', self.prof['steer'], g['r_nom'], g['r_min'], g['r_max'],
+                    g['diameter_m'], g['r_max'], 'left' if g['side'] > 0 else 'right',
+                    '-' if c is None else '%+.2f m (worst at %s deg)' % (c['min_m'], '-' if c['bearing_deg'] is None
+                                                                       else '%.0f' % c['bearing_deg']),
+                    '-' if v is None else '%.2f at heading %.0f deg' % (v['min_fraction'], v['heading_deg']),
+                    self.min_visible, 'OK' if w.get('rf2o_age', 1e9) <= float(self.t3['rf2o_stale_s']) else 'STALE'))
+
+    def circle_refusal(self, w):
+        mux_min = (w.get('status') or {}).get('manual_min_front_valid_fraction')
+        if mux_min is not None:
+            self.min_visible = float(mux_min) + float(self.t3['visibility_margin'])
+        c, v = w.get('t3_clear'), w.get('t3_vis')
+        if c is None or v is None:
+            return 'CIRCLE_NO_SCAN'
+        if c['min_m'] < 0:
+            return 'CIRCLE_NOT_CLEAR(return %.2f m inside the %.2f m clear disk at %.0f deg)' % (
+                -c['min_m'], self.geom['diameter_m'], c['bearing_deg'])
+        if v['min_fraction'] < self.min_visible:
+            return 'CIRCLE_LOW_VISIBILITY(%.2f < %.2f at heading %.0f deg: the mux would stop there)' % (
+                v['min_fraction'], self.min_visible, v['heading_deg'])
+        if w.get('rf2o_age', 1e9) > float(self.t3['rf2o_stale_s']) or w.get('rf2o_pose') is None:
+            return 'CIRCLE_RF2O_STALE(geofence source)'
+        if w.get('gz') is None:
+            return 'CIRCLE_NO_GYRO'
+        return None
+
     def placement(self, w):
+        if self.circle:
+            return self.circle_text(w)
         need, top = self.ground_window()
         return ('front %.2f m | arm window %.2f..%.2f m | brake point %.2f m | mux nearest +/-20deg %.2f m '
                 '(arm needs >= %.2f, mux brakes < %.2f) | side L %.2f R %.2f m' % (
                     self.ahead(w), need, top, self.brake_range(float(self.prof['speed'])),
                     w.get('sector_min_m', float('nan')), self.gate + self.guard, self.gate,
                     w.get('left_m', float('nan')), w.get('right_m', float('nan'))))
+
+    def circle_step(self, now, elapsed, v, w):
+        """T3 while driving: integrate the gyro heading (base yaw rate = -(gz - bias)) and the RF2O yaw;
+        stop reason or None. The mux front gate stays the obstacle backstop."""
+        t3 = self.t3
+        dt, self.last_t = now - self.last_t, now
+        if w.get('imu_problem') or w.get('gz') is None:
+            return 'CIRCLE_IMU_PROBLEM(%s)' % (w.get('imu_problem') or 'no gyro')
+        wz = -(w['gz'] - self.bias)
+        self.turned += wz * dt
+        self.wz_hist = [(t, x) for t, x in self.wz_hist if now - t <= 0.5] + [(now, wz)]
+        pose = w.get('rf2o_pose')
+        if pose is None or self.start_pose is None or w.get('rf2o_age', 1e9) > float(t3['rf2o_stale_s']):
+            return 'CIRCLE_RF2O_STALE(%.2f s)' % w.get('rf2o_age', float('inf'))
+        d = pose[2] - self.rf_last_yaw
+        self.turned_rf += (d + math.pi) % (2 * math.pi) - math.pi
+        self.rf_last_yaw = pose[2]
+        out = t3_fence(self.start_pose, self.geom, pose)
+        if out > float(t3['geofence_margin_m']):
+            return 'GEOFENCE(%.2f m outside the largest circle)' % out
+        side = self.geom['side']
+        if elapsed >= float(t3['turn_check_s']) and v > 0.1:
+            expect = v * math.tan(abs(float(self.prof['steer']))) / self.wheelbase
+            mean = sum(x for _, x in self.wz_hist) / len(self.wz_hist)
+            if side * mean < float(t3['turn_check_fraction']) * expect:
+                return 'TURN_CHECK_FAILED(yaw rate %+.3f rad/s, expected %+.3f)' % (mean, side * expect)
+        if side * self.turned >= self.target_rad:
+            return 'TURNS_DONE(gyro %.0f deg, RF2O %.0f deg)' % (math.degrees(self.turned), math.degrees(self.turned_rf))
+        if side * self.turned_rf >= self.target_rad + 0.5:
+            return 'TURNS_RF2O_BACKUP(gyro %.0f deg, RF2O %.0f deg)' % (math.degrees(self.turned),
+                                                                       math.degrees(self.turned_rf))
+        return None
 
     def finished(self):
         if 'extra_repeats' not in self.prof:
@@ -422,7 +590,7 @@ class Machine:
     def stop(self, now, reason):
         self.stop_steady = (self.state == 'DRIVING' and getattr(self, 'steady_logged', False)
                             and not reason.startswith('KILL')
-                            and (not self.brake_at_range or reason.startswith('BRAKE_POINT')))
+                            and (self.count_prefix is None or reason.startswith(self.count_prefix)))
         self.state = 'STOPPING'
         self.t_stop = now
         self.tracker = ReboundTracker(self.last_erpm)  # ERPM at the zero = the latest telemetry
@@ -484,6 +652,9 @@ class Machine:
                         # The mux would latch STOP on the first tick: refuse with the reason instead.
                         reason = 'MUX_SECTOR_OBJECT(nearest +/-20deg %.2f m < %.2f m)' % (
                             w['sector_min_m'], self.gate + self.guard)
+                    elif self.circle:
+                        reason = self.circle_refusal(w)
+                        self.log(now, 'CIRCLE_FIT', self.circle_text(w))
                     else:
                         ok, need, have = self.ground_fit(w)
                         top = self.ground_window()[1]
@@ -539,6 +710,21 @@ class Machine:
                     self.repeats[-1].update(ahead_at_start_m=d0, brake_point_m=self.brake_range(v))
                     detail += ' ahead=%.2f m brake_point=%.2f m limit=%.1f s' % (
                         d0, self.brake_range(v), self.hard_s)
+                if self.circle:
+                    v = float(self.prof['speed'])
+                    self.bias = w.get('gz_mean_1s') or 0.0
+                    self.turned = self.turned_rf = 0.0
+                    pose = w.get('rf2o_pose')
+                    self.last_t = now
+                    self.rf_last_yaw = pose[2] if pose else None
+                    self.start_pose = tuple(pose) if pose else None
+                    self.wz_hist = []
+                    self.hard_s = self.ramp_s + self.target_rad * self.geom['r_max'] / v + float(self.t3['time_slack_s'])
+                    self.repeats[-1].update(gyro_bias=self.bias, gyro_std_1s=w.get('gz_std_1s'),
+                                            start_pose=self.start_pose, geometry=self.geom)
+                    detail += ' steer=%+.2f rad R=%.2f m target %.2f turns limit=%.1f s gyro bias %.5f (std %s)' % (
+                        self.prof['steer'], self.geom['r_nom'], float(self.t3['target_turns']), self.hard_s, self.bias,
+                        '-' if w.get('gz_std_1s') is None else '%.4f' % w['gz_std_1s'])
                 self.log(now, 'DRIVE_START', detail)
             else:
                 return 0.0, 0.0, 0, None
@@ -552,11 +738,13 @@ class Machine:
                 reason = 'MUX_LEFT_MANUAL_MODE(%s,%s)' % (mode, st.get('last_stop_reason'))
             if reason is None and self.quit:
                 reason = 'QUIT'  # lost terminal (keys are KILL, handled above)
-            if reason is None and not self.brake_at_range and elapsed >= self.ramp_s + self.steady_s:
+            if reason is None and not self.brake_at_range and not self.circle and elapsed >= self.ramp_s + self.steady_s:
                 reason = 'PROFILE_DONE'
             if reason is None and elapsed >= self.hard_s:
                 reason = 'HARD_TIME_LIMIT'
-            if reason is None and self.ground:
+            if reason is None and self.circle:
+                reason = self.circle_step(now, elapsed, v, w)
+            if reason is None and self.ground and not self.circle:
                 have = self.ahead(w)
                 if not math.isfinite(have):
                     reason = 'FRONT_RANGE_LOST'
@@ -590,6 +778,7 @@ class Machine:
                 self.steady_count += 1
             elif 'extra_repeats' in self.prof:
                 detail += (' | not stopped at the brake point: NOT counted' if self.brake_at_range
+                           else ' | turns not completed: NOT counted' if self.circle
                            else ' | ended before steady speed: NOT counted')
             self.log(now, 'REPEAT_END', detail)
             self.repeat += 1
@@ -597,9 +786,10 @@ class Machine:
             self.state = 'DONE' if self.finished() else 'IDLE'
             if self.state == 'IDLE' and 'extra_repeats' in self.prof:
                 self.message = '%s | %s stops %d/%d, repeat %d of max %d: release SPACE, press n.' % (
-                    detail, 'brake-point' if self.brake_at_range else 'steady', self.steady_count,
+                    detail, 'brake-point' if self.brake_at_range else 'full-turn' if self.circle else 'steady',
+                    self.steady_count,
                     self.prof['repeats'], self.repeat + 1, self.max_repeats)
-                if self.brake_at_range:
+                if self.brake_at_range or self.circle:
                     self.message += ' Carry the car back to the start marks, hands off ~2 s, m to check.'
             elif self.state == 'IDLE':
                 self.message = '%s | Repeat %d/%d: release SPACE, press n to arm.' % (
@@ -770,6 +960,160 @@ def self_test():
     assert sd.step(1.5, None, True, gw(2.3, 0.5, mode='MANUAL_ACTIVE'))[0] > 0 and sd.state == 'DRIVING'
     assert sd.step(1.55, None, True, gw(2.3, 0.5, mode='STOP'))[0] == 0.0
     assert sd.events[-1]['detail'].startswith('MUX_LEFT_MANUAL_MODE') and sd.steady_count == 0
+
+    # ---- T3 (t3_circle): steer validation, geometry, clearance, visibility, geofence, drive stops
+    for bad_steer in (None, 0.04, 0.31, float('nan')):
+        try:
+            resolve_profile('t3_circle', 0.5, bad_steer, p)
+        except SystemExit:
+            continue
+        raise AssertionError('t3 resolved steer %s' % bad_steer)
+    try:
+        resolve_profile('t4_straight', 0.5, 0.1, p)
+        raise AssertionError('t4 accepted --steer')
+    except SystemExit:
+        pass
+    t3p = vp.get(p, 't3')
+    veh = vp.get(p, 'vehicle')
+    L = float(veh['wheelbase_m'])
+    body = (float(veh['body_length_m']), float(veh['body_width_m']), float(veh['front_bumper_x_m']))
+    import random as _rnd
+    rnd = _rnd.Random(3)
+    for st_ in (0.26, -0.26, 0.15):
+        g3 = t3_geometry(st_, t3p, L, *body)
+        assert abs(g3['r_nom'] - L / math.tan(abs(st_))) < 1e-12 and g3['center'][1] * st_ > 0
+        for _ in range(200):           # nested: every tangent circle with r <= r_max stays in the disk
+            r_ = rnd.uniform(g3['r_min'], g3['r_max'])
+            a_ = rnd.uniform(0, 2 * math.pi)
+            px, py = r_ * math.sin(a_), g3['side'] * r_ * (1 - math.cos(a_))
+            assert math.hypot(px - g3['center'][0], py - g3['center'][1]) <= g3['r_max'] + 1e-9
+    g26 = t3_geometry(0.26, t3p, L, *body)
+    assert 3.2 < g26['diameter_m'] < 3.4, g26                       # hall: ~3.3 m for +/-0.26 rad
+
+    class Scan3:
+        angle_min, angle_max = -math.pi, math.pi
+        angle_increment = 2 * math.pi / 1440
+        range_min, range_max = 0.0, 100.0
+
+        def __init__(self, r=6.0):
+            self.ranges = [r] * 1440
+
+        def put(self, bearing_deg, r, width_deg=2.0):
+            for i in range(1440):
+                a = math.degrees(self.angle_min + i * self.angle_increment)
+                if abs((a - bearing_deg + 180) % 360 - 180) <= width_deg / 2:
+                    self.ranges[i] = r
+            return self
+    lx = float(vp.get(p, 'lidar.x_m'))
+    assert t3_clearance(Scan3(), g26, lx, *body)['min_m'] > 1.0           # 6 m hall walls: clear
+    box_left = Scan3().put(90.0, 1.0)
+    assert t3_clearance(box_left, g26, lx, *body)['min_m'] < 0             # inside the LEFT circle's disk
+    assert t3_clearance(box_left, t3_geometry(-0.26, t3p, L, *body), lx, *body)['min_m'] > 0   # not the right one
+    assert t3_clearance(Scan3().put(180.0, 0.05), g26, lx, *body)['min_m'] > 1.0   # own body (behind laser) ignored
+    assert t3_visibility(Scan3())['min_fraction'] == 1.0
+    gap = Scan3().put(90.0, float('inf'), 60.0)
+    v3 = t3_visibility(gap)
+    assert v3['min_fraction'] < 0.05 and abs(v3['heading_deg'] - 90) <= 10, v3
+    st0 = (1.0, 2.0, math.pi / 2)                      # facing +y; left circle centre at (1 - r_max, 2)
+    assert abs(t3_fence(st0, g26, (1.0 - 2 * g26['r_max'], 2.0, 0)) - 0.0) < 1e-9
+    assert t3_fence(st0, g26, (1.0, 2.0, 0)) == 0.0 - 0.0 and t3_fence(st0, g26, (1.5, 2.0, 0)) > 0.4
+
+    def c3world(pose, gz, mode='STOP', clear=2.0, vis=1.0, rf_age=0.05, sector=3.0, **kw):
+        st = dict(mode=mode, last_mode_request='MANUAL', manual_min_front_valid_fraction=0.75)
+        return world(front_m=float('nan'), sector_min_m=sector, scan_age=0.05, left_m=2.0, right_m=2.0, st=st,
+                     gz=gz, gz_mean_1s=0.003, gz_std_1s=0.0005, rf2o_pose=pose, rf2o_age=rf_age,
+                     t3_clear=dict(min_m=clear, bearing_deg=45.0, n=1440),
+                     t3_vis=dict(min_fraction=vis, heading_deg=10.0), **kw)
+
+    def circle_run(steer, r_true_factor=1.0, turn_sign=1.0, fail_at=None, fail_kw=None, limit=80.0):
+        """Kinematic car on a circle (r_true = factor x nominal, turning turn_sign x commanded side);
+        raw gz = -(yaw rate) + bias (IMU z down). Returns (machine, zero reason, elapsed)."""
+        prof3 = resolve_profile('t3_circle', 0.5, steer, p)
+        m3 = Machine(prof3, p, live=False, ground_ok=True)
+        x, y, yaw, bias = 0.0, 0.0, 0.0, 0.003
+        m3.step(0.0, 'n', False, c3world((x, y, yaw), bias))
+        assert m3.state == 'ARMING', m3.events[-1]
+        m3.step(0.05, None, False, c3world((x, y, yaw), bias, mode='MANUAL_READY'))
+        m3.step(0.1, None, True, c3world((x, y, yaw), bias, mode='MANUAL_READY'))
+        assert m3.state == 'DRIVING', m3.events[-1]
+        k = 0.0
+        r_true = r_true_factor * m3.geom['r_nom']
+        side = (1.0 if steer > 0 else -1.0) * turn_sign
+        while m3.state == 'DRIVING' and k < limit:
+            k += 0.02
+            v = ramp_speed(0.5, k, m3.ramp)
+            wz = 0.0 if r_true_factor == 0 else side * v / r_true
+            yaw += wz * 0.02
+            x += v * math.cos(yaw) * 0.02
+            y += v * math.sin(yaw) * 0.02
+            kw = dict(mode='MANUAL_ACTIVE')
+            if fail_at is not None and k >= fail_at:
+                kw.update(fail_kw or {})
+            out3 = m3.step(0.1 + k, None, True, c3world((x, y, yaw), -wz + bias, **kw))
+            if m3.state == 'DRIVING':
+                assert out3[1] == steer and out3[2] == 1
+        zero = [e for e in m3.events if e['event'] == 'ZERO_COMMAND'][-1]['detail']
+        m3.step(0.1 + k + 0.5, None, False, c3world((x, y, yaw), bias))
+        m3.step(0.1 + k + 10.0, None, False, c3world((x, y, yaw), bias))
+        return m3, zero, k
+    m3, why, k = circle_run(0.26)
+    assert why.startswith('TURNS_DONE') and m3.steady_count == 1 and m3.state == 'DONE', (why, m3.state)
+    expect_k = 1.0 + (2 * 2 * math.pi * m3.geom['r_nom'] - 0.25) / 0.5   # ramp 1 s (0.25 m) + 2 turns at 0.5
+    assert abs(k - expect_k) < 0.1, (k, expect_k)
+    assert m3.hard_s > k and abs(m3.repeats[-1]['gyro_bias'] - 0.003) < 1e-12
+    m3, why, k = circle_run(-0.26)
+    assert why.startswith('TURNS_DONE') and m3.steady_count == 1                       # right circle
+    m3, why, k = circle_run(0.26, turn_sign=-1.0)                                      # turns the wrong way
+    # wrong way: the circle on the other side leaves the disk first (GEOFENCE ~1.5 s), the turn check by 2 s
+    assert why.startswith(('GEOFENCE', 'TURN_CHECK_FAILED')) and k < 2.1 and m3.steady_count == 0, (why, k)
+    m3, why, k = circle_run(0.26, r_true_factor=0.0)                                   # drives straight
+    assert why.startswith(('GEOFENCE', 'TURN_CHECK_FAILED')) and k < 2.1 and m3.steady_count == 0, (why, k)
+    m3, why, k = circle_run(0.26, r_true_factor=1.8)                                   # far larger than R_max
+    assert why.startswith('GEOFENCE') and m3.steady_count == 0, why
+    m3, why, k = circle_run(0.26, fail_at=5.0, fail_kw=dict(rf_age=0.5))
+    assert why.startswith('CIRCLE_RF2O_STALE') and 5.0 <= k < 5.05, (why, k)
+    m3, why, k = circle_run(0.26, fail_at=5.0, fail_kw=dict(imu_problem='IMU_FROZEN(test)'))
+    assert why.startswith('CIRCLE_IMU_PROBLEM') and m3.steady_count == 0, why
+    m3, why, k = circle_run(0.26, fail_at=3.0, fail_kw=dict(mode='STOP'))
+    assert why.startswith('MUX_LEFT_MANUAL_MODE') and m3.steady_count == 0, why       # mux gate = backstop
+    pr3 = resolve_profile('t3_circle', 0.5, 0.26, p)
+    for kw, why_ in ((dict(clear=-0.2), 'CIRCLE_NOT_CLEAR'), (dict(vis=0.78), 'CIRCLE_LOW_VISIBILITY'),
+                     (dict(rf_age=1.0), 'CIRCLE_RF2O_STALE'), (dict(gz=None), 'CIRCLE_NO_GYRO')):
+        a3 = Machine(pr3, p, live=False, ground_ok=True)
+        gz_ = kw.pop('gz', 0.003)
+        a3.step(0.0, 'n', False, c3world((0, 0, 0), gz_, **kw))
+        assert a3.state == 'IDLE' and a3.events[-1]['detail'].startswith(why_), (why_, a3.events[-1])
+    a3 = Machine(pr3, p, live=False, ground_ok=True)
+    a3.step(0.0, 'm', False, c3world((0, 0, 0), 0.003))
+    assert 'clear disk 3.31 m diameter' in a3.events[-1]['detail'], a3.events[-1]['detail']
+    a3.step(0.0, 'n', False, c3world((0, 0, 0), 0.003, sector=0.85))   # the T4 mux-sector rule still applies
+    assert a3.events[-1]['detail'].startswith('MUX_SECTOR_OBJECT'), a3.events[-1]
+    t3c = dict(servo_gain_left=-0.874, servo_gain_right=-1.062, servo_offset=0.335)
+    wide = dict(servo_min=0.10, servo_max=0.68)
+    ci = t3_precheck(pr3, p, 0.30, t3c, 0.335, wide)
+    assert abs(ci['servo_planned'] - 0.10776) < 1e-9 and ci['geometry']['side'] == 1.0
+    assert abs(t3_precheck(resolve_profile('t3_circle', 0.5, -0.26, p), p, 0.30, t3c, 0.335, wide)['servo_planned']
+               - 0.61112) < 1e-9
+    for args_, why_ in (((0.40, t3c, wide), 'max_steer_rad'),                                  # cap too high
+                        ((0.30, dict(t3c, servo_gain_left=-0.5), wide), 'T3 converter gains'),  # baseline gains
+                        ((0.30, dict(servo_offset=0.335), wide), 'T3 converter gains'),         # old converter
+                        ((0.30, t3c, dict(servo_min=0.27, servo_max=0.37)), 'vesc_driver clip'),  # T4 yaml
+                        ((0.30, t3c, {}), 'vesc_driver clip')):                                 # unreachable
+        try:
+            t3_precheck(pr3, p, args_[0], args_[1], 0.335, args_[2])
+            raise AssertionError('t3_precheck accepted %s' % why_)
+        except SystemExit as e:
+            assert why_ in str(e), (why_, str(e))
+    try:
+        t3_precheck(resolve_profile('t3_circle', 0.5, 0.30, p), p, 0.30, t3c, 0.335, wide)  # needs 0.073 < 0.10
+        raise AssertionError('servo below the converter clip accepted')
+    except SystemExit as e:
+        assert 'converter clip' in str(e)
+    print('PASS: T3 circle: --steer limits, nested clear disk, clearance (box, own body), visibility gap,')
+    print('      geofence; drives: 2 gyro turns counted (L/R, bias removed), wrong direction / straight ->')
+    print('      GEOFENCE or TURN_CHECK_FAILED by 2.1 s, too large -> GEOFENCE, RF2O stale, IMU fault, mux STOP')
+    print('      backstop; arm refusals (not clear, low visibility, RF2O stale, no gyro, mux sector object);')
+    print('      pre-run refusals (steer cap, converter gains, converter clip, VESC clip / T4 yaml).')
 
     # ---- KILL: any key but SPACE while arming / armed / driving / stopping -> zero, latched until n
     def armed(m, front=2.8):
@@ -1203,9 +1547,18 @@ def say(text):
 
 # ---------------------------------------------------------------- ROS
 
-def resolve_profile(test, speed):
-    """Profile with its speed fixed: stepped profiles need --speed equal to one step."""
+def resolve_profile(test, speed, steer=None, p=None):
+    """Profile with its speed fixed: stepped profiles need --speed equal to one step; circle profiles
+    need --steer (+ = left) within t3.steer_min_rad..steer_max_rad."""
     prof = dict(PROFILES[test])
+    if prof.get('circle'):
+        t3 = vp.get(p or vp.load(), 't3')
+        lo, hi = float(t3['steer_min_rad']), float(t3['steer_max_rad'])
+        if steer is None or not (math.isfinite(steer) and lo - 1e-9 <= abs(steer) <= hi + 1e-9):
+            raise SystemExit('%s needs --steer with |steer| in %.2f..%.2f rad (+ = left)' % (test, lo, hi))
+        prof['steer'] = float(steer)
+    elif steer is not None:
+        raise SystemExit('%s has a fixed steering angle; do not pass --steer' % test)
     if 'steps' in prof:
         if speed is None or not any(abs(speed - s) <= STEP_TOL for s in prof['steps']):
             raise SystemExit('%s needs --speed, one of %s' % (test, prof['steps']))
@@ -1220,6 +1573,7 @@ def run(args):
     from rclpy.qos import qos_profile_sensor_data
     from ackermann_msgs.msg import AckermannDriveStamped
     from sensor_msgs.msg import Imu, Joy, LaserScan
+    from nav_msgs.msg import Odometry
     from std_msgs.msg import String
     try:
         from vesc_msgs.msg import VescStateStamped
@@ -1227,7 +1581,7 @@ def run(args):
         VescStateStamped = None
 
     p = vp.load(args.params)
-    prof = resolve_profile(args.test, args.speed)
+    prof = resolve_profile(args.test, args.speed, args.steer, p)
     if args.live and not prof['live_allowed']:
         raise SystemExit('profile %s never runs with real actuation' % args.test)
     if prof['place'] == 'ground' and not args.t1_passed_confirmed:
@@ -1237,6 +1591,11 @@ def run(args):
         raise SystemExit('config/real_car disagrees with vehicle_params.yaml:\n  ' + '\n  '.join(mism))
     r = vp.get(p, 'runner')
     mux_sector = float(vp.get(p, 't4.mux_sector_deg'))
+    laser_x = float(vp.get(p, 'lidar.x_m'))
+    veh = vp.get(p, 'vehicle')
+    body = (float(veh['body_length_m']), float(veh['body_width_m']), float(veh['front_bumper_x_m']))
+    t3_geom = (t3_geometry(prof['steer'], vp.get(p, 't3'), float(veh['wheelbase_m']), *body)
+               if prof.get('circle') else None)
 
     class RunnerNode(Node):
         def __init__(self):
@@ -1252,7 +1611,12 @@ def run(args):
             self.create_subscription(String, '/control/status', self.on_status, 10)
             self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
             self.imu_watch = ImuWatch()
+            self.gz, self.gz_hist = None, []           # T3: latest raw gz and the last 1 s
+            self.rf2o = self.rf2o_at = None
+            self.t3_cache, self.t3_cache_at, self.t3_scan = (None, None), 0.0, None
             self.create_subscription(Imu, '/imu/data_raw', self.on_imu, qos_profile_sensor_data)
+            if prof.get('circle'):
+                self.create_subscription(Odometry, '/odom_rf2o', self.on_rf2o, qos_profile_sensor_data)
             if VescStateStamped is not None:
                 self.create_subscription(VescStateStamped, '/sensors/core', self.on_core, 10)
 
@@ -1271,8 +1635,20 @@ def run(args):
 
         def on_imu(self, msg):
             a, g = msg.linear_acceleration, msg.angular_velocity
+            now = time.monotonic()
             with self.lock:
-                self.imu_watch.add(time.monotonic(), (g.x, g.y, g.z, a.x, a.y, a.z))
+                self.imu_watch.add(now, (g.x, g.y, g.z, a.x, a.y, a.z))
+                self.gz = g.z
+                self.gz_hist.append((now, g.z))
+                while self.gz_hist and now - self.gz_hist[0][0] > 1.0:
+                    self.gz_hist.pop(0)
+
+        def on_rf2o(self, msg):
+            q = msg.pose.pose.orientation
+            yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+            with self.lock:
+                self.rf2o = (msg.pose.pose.position.x, msg.pose.pose.position.y, yaw)
+                self.rf2o_at = time.monotonic()
 
         def on_core(self, msg):
             with self.lock:
@@ -1322,6 +1698,18 @@ def run(args):
                              right_m=front_range(self.scan, half_width, -90.0))
                 w['erpm'] = (self.tele or {}).get('erpm')
                 w['imu_problem'] = self.imu_watch.status(now, imu_publishers)
+                if prof.get('circle'):
+                    gz = [x for _, x in self.gz_hist]
+                    w.update(gz=self.gz, gz_mean_1s=statistics.mean(gz) if gz else None,
+                             gz_std_1s=statistics.pstdev(gz) if len(gz) > 1 else None,
+                             rf2o_pose=self.rf2o, rf2o_age=(now - self.rf2o_at) if self.rf2o_at else 1e9)
+                    scan = self.scan
+            if prof.get('circle'):
+                # Clearance + visibility: ~1440 points, at most 5 Hz and only for a new scan (cached).
+                if scan is not None and scan is not self.t3_scan and now - self.t3_cache_at >= 0.2:
+                    self.t3_cache = (t3_clearance(scan, t3_geom, laser_x, *body), t3_visibility(scan))
+                    self.t3_cache_at, self.t3_scan = now, scan
+                w['t3_clear'], w['t3_vis'] = self.t3_cache
             return w
 
         def get_params(self, node_name, names):
@@ -1336,6 +1724,39 @@ def run(args):
     # which stops the spin thread before rclpy shuts down.
     with RosSession(RunnerNode) as node:
         drive_session(args, p, prof, r, node)
+
+
+def t3_precheck(prof, p, steer_cap, converter_params, base_off, clip):
+    """T3 refusals before anything is armed (SystemExit with the fix): mux steer cap <= t3.steer_max_rad,
+    converter per-side gains = the T3 values, planned servo inside the converter clip (not clamped) and
+    inside the vesc_driver servo clip. -> circle info for run_info.json."""
+    import t1b_stop_converter as conv
+    t3, veh = vp.get(p, 't3'), vp.get(p, 'vehicle')
+    steer = float(prof['steer'])
+    if steer_cap > float(t3['steer_max_rad']) + 1e-9:
+        raise SystemExit('t3_circle: mux max_steer_rad %.2f > t3.steer_max_rad %.2f (launch max_steer_rad:=0.30)'
+                         % (steer_cap, float(t3['steer_max_rad'])))
+    gl, gr = converter_params.get('servo_gain_left'), converter_params.get('servo_gain_right')
+    if (gl is None or gr is None or abs(float(gl) - float(t3['servo_gain_left'])) > 1e-6
+            or abs(float(gr) - float(t3['servo_gain_right'])) > 1e-6):
+        raise SystemExit('t3_circle needs the T3 converter gains %.3f / %.3f, the converter has %s / %s '
+                         '(launch converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/'
+                         't1b_converter_t3_t2gain.yaml)' % (float(t3['servo_gain_left']),
+                                                            float(t3['servo_gain_right']), gl, gr))
+    off = float(converter_params.get('servo_offset') or base_off)
+    gside = float(gl) if steer > 0 else float(gr)
+    servo = conv.servo_command(off, float(gl), float(gr), steer)
+    if abs(servo - (off + gside * steer)) > 1e-9:
+        raise SystemExit('t3_circle: steer %+.2f rad needs servo %.3f, outside the converter clip %s: '
+                         'choose a smaller --steer' % (steer, off + gside * steer, conv.SERVO_DRIVE_CLIP))
+    if (len(clip) < 2 or None in clip.values()
+            or not (float(clip['servo_min']) - 1e-9 <= servo <= float(clip['servo_max']) + 1e-9)):
+        raise SystemExit('t3_circle: planned servo %.3f outside the vesc_driver clip %s (launch '
+                         'vesc_yaml:=.../vesc_t3_erpm<N>.yaml)' % (servo, clip))
+    return dict(steer_rad=steer, servo_planned=servo, servo_offset=off, servo_gain_side=gside,
+                vesc_servo_clip=clip, t3=t3,
+                geometry=t3_geometry(steer, t3, float(veh['wheelbase_m']), float(veh['body_length_m']),
+                                     float(veh['body_width_m']), float(veh['front_bumper_x_m'])))
 
 
 def drive_session(args, p, prof, r, node):
@@ -1367,10 +1788,12 @@ def drive_session(args, p, prof, r, node):
         raise SystemExit('%s needs converter %s and not %s; graph has %s (launch converter:=...)' % (
             args.test, prof['converter'], sorted(other), sorted(names & (other | {prof['converter']}))))
     converter_params = {}
+    base_off = float(vp.get(p, 'steering.servo_offset'))
     method = 'speed0'
     if prof['converter'] == 't1b_stop_converter':
         converter_params = node.get_params('t1b_stop_converter',
-                                           ['method', 'brake_current_a', 'brake_hold_s', 'servo_offset'])
+                                           ['method', 'brake_current_a', 'brake_hold_s', 'servo_offset',
+                                            'servo_gain_left', 'servo_gain_right'])
         base_off = float(vp.get(p, 'steering.servo_offset'))
         if converter_params.get('servo_offset') is not None and \
                 abs(float(converter_params['servo_offset']) - base_off) > 1e-9:
@@ -1388,12 +1811,23 @@ def drive_session(args, p, prof, r, node):
     if prof.get('default_steer_cap') and abs(steer_cap - default_steer) > 1e-9:
         raise SystemExit('%s keeps the mux steer cap at its default %.2f rad (mux has %.2f): '
                          'do not pass max_steer_rad' % (args.test, default_steer, steer_cap))
+    circle_info = None
+    if prof.get('circle'):
+        circle_info = t3_precheck(prof, p, steer_cap, converter_params, base_off,
+                                  node.get_params('vesc_driver', ['servo_min', 'servo_max']))
+        g = circle_info['geometry']
+        say('T3 circle %s %+.2f rad -> servo %.3f; R nominal %.2f m; clear disk %.2f m diameter, centre %.2f m '
+            'to the %s of the start' % ('LEFT' if prof['steer'] > 0 else 'RIGHT', prof['steer'],
+                                        circle_info['servo_planned'], g['r_nom'], g['diameter_m'], g['r_max'],
+                                        'left' if prof['steer'] > 0 else 'right'))
     gate = 'not a stepped profile'
     if 'steps' in prof:
         bad = step_mismatch(prof['speed'], cap, speed_max, gain, float(vp.get(p, 'caps.vesc_speed_max_margin')))
         if bad:
             raise SystemExit('Step check: ' + bad)
-        if args.live:
+        if prof.get('no_step_gate'):
+            gate = 'no step gate (%s <= the T4-passed 0.5 m/s on the ground)' % args.test
+        elif args.live:
             ok, gate = step_gate(args.out_root or vp.evidence_root(), args.test, method,
                                  prof['speed'], prof['steps'], prof['repeats'])
             if not ok:
@@ -1412,7 +1846,7 @@ def drive_session(args, p, prof, r, node):
                 stop_method=method, converter=prof['converter'], converter_params=converter_params,
                 step_gate=gate,
                 mux_status_at_start=st, mux_max_speed_mps=cap, mux_max_steer_rad=steer_cap,
-                vesc_speed_max_erpm=speed_max, publish_hz=r['publish_hz'],
+                vesc_speed_max_erpm=speed_max, publish_hz=r['publish_hz'], circle=circle_info,
                 ramp_accel_mps2=r['ramp_accel_mps2'], vehicle_params=p, bag_topics=BAG_TOPICS)
     (out / 'run_info.json').write_text(json.dumps(info, indent=2, default=str))
     (out / 'README.md').write_text(
@@ -1569,6 +2003,7 @@ def main():
     ap.add_argument('--out-root', help='results root (default ~/f1tenth_hw_evidence/real_car_tests)')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--list', action='store_true')
+    ap.add_argument('--steer', type=float, help='t3_circle: constant steering angle, rad (+ = left)')
     ap.add_argument('--speed', type=float, help='stepped profiles (t1_stop, t1b_stop, t4_straight): this step, m/s')
     ap.add_argument('--shutdown-probe', choices=['normal', 'systemexit', 'keyboardinterrupt'],
                     help=argparse.SUPPRESS)

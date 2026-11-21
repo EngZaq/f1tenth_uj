@@ -15,6 +15,10 @@ mid-brake. Diagnostics: /t1b_stop_converter/status (JSON). Not an emergency stop
 Parameter servo_offset (default = vehicle_params steering.servo_offset) is a TEST-ONLY override of
 the straight-ahead servo value (T4 20 Nov: --ros-args --params-file
 config/real_car/t1b_converter_t4_offset0358.yaml); validated against the baseline and T2 driving clip.
+Parameters servo_gain_left / servo_gain_right (default = vehicle_params steering.servo_gain) are TEST-ONLY
+per-side steering gains (T3 21 Nov: config/real_car/t1b_converter_t3_t2gain.yaml, T2 per-side fit):
+servo = offset + (left gain if steer > 0 else right gain) x steer. Validated in SERVO_GAIN_RANGE. The servo
+output is clamped to the T2 driving clip 0.10-0.68 (the per-test VESC yaml clips again, usually tighter).
 
   t1b_stop_converter.py --self-test
 """
@@ -33,6 +37,7 @@ BRAKE_MAX_A = 10.0      # never above the T1b yaml brake_max
 HOLD_MAX_S = 5.0
 SERVO_OFFSET_MAX_DELTA = 0.05     # test override at most this far from the baseline offset
 SERVO_DRIVE_CLIP = (0.10, 0.68)   # T2 19 Nov driving clip (REAL_CAR_TEST_RESULTS.md)
+SERVO_GAIN_RANGE = (-1.2, -0.4)  # test gain override limits (baseline -0.50, T2 fit -0.87 / -1.06)
 STALE_S = 0.2           # same order as the mux COMMAND_TTL (0.22 s)
 RATE_HZ = 50.0
 
@@ -51,6 +56,17 @@ def validate_servo_offset(offset, baseline):
             and SERVO_DRIVE_CLIP[0] <= offset <= SERVO_DRIVE_CLIP[1]):
         raise ValueError('servo_offset %r must be within %.2f of the baseline %.3f and inside %.2f..%.2f'
                          % (offset, SERVO_OFFSET_MAX_DELTA, baseline, SERVO_DRIVE_CLIP[0], SERVO_DRIVE_CLIP[1]))
+
+
+def validate_servo_gain(g):
+    if not (math.isfinite(g) and SERVO_GAIN_RANGE[0] <= g <= SERVO_GAIN_RANGE[1]):
+        raise ValueError('servo gain %r must be in %.2f..%.2f' % (g, SERVO_GAIN_RANGE[0], SERVO_GAIN_RANGE[1]))
+
+
+def servo_command(offset, gain_left, gain_right, steer):
+    """Servo position for a steering angle (+ = left), per-side linear, clamped to the T2 driving clip."""
+    servo = offset + (gain_left if steer > 0 else gain_right) * steer
+    return min(SERVO_DRIVE_CLIP[1], max(SERVO_DRIVE_CLIP[0], servo))
 
 
 class StopLogic:
@@ -117,8 +133,24 @@ def self_test():
         raise AssertionError('servo_offset outside the T2 clip accepted')
     except ValueError:
         pass
+    for gl in (-0.4, -0.874, -1.2):
+        validate_servo_gain(gl)
+    for bad in (-0.39, -1.21, 0.5, float('nan')):
+        try:
+            validate_servo_gain(bad)
+        except ValueError:
+            continue
+        raise AssertionError('servo gain %r accepted' % bad)
+    sg = float(vp.get(p, 'steering.servo_gain'))
+    assert abs(servo_command(base, sg, sg, 0.1) - (base + sg * 0.1)) < 1e-12       # baseline: unchanged
+    assert servo_command(base, sg, sg, 0.0) == base
+    assert abs(servo_command(0.335, -0.874, -1.062, 0.26) - 0.10776) < 1e-9        # T3 left 0.26 rad
+    assert abs(servo_command(0.335, -0.874, -1.062, -0.26) - 0.61112) < 1e-9       # T3 right 0.26 rad
+    assert servo_command(0.335, -0.874, -1.062, 0.40) == SERVO_DRIVE_CLIP[0]        # clamped, never past
+    assert servo_command(0.335, -0.874, -1.062, -0.40) == SERVO_DRIVE_CLIP[1]
     print('PASS: method/limit validation, drive pass-through, brake hold then release,')
-    print('      current0, speed0, stale and non-finite /drive stop, servo_offset override limits.')
+    print('      current0, speed0, stale and non-finite /drive stop, servo_offset override limits,')
+    print('      per-side servo gains (limits, T3 values, baseline unchanged), output clamp 0.10-0.68.')
     print('      No ROS imported.')
 
 
@@ -148,6 +180,8 @@ def main():
             self.declare_parameter('brake_current_a', 5.0)
             self.declare_parameter('brake_hold_s', 2.0)
             self.declare_parameter('servo_offset', s_offset)
+            self.declare_parameter('servo_gain_left', s_gain)
+            self.declare_parameter('servo_gain_right', s_gain)
             method = str(self.get_parameter('method').value)
             brake_a = float(self.get_parameter('brake_current_a').value)
             hold_s = float(self.get_parameter('brake_hold_s').value)
@@ -157,6 +191,13 @@ def main():
             if abs(self.servo_offset - s_offset) > 1e-9:
                 self.get_logger().warn('TEST servo_offset override %.3f (baseline %.3f in vehicle_params.yaml)'
                                        % (self.servo_offset, s_offset))
+            self.gain_left = float(self.get_parameter('servo_gain_left').value)
+            self.gain_right = float(self.get_parameter('servo_gain_right').value)
+            for g in (self.gain_left, self.gain_right):
+                validate_servo_gain(g)                                       # raises -> node exits
+            if abs(self.gain_left - s_gain) > 1e-9 or abs(self.gain_right - s_gain) > 1e-9:
+                self.get_logger().warn('TEST servo gains left %.3f / right %.3f (baseline %.3f in vehicle_params.yaml)'
+                                       % (self.gain_left, self.gain_right, s_gain))
             self.speed_pub = self.create_publisher(Float64, '/commands/motor/speed', 10)
             self.brake_pub = self.create_publisher(Float64, '/commands/motor/brake', 10)
             self.current_pub = self.create_publisher(Float64, '/commands/motor/current', 10)
@@ -180,12 +221,13 @@ def main():
             pub = {'speed': self.speed_pub, 'brake': self.brake_pub, 'current': self.current_pub}[kind]
             pub.publish(Float64(data=float(value)))
             steer = self.steer if (age is not None and age < STALE_S and math.isfinite(self.steer)) else 0.0
-            servo = self.servo_offset + s_gain * steer
+            servo = servo_command(self.servo_offset, self.gain_left, self.gain_right, steer)
             self.servo_pub.publish(Float64(data=servo))
             self.status_pub.publish(String(data=json.dumps(dict(
                 method=self.logic.method, phase=phase, out=kind, value=round(value, 3),
                 speed_in=round(self.speed, 4), drive_age_s=None if age is None else round(age, 3),
-                servo=round(servo, 4), servo_offset=self.servo_offset), separators=(',', ':'))))
+                servo=round(servo, 4), servo_offset=self.servo_offset, servo_gain_left=self.gain_left,
+                servo_gain_right=self.gain_right), separators=(',', ':'))))
 
     rclpy.init()
     node = Converter()

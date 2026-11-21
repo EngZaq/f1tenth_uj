@@ -1,0 +1,13 @@
+# T3-ONLY test parameters for tools/real_car_tests/t1b_stop_converter.py (Moatasem, 21 Nov).
+# Per-side steering gains from the T2 19 Nov fit (fit.json left_gain -0.874, right_gain -1.062; the
+# combined fit was -0.956), instead of the baseline -0.50 that gives about half the real angle. Centre =
+# the provisional baseline 0.335 (vehicle_params.yaml; not overridden). servo = 0.335 + gain_side x steer,
+# clamped 0.10-0.68 in the converter; vesc_t3_erpm*.yaml clips 0.10-0.68 again. Values must equal
+# vehicle_params.yaml t3.servo_gain_left / right (run_test.py t3_circle refuses otherwise).
+# NOT a baseline change: ackermann_to_vesc_real.yaml / vesc_to_odom_real.yaml keep -0.50 (vesc_to_odom yaw
+# rate is therefore wrong in T3; t3_analyze.py does not use it).
+# Use: real_car_test.launch.py converter:=t1b ... converter_params_file:=<this file>
+t1b_stop_converter:
+  ros__parameters:
+    servo_gain_left: -0.874
+    servo_gain_right: -1.062

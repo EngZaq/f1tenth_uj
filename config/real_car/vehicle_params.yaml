@@ -116,6 +116,22 @@ t4:                                 # T4 straight line on the ground (run_test.p
   time_slack_s: 1.0                 # hard time limit = expected time to the brake point + this
   wall_fit_deg: 10.0                # analyze.py: wall line fit in +/- this window (distance + heading to the wall)
 
+t3:                                 # T3 constant-steering circles on the ground (run_test.py t3_circle), design 21 Nov
+  steer_min_rad: 0.05               # --steer allowed |0.05..0.30| rad (+ = left); mux max_steer_rad must cover it
+  steer_max_rad: 0.30               # and stay <= this (mux ceiling 0.40)
+  servo_gain_left: -0.874           # T2 19 Nov per-side fit (fit.json left_gain), TEST-ONLY: T3 converter yaml only
+  servo_gain_right: -1.062          # T2 19 Nov per-side fit (fit.json right_gain), TEST-ONLY
+  target_turns: 2.0                 # stop (brake 5 A) once the gyro heading change reaches this many turns
+  r_factor_min: 0.8                 # real radius assumed within [min, max] x L / tan(steer): nested circles,
+  r_factor_max: 1.25                #   so one clear disk around the largest one covers all of them
+  clear_margin_m: 0.30              # arm: no LiDAR return within (outer body reach + this) of the largest circle
+  geofence_margin_m: 0.20           # drive: base_link (RF2O) must stay within R_max + this of the largest circle centre
+  visibility_margin: 0.05           # arm: every heading's +/-20 deg window >= mux manual_min_front_valid + this
+  turn_check_s: 2.0                 # drive: after this long, yaw rate must have the commanded sign and
+  turn_check_fraction: 0.3          #   >= this share of v tan(steer) / L (else TURN_CHECK_FAILED)
+  rf2o_stale_s: 0.3                 # drive: geofence source older than this -> stop
+  time_slack_s: 3.0                 # hard time limit = ramp + target_turns x 2 pi x R_max / v + this
+
 noise:                              # measurement R per sensor: T5/T6
   vesc_vx_var: null
   rf2o_vx_var: null

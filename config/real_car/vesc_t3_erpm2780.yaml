@@ -1,0 +1,22 @@
+# vesc_driver for T3 (constant-steering circles on the ground), step 0.3 m/s. Use ONLY with
+# converter:=t1b stop_method:=brake brake_current_a:=5.0, converter_params_file:=t1b_converter_t3_t2gain.yaml
+# and max_steer_rad <= 0.30 (run_test.py t3_circle checks all of it). Approved per step by Moatasem.
+# Same as vesc_t1b_erpm4630.yaml except speed_max 2780 (= 0.3 x 8414 x 1.10, rounded) and the WIDE
+# servo clip below: never use this file for T1 / T4 / teleop. NOT an emergency stop.
+vesc_driver:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
+    speed_min: -2780.0
+    speed_max: 2780.0
+    current_min: -2.0
+    current_max: 2.0
+    brake_min: 0.0
+    brake_max: 10.0
+    duty_cycle_min: 0.0
+    duty_cycle_max: 0.0
+    position_min: 0.0
+    position_max: 0.0
+    # T3 ONLY: the T2 19 Nov driving clip (one step before the mechanical stops ~0.08 / ~0.70).
+    # With centre 0.335 and the T2 per-side gains: +0.26 rad -> 0.108, -0.26 rad -> 0.611 (inside).
+    servo_min: 0.10
+    servo_max: 0.68

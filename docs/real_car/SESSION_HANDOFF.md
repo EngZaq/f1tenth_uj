@@ -134,6 +134,11 @@ distance (T4) before it can be considered.
 3. **T3** loaded steering on the stand, then mini-circles on the ground at 0.5 (then 1.0) m/s at 50 % and
    90 % of the measured max steer (`max_steer_rad` launch arg, approved per test); delta = atan(0.260 / R)
    vs T2. Runner profile not written yet.
+3a. **T3 PREPARED 21 Nov (not run):** `t3_circle` runner profile, T3 converter / VESC yamls, `t3_analyze.py`,
+   hall checklist `T3_HALL_CHECKLIST.md`. Commands +/-0.26 (90 %, left limited by the 0.10 clip) and +/-0.18
+   rad (0.15 needs a 5.1 m clear disk). **Open decision before running:** the battery-disconnect rule cannot be
+   kept while circling; a frozen Jetson stops only by the VESC timeout (~1 s, coasting): set the VESC timeout /
+   brake first or accept it with extra space (checklist section 0).
 4. **T4** (0.5 m/s is next step 3) straight line 0.5/1.0/1.5 m/s toward a wall, 3 repeats each (runner ground check): LiDAR vs VESC
    vs RF2O distance -> `speed_to_erpm_gain` (same value in both converter and vesc_to_odom), lateral drift
    -> steering offset, start delay, stopping distance and deceleration with the chosen stop method. Profile
@@ -270,7 +275,7 @@ sim time): live chain = replay within 1 mm (+0.026 / +0.016 / +0.000 m).
 
 Self-tests (Claude may run; the runner's shutdown probe uses isolated domain 77, no publishers):
 ```bash
-for t in run_test analyze t1b_stop_converter t2_servo_sweep ekf_shadow_inputs ekf_shadow_replay; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
+for t in run_test analyze t1b_stop_converter t2_servo_sweep ekf_shadow_inputs ekf_shadow_replay t3_analyze t4_yaw_plot; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py --self-test
 python3 ~/f1tenth_uj/src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
 ```

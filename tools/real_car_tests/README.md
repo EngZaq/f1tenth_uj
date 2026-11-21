@@ -93,6 +93,33 @@ steer cap). Runner: `run_test.py --test t4_straight --speed 0.5 --t1-passed-conf
 `/imu/data_raw` (21 Nov: the bmi160 node exits if the car moves during its start-up gyro calibration) ->
 `IMU_STALE(IMU node not running: restart the stack and keep the car still for 10 s)`.
 
+## T3: constant-steering circles on the ground (`t3_circle`, prepared 21 Nov)
+
+Hall checklist, commands and decisions: `docs/real_car/T3_HALL_CHECKLIST.md`. Values: `vehicle_params.yaml t3`.
+Stack: as T4 plus `max_steer_rad:=0.30`, `vesc_t3_erpm4630.yaml` (or `2780` for 0.3 m/s; servo clip 0.10-0.68)
+and `converter_params_file:=config/real_car/t1b_converter_t3_t2gain.yaml` (T2 per-side gains -0.874 / -1.062,
+centre 0.335; the converter now clamps its servo output to 0.10-0.68). Runner:
+`run_test.py --test t3_circle --speed 0.5 --steer <+/-rad> --t1-passed-confirmed [--live]`.
+
+- **Pre-run refusals:** mux steer cap > 0.30, converter gains not the T3 values, planned servo outside the
+  converter clip (e.g. +0.30 rad -> 0.073) or the vesc_driver clip (a T4 yaml).
+- **Clear disk:** circles from the same start and heading are nested, so one disk around the largest plausible
+  circle (1.25 x L / tan(steer); smallest 0.8 x) + body corner + 0.30 m covers them all: +/-0.26 rad 3.31 m,
+  +/-0.18 4.42 m, +/-0.15 5.14 m diameter. Arm refused if any LiDAR return (car body excluded) is inside it.
+- **Mux visibility:** arm refused if, for any heading of the circle, the +/-20 deg window has fewer finite returns
+  than the mux `manual_min_front_valid` + 0.05. The mux gate itself is unchanged and stays the backstop.
+- **Drive stops:** `TURNS_DONE` (gyro heading = 2 turns, bias from the 1 s before the start; the only counted
+  stop), `TURNS_RF2O_BACKUP`, `GEOFENCE` (RF2O base_link > 0.20 m outside the largest circle), `TURN_CHECK_FAILED`
+  (after 2 s the 0.5 s mean yaw rate must have the commanded sign and >= 30 % of v tan(steer) / L),
+  `CIRCLE_RF2O_STALE` (> 0.3 s), `CIRCLE_IMU_PROBLEM`, `HARD_TIME_LIMIT`, plus SPACE / KILL / mux as in T4.
+  Brake 5 A (t1b converter). `m` prints the clear disk, clearance, visibility and RF2O state.
+
+`t3_analyze.py <t3 folder> [...] [--shadow <ekf_shadow_live>] [--t2 <T2 folder>]`: per run yaw rate (gyro, gyro /
+RF2O), v (C1 EKF / RF2O / VESC), R = v / yaw rate and Kasa circle fits (RF2O, EKF paths), real angle atan(L / R)
+vs command and vs the T2 per-side fit at the servo actually sent, ground gain per side, slip angle / vy (RF2O
+path vs yaw), IMU y sign (gravity-perpendicular +y vs v x yaw rate). Writes `t3.json`. Synthetic end-to-end
+check 21 Nov (R 1.10 m, 2 deg slip, tilted IMU): R 1.100, angle 13.3 deg, slip -1.9 deg, IMU y +1.00.
+
 `t4_yaw_plot.py <T4 folder> [...]` (20 Nov): yaw rate (BMI160 gz, bias from the 1 s before the
 command, base_link = -gz; RF2O pose derivative) vs time and vs distance per counted repeat, curvature
 yaw rate / VESC vx with a one / two-level / linear test (STEP, CONSTANT, OSCILLATING, GRADUAL),
