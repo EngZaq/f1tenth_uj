@@ -16,7 +16,7 @@ vesc_driver:
     duty_cycle_max: 0.0
     position_min: 0.0
     position_max: 0.0
-    # Clip set for offset 0.320 +/- 0.50 * 0.10 rad. Offset 0.330 since 20 Nov (provisional): inside;
-    # clip unchanged (approved per test), right steering limited to 0.08 rad here.
+    # Clip set for offset 0.320 +/- 0.50 * 0.10 rad. Offset 0.335 since 21 Nov (provisional): inside;
+    # clip unchanged (approved per test), right steering limited to (0.37 - 0.335) / 0.50 = 0.07 rad here.
     servo_min: 0.27
     servo_max: 0.37

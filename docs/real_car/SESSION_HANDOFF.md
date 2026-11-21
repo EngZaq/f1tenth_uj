@@ -14,8 +14,8 @@ For Moatasem and for the next Claude Code session. Read this, then
 - **20 Nov:** T4 at 0.5 m/s done (carpet + tile, brake 5 A, no F-01 rebound); **steering offset 0.330
   PROVISIONAL baseline** (tile; was 0.320; re-measure after the play fix); gain candidate ~8700 **withdrawn 21 Nov**
   (8414 kept: cruise-only 8280-8480); F-18 IMU freeze guarded in the runner and preflight.
-- **21 Nov:** F-18 second cause (IMU node exits on start-up motion; guard message added, driver proposal for Zaid). Phase F: shadow EKF **C1** (VESC de-weighted while braking / below 2000 ERPM + RF2O vx fallback) recommended offline and **validated live at 0.5 m/s straight** (total +0.029 m vs LiDAR, RF2O never stale). Gain 8414 kept. T4 tile at the default 0.330: heading -8.0 deg, non-monotonic vs 0.340 / 0.358 even within one start spot -> **steering play is the top blocker**; 0.330 stays PROVISIONAL. IMU x axis points backward + ~10 deg tilt (for Zaid).
-- **Next:** section 4, step 2 (play fix, then centre) is the top blocker. Steering findings for Zaid: section 4a.
+- **21 Nov:** F-18 second cause (IMU node exits on start-up motion; guard message added, driver proposal for Zaid). Phase F: shadow EKF **C1** (VESC de-weighted while braking / below 2000 ERPM + RF2O vx fallback) recommended offline and **validated live at 0.5 m/s straight** (total +0.029 m vs LiDAR, RF2O never stale). Gain 8414 kept. T4 tile at the default 0.330: heading -8.0 deg, non-monotonic vs 0.340 / 0.358 even within one start spot -> **steering play is the top blocker**. Then T4 at 0.335 (spot B -0.9 deg/m, mean heading -0.9 deg, C1 live +0.017 m): **steering centre 0.335 PROVISIONAL** (applied in vehicle_params + both real-car node yamls; clips unchanged, right steering 0.07 rad in the 0.27-0.37 yamls). IMU x axis points backward + ~10 deg tilt (for Zaid).
+- **Next:** a second, fully restarted T4 session at 0.335 (3 counted runs, spot B: session-to-session variation); then section 4, step 2 (play fix, then centre) stays the top blocker. Steering findings for Zaid: section 4a.
 
 ## 1. Safety rules and standing approvals (Moatasem)
 
@@ -85,6 +85,8 @@ distance (T4) before it can be considered.
    elsewhere). If the centre readings agree (within ~1 deg), adopt gain/offset from the fit through a
    results row (`servo_gain` -0.50 and `servo_offset` 0.320 change only then, in both converter and
    vesc_to_odom yamls). If the horn is re-mounted, the full T2 (limits too) is redone.
+   **21 Nov: 0.335 adopted as the provisional centre** (results doc row "Steering centre 0.335"). Next check: a second,
+   fully restarted session at 0.335 (preflight clean, new launch, 3 counted runs from spot B), no override needed now.
    **TOP BLOCKER (21 Nov):** tile T4 heading is non-monotonic in the offset (0.330 / 0.340 / 0.358) with a
    constant servo command, so play dominates and the centre cannot be resolved further before the fix. Then a
    T4 centre check: **one marked start spot** (21 Nov: start position alone shifted the heading by 2-3 deg/m),

@@ -8,6 +8,8 @@
 # spot alone shifts it by 2-3 deg/m: use one marked start spot, >= 3 counted runs, compare deg/m.
 # vesc_to_odom (/odom_vesc_observe) uses 0.330, so its yaw is off by 0.005 in this run; analyze.py --t4
 # uses only its speed (vx).
+# 21 Nov: 0.335 ADOPTED as the provisional baseline (results doc); this file now equals the default and is kept
+# only as the record of run 20261121_210557. Do not use it for new runs.
 # Use: real_car_test.launch.py converter:=t1b ... converter_params_file:=<this file>
 t1b_stop_converter:
   ros__parameters:

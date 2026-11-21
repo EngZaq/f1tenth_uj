@@ -3,8 +3,8 @@
 # speed_max 3500 ERPM = 0.416 m/s at gain 8414 (same as the 12 Nov trial and vesc_real_integration.yaml).
 # Higher steps get their own file (vesc_test_erpm<N>.yaml), one per speed step, each approved first.
 # Servo clip 0.27-0.37 = offset 0.320 +/- 0.50 * 0.10 rad (mux default steering cap), symmetric about 0.320.
-# Offset 0.330 since 20 Nov (provisional): inside the clip; the clip is unchanged (approved per test),
-# so right steering is limited to (0.37 - 0.330) / 0.50 = 0.08 rad here.
+# Offset 0.335 since 21 Nov (provisional): inside the clip; the clip is unchanged (approved per test),
+# so right steering is limited to (0.37 - 0.335) / 0.50 = 0.07 rad here.
 # brake 0: no brake command can pass (brake units are AMPS: vesc_packet.cpp sends brake*1000 mA).
 vesc_driver:
   ros__parameters:

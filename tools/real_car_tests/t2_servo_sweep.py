@@ -8,7 +8,7 @@ measure); servo commands are slew-limited at 50 Hz.
 
 Rules (Moatasem, 14 Nov; two servos already burned on this car), values in vehicle_params.yaml t2:
 - Start inside the approved range (vehicle_params.yaml t2, 0.10-0.60 since 19 Nov) in 0.02 steps
-  from the centre (vehicle_params steering.servo_offset: 0.320 on 19 Nov, 0.330 since 20 Nov), then 0.01.
+  from the centre (vehicle_params steering.servo_offset: 0.320 on 19 Nov, 0.330 on 20 Nov, 0.335 since 21 Nov), then 0.01.
 - Every new outward point is first visited for at most pulse_s (< 1 s) and the operator answers
   "binding / noise?". Yes -> that side ends at the previous point and the tool never goes back.
   No -> the point is confirmed and may be held for measuring (back to centre after max_hold_s).
