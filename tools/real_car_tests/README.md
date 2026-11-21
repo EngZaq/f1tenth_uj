@@ -99,6 +99,14 @@ yaw rate / VESC vx with a one / two-level / linear test (STEP, CONSTANT, OSCILLA
 turning points, motion / ramp-end / brake marks. A frozen IMU (identical samples) switches that repeat
 to RF2O. Writes `t4_yaw.png` and `t4_yaw.json` into the folder; reads the bag only.
 
+`ekf_shadow_replay.py [folder ...] [--gain 8700] [--variants A B]` (21 Nov, Phase F, offline only, refuses if a car
+stack runs): rebuilds EKF inputs from a T4 bag (VESC vx from `/sensors/core` / gain + vy = 0, BMI160 yaw rate with
+the 1 s pre-command bias, RF2O twist; R in `config/real_car/ekf_real_shadow.yaml`), runs `robot_localization`
+`ekf_node` per repeat in isolated domain 88 with `use_sim_time` + `ros2 bag play --clock`, and compares
+`/ekf_shadow/odom` (laser point along the start wall normal) with the `analyze.py --t4` LiDAR references per phase
+(ramp, brake, total) and heading, plus a latency-free cruise gain. Default folders: the two healthy-IMU T4 sessions.
+Writes `ekf_shadow_replay.json` into each folder. `--self-test` checks the geometry and signs.
+
 `analyze.py --t4 [folder ...]` (default: latest T4 folder; several = pooled summary as well), also
 written to the folder README: per repeat stop distance (LiDAR at the converter's brake command vs at
 standstill, VESC odom over the stop, and from the runner's zero), decel v^2/2d (LiDAR and VESC),

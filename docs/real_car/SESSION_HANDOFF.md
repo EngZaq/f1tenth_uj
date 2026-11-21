@@ -135,7 +135,7 @@ distance (T4) before it can be considered.
    scripts from `~/Data/kf_practice/imu/`), 2 min wheels spinning on the stand.
 6. **T6** offline on T3/T4/T5 bags: VESC vx vs RF2O vs LiDAR, gyro vs RF2O yaw rate, time offsets
    (cross-correlation), R per sensor -> `vehicle_params.yaml noise`.
-7. **Phase F (shadow only, no TF authority):**
+7. **Phase F (shadow only, no TF authority):** **21 Nov: first step done offline** (results doc row "Phase F"): `config/real_car/ekf_real_shadow.yaml` (A: VESC + vy=0 + gyro; B: + RF2O) replayed on the two healthy-IMU T4 sessions with `tools/real_car_tests/ekf_shadow_replay.py`. Both under-read distance by ~0.1 m per run, mostly in the brake phase (VESC ~0 while sliding); cruise gain 8280-8480 (8700 not supported). Next: variant C with VESC R inflated while braking / at low speed; live adapter (`tools/shadow_covariance_adapter.py` has no vy=0 / gyro bias yet); T3 for vy=0.
    - `config/real_car/ekf_real_shadow.yaml` from `src/f1tenth_bringup/config/ekf_moatasem_vesc_imu_shadow.yaml`:
      VESC vx + **vy = 0** (via `tools/shadow_covariance_adapter.py`) + BMI160 yaw rate (bias removed,
      scale from T5), `two_d_mode: true`, R from T5/T6, Q_vx 0.05, Q_vyaw 0.02, no gates,
