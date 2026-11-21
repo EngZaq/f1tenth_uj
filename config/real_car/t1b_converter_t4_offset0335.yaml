@@ -1,0 +1,14 @@
+# T4-ONLY test parameters for tools/real_car_tests/t1b_stop_converter.py (Moatasem, 21 Nov).
+# Straight-ahead servo 0.335, between the provisional baseline 0.330 (tile 21 Nov: RF2O -5.8 / -3.9 deg/m,
+# start spots A / B) and 0.340 (tile 20 Nov: -2.9 / -1.3..-2.0 deg/m). Same structure as
+# t1b_converter_t4_offset0340.yaml. Gain -0.50 unchanged, steering command 0. NOT a baseline change:
+# vehicle_params.yaml steering.servo_offset stays 0.330 (PROVISIONAL). The converter refuses values more
+# than 0.05 from the baseline or outside the T2 driving clip 0.10-0.68; vesc_t1b_erpm4630.yaml clips 0.27-0.37.
+# Caveat (results doc, 21 Nov): heading is non-monotonic in the offset because of steering play, and the start
+# spot alone shifts it by 2-3 deg/m: use one marked start spot, >= 3 counted runs, compare deg/m.
+# vesc_to_odom (/odom_vesc_observe) uses 0.330, so its yaw is off by 0.005 in this run; analyze.py --t4
+# uses only its speed (vx).
+# Use: real_car_test.launch.py converter:=t1b ... converter_params_file:=<this file>
+t1b_stop_converter:
+  ros__parameters:
+    servo_offset: 0.335
