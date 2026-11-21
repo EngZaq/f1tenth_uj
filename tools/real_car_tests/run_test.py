@@ -105,6 +105,10 @@ IMU_WINDOW_S = 1.0        # look at the last second of samples
 IMU_FROZEN_SHARE = 0.5    # frozen: more than this share of consecutive samples identical
 IMU_STALE_S = 0.3         # stale: no sample for this long
 IMU_MIN_SAMPLES = 50      # fewer in the window (100 Hz expected) -> IMU_STALE
+# 20 Nov 21:35: the bmi160 node EXITS (exit code 0, launch says "finished cleanly") when its start-up
+# gyro calibration sees motion (std > gyro_motion_std_limit_dps 0.5). 0 publishers = node gone.
+# 10 s = 2 s warm-up + 5 s calibration (500 samples at 100 Hz) + margin.
+IMU_NODE_DOWN = ('IMU_STALE(IMU node not running: restart the stack and keep the car still for 10 s)')
 
 
 class ImuWatch:
@@ -119,7 +123,10 @@ class ImuWatch:
         while self.samples and self.samples[0][0] < cut:
             self.samples.pop(0)
 
-    def status(self, now):
+    def status(self, now, publishers=None):
+        """publishers: count on /imu/data_raw (None = unknown). 0 -> the node is not running."""
+        if publishers == 0:
+            return IMU_NODE_DOWN
         if not self.samples or now - self.samples[-1][0] > IMU_STALE_S:
             return 'IMU_STALE(no /imu/data_raw for > %.1f s)' % IMU_STALE_S
         win = [v for t, v in self.samples if t >= now - IMU_WINDOW_S]
@@ -956,12 +963,15 @@ def self_test():
     for i in range(20):
         sparse.add(i * 0.05, (float(i), 0, 0, 0, 0, 0))
     assert sparse.status(0.96).startswith('IMU_STALE(20 samples')
+    assert iw.status(1.995, publishers=0) == IMU_NODE_DOWN                  # node exited (calibration)
+    assert iw.status(1.995, publishers=1).startswith('IMU_FROZEN')         # node up: data rule as before
+    assert ImuWatch().status(0.0, publishers=1).startswith('IMU_STALE(no /imu')
     mi = Machine(PROFILES['dry_run'], p, live=False)
     mi.step(0.0, 'n', False, world(imu_problem='IMU_FROZEN(100 % identical samples in 1.0 s; restart the stack)'))
     assert mi.state == 'IDLE' and mi.events[-1]['event'] == 'ARM_REFUSED' \
         and mi.events[-1]['detail'].startswith('IMU_FROZEN'), mi.events[-1]
     assert mi.step(0.1, 'n', False, world())[3] == 'MANUAL' and mi.state == 'ARMING'   # healthy -> arms
-    print('PASS: IMU watch: healthy / frozen / stale / too few samples; arm refused on IMU_FROZEN.')
+    print('PASS: IMU watch: healthy / frozen / stale / too few samples / node not running; arm refused on IMU_FROZEN.')
     print('PASS: deadman timing, ramp, speed-fit length, front range, config = vehicle_params,')
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
@@ -1298,7 +1308,7 @@ def run(args):
                     return 'EXTRA_PUBLISHER(%s=%s)' % (t, pubs)
             return None
 
-        def world(self, now, half_width):
+        def world(self, now, half_width, imu_publishers=None):
             with self.lock:
                 w = dict(status=self.status,
                          status_age=(now - self.status_at) if self.status_at else 1e9,
@@ -1311,7 +1321,7 @@ def run(args):
                              left_m=front_range(self.scan, half_width, 90.0),
                              right_m=front_range(self.scan, half_width, -90.0))
                 w['erpm'] = (self.tele or {}).get('erpm')
-                w['imu_problem'] = self.imu_watch.status(now)
+                w['imu_problem'] = self.imu_watch.status(now, imu_publishers)
             return w
 
         def get_params(self, node_name, names):
@@ -1450,7 +1460,7 @@ def drive_session(args, p, prof, r, node):
         say('Keys: n = arm, hold SPACE = drive, s = skip, q = quit (idle). While armed/driving ANY other '
             'key = KILL (brake, latched until n). ' + machine.message)
         last_msg = None
-        graph = None
+        graph, imu_pubs = None, None
         last_imu = 'unknown'
         tick = 0
         next_t = last_pub = time.monotonic()
@@ -1464,8 +1474,9 @@ def drive_session(args, p, prof, r, node):
             now = time.monotonic()
             if tick % 5 == 0:
                 graph = node.graph_fault()
+                imu_pubs = node.count_publishers('/imu/data_raw')
             tick += 1
-            w = node.world(now, half_width)
+            w = node.world(now, half_width, imu_pubs)
             w['graph_fault'] = graph
             w['keyboard_lost'] = kb.eof
             if w.get('imu_problem') != last_imu:

@@ -89,7 +89,9 @@ steer cap). Runner: `run_test.py --test t4_straight --speed 0.5 --t1-passed-conf
 **IMU guard (F-18, 20 Nov):** the runner refuses to arm on `IMU_FROZEN` (> 50 % identical consecutive
 `/imu/data_raw` samples in the last 1 s) or `IMU_STALE`, and logs every IMU status change to
 `runner_events.csv` (a freeze while driving does not stop the run: the IMU is not in the control loop).
-`preflight.sh stack` checks 2 s with the same rule. Recovery: restart the stack.
+`preflight.sh stack` checks 2 s with the same rule. Recovery: restart the stack. 0 publishers on
+`/imu/data_raw` (21 Nov: the bmi160 node exits if the car moves during its start-up gyro calibration) ->
+`IMU_STALE(IMU node not running: restart the stack and keep the car still for 10 s)`.
 
 `t4_yaw_plot.py <T4 folder> [...]` (20 Nov): yaw rate (BMI160 gz, bias from the 1 s before the
 command, base_link = -gz; RF2O pose derivative) vs time and vs distance per counted repeat, curvature

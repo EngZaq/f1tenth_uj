@@ -99,7 +99,7 @@ node.create_subscription(Imu, '/imu/data_raw', on_imu, qos_profile_sensor_data)
 t_end = time.monotonic() + 2.0
 while time.monotonic() < t_end:
     rclpy.spin_once(node, timeout_sec=0.05)
-problem = watch.status(time.monotonic())
+problem = watch.status(time.monotonic(), node.count_publishers('/imu/data_raw'))
 node.destroy_node()
 rclpy.shutdown()
 print('%-4s /imu/data_raw %d msgs in 2 s: %s' % ('FAIL' if problem else 'OK', n[0], problem or 'changing samples'))
