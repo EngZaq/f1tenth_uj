@@ -284,16 +284,22 @@ def own_body(x, y, body_length, body_width, front_x, pad=0.05):
     return front_x - body_length - pad <= x <= front_x + pad and abs(y) <= body_width / 2.0 + pad
 
 
-def t3_clearance(scan, geom, laser_x, body_length, body_width, front_x):
-    """Smallest (distance to the clear-disk centre - clear radius) over all returns (car body excluded):
-    < 0 = something inside the space the car may sweep. -> dict(min_m, bearing_deg, n) or None (no scan)."""
+def masked(bearing_deg, r, mask):
+    """True if a return (laser-frame bearing, range) is the car itself (lidar.self_mask sectors)."""
+    return any(a <= bearing_deg <= b and r < rmax for a, b, rmax in (mask or ()))
+
+
+def t3_clearance(scan, geom, laser_x, body_length, body_width, front_x, mask=()):
+    """Smallest (distance to the clear-disk centre - clear radius) over all returns (car body and the measured
+    self_mask excluded): < 0 = something inside the space the car may sweep. -> dict(min_m, bearing_deg, n) or
+    None (no scan). The LiDAR blind sector is not seen: the area behind the car is checked by eye (checklist)."""
     pts = scan_points_base(scan, laser_x)
     if not pts:
         return None
     cx, cy = geom['center']
     best = None
     for x, y, b in pts:
-        if own_body(x, y, body_length, body_width, front_x):
+        if own_body(x, y, body_length, body_width, front_x) or masked(b, math.hypot(x - laser_x, y), mask):
             continue
         d = math.hypot(x - cx, y - cy) - geom['clear_r']
         if best is None or d < best[0]:
@@ -303,25 +309,48 @@ def t3_clearance(scan, geom, laser_x, body_length, body_width, front_x):
     return dict(min_m=best[0], bearing_deg=best[1], n=len(pts))
 
 
-def t3_visibility(scan, half_width_deg=20.0, step_deg=5.0):
+def t3_visibility(scan, half_width_deg=20.0, step_deg=5.0, fov=None, mask=()):
     """Mux front-visibility prediction for every heading the car takes on a circle: the share of finite
     returns in +/- half_width around each heading (laser frame, as physical_drive_mux front_evidence).
-    -> dict(min_fraction, heading_deg) or None."""
+    Beams outside the LiDAR field of view `fov` = (min_deg, max_deg) and beams with a self_mask return are
+    UNKNOWN (what the mux will see there is not in this scan): a heading is predicted only if its whole
+    window lies inside the fov, and its share counts known beams only (>= half of the window must be known).
+    -> dict(min_fraction, heading_deg, predicted, skipped) or None (no scan / nothing predictable)."""
     if scan is None or not scan.angle_increment or len(scan.ranges) < 100:
         return None
     n = len(scan.ranges)
-    ok = [1 if (math.isfinite(r) and scan.range_min < r <= scan.range_max) else 0 for r in scan.ranges]
+    lo, hi = fov if fov else (-180.0, 180.0)
+    state = []                                       # 1 return, 0 no return, None unknown
+    for i, r in enumerate(scan.ranges):
+        b = math.degrees(scan.angle_min + i * scan.angle_increment)
+        b = (b + 180.0) % 360.0 - 180.0
+        ok = math.isfinite(r) and scan.range_min < r <= scan.range_max
+        if not lo <= b <= hi or (ok and masked(b, r, mask)):
+            state.append(None)
+        else:
+            state.append(1 if ok else 0)
     half = int(round(math.radians(half_width_deg) / scan.angle_increment))
-    best = None
+    best, predicted, skipped = None, 0, 0
     h = -180.0
     while h < 180.0:
+        if fov and not (lo <= h - half_width_deg and h + half_width_deg <= hi):
+            skipped += 1
+            h += step_deg
+            continue
         c = int(round((math.radians(h) - scan.angle_min) / scan.angle_increment))
-        idx = [(c + k) % n for k in range(-half, half + 1)]
-        f = sum(ok[i] for i in idx) / len(idx)
-        if best is None or f < best[0]:
-            best = (f, h)
+        win = [state[(c + k) % n] for k in range(-half, half + 1)]
+        known = [x for x in win if x is not None]
+        if len(known) < 0.5 * len(win):
+            skipped += 1
+        else:
+            predicted += 1
+            f = sum(known) / len(known)
+            if best is None or f < best[0]:
+                best = (f, h)
         h += step_deg
-    return dict(min_fraction=best[0], heading_deg=best[1])
+    if best is None:
+        return None
+    return dict(min_fraction=best[0], heading_deg=best[1], predicted=predicted, skipped=skipped)
 
 
 def t3_fence(start, geom, pose):
@@ -596,8 +625,11 @@ class Machine:
                     g['diameter_m'], fb, g['r_max'], 'left' if g['side'] > 0 else 'right',
                     '-' if c is None else '%+.2f m (worst at %s deg)' % (c['min_m'], '-' if c['bearing_deg'] is None
                                                                        else '%.0f' % c['bearing_deg']),
-                    '-' if v is None else '%.2f at heading %.0f deg' % (v['min_fraction'], v['heading_deg']),
-                    self.min_visible, 'OK' if w.get('rf2o_age', 1e9) <= float(self.t3['rf2o_stale_s']) else 'STALE'))
+                    '-' if v is None else '%.2f at heading %.0f deg (%d headings predicted, %d blind/masked: mux '
+                    'is the backstop there)' % (v['min_fraction'], v['heading_deg'], v.get('predicted', 0),
+                                                 v.get('skipped', 0)),
+                    self.min_visible, 'OK' if w.get('rf2o_age', 1e9) <= float(self.t3['rf2o_stale_s']) else 'STALE')
+                + ' | LiDAR rear blind sector NOT checked: look behind the car (disk empty, nobody inside)')
 
     def circle_refusal(self, w):
         mux_min = (w.get('status') or {}).get('manual_min_front_valid_fraction')
@@ -1106,6 +1138,36 @@ def self_test():
     gap = Scan3().put(90.0, float('inf'), 60.0)
     v3 = t3_visibility(gap)
     assert v3['min_fraction'] < 0.05 and abs(v3['heading_deg'] - 90) <= 10, v3
+    # 22 Nov rehearsal: own XT60 leads at 96-134 deg (0.04-0.17 m, y ~ +0.15 just outside the body box) refused
+    # every LEFT circle; the 270 deg LakiBeam (blind 134.5..-136) made the visibility prediction 0.00.
+    lid = vp.get(p, 'lidar')
+    fov_ = (float(lid['fov_min_deg']), float(lid['fov_max_deg']))
+    mask_ = [tuple(float(v) for v in m) for m in lid['self_mask']]
+    assert masked(110.0, 0.15, mask_) and not masked(110.0, 0.35, mask_) and not masked(90.0, 0.15, mask_)
+
+    def rehearsal_scan(blind=True, leads=True):
+        sc = Scan3(6.0)
+        if leads:
+            sc.put(105.0, 0.15, 17.0).put(125.0, 0.08, 17.0)
+        if blind:
+            for i in range(1440):
+                b = math.degrees(sc.angle_min + i * sc.angle_increment)
+                if not fov_[0] <= b <= fov_[1]:
+                    sc.ranges[i] = float('inf')
+        return sc
+    g18 = t3_geometry(0.18, t3p, L, *body)
+    assert t3_clearance(rehearsal_scan(), g18, lx, *body)['min_m'] < 0            # the refusal, reproduced
+    assert t3_clearance(rehearsal_scan(), g18, lx, *body, mask=mask_)['min_m'] > 1.0   # masked: clear
+    box110 = rehearsal_scan().put(110.0, 0.8, 4.0)                                  # real box behind the mask range
+    assert t3_clearance(box110, g18, lx, *body, mask=mask_)['min_m'] < 0
+    assert t3_visibility(rehearsal_scan())['min_fraction'] == 0.0                   # old: blind = "no return"
+    vb = t3_visibility(rehearsal_scan(), fov=fov_, mask=mask_)
+    assert vb['min_fraction'] == 1.0 and vb['skipped'] > 0 and vb['predicted'] > 0, vb
+    assert all(-115.75 <= h <= 114.25 for h in [vb['heading_deg']])
+    door = rehearsal_scan().put(0.0, float('inf'), 60.0)                            # real gap inside the fov
+    vd = t3_visibility(door, fov=fov_, mask=mask_)
+    assert vd['min_fraction'] < 0.05 and abs(vd['heading_deg']) <= 10, vd
+    assert t3_visibility(rehearsal_scan(), fov=(-10.0, 10.0)) is None               # nothing predictable
     st0 = (1.0, 2.0, math.pi / 2)                      # facing +y; left circle centre at (1 - r_max, 2)
     assert abs(t3_fence(st0, g26, (1.0 - 2 * g26['r_max'], 2.0, 0)) - 0.0) < 1e-9
     assert t3_fence(st0, g26, (1.0, 2.0, 0)) == 0.0 - 0.0 and t3_fence(st0, g26, (1.5, 2.0, 0)) > 0.4
@@ -1281,6 +1343,8 @@ def self_test():
     print('      21 Nov: per-side limits 0.27 / 0.325, --full-lock (servo exactly 0.10 / 0.68, geometry and turn')
     print('      check from the T2 angle), fallback disk +1 m, VESC timeout evidence, 0.3-first gate; T5b /')
     print('      vesc_timeout_check stand profiles.')
+    print('      22 Nov: self_mask (own XT60 leads no longer refuse a left circle, a real box behind them still')
+    print('      does), 270 deg FOV: blind / masked beams unknown, visibility only for headings fully in the FOV.')
 
     # ---- KILL: any key but SPACE while arming / armed / driving / stopping -> zero, latched until n
     def armed(m, front=2.8):
@@ -1765,6 +1829,9 @@ def run(args):
     r = vp.get(p, 'runner')
     mux_sector = float(vp.get(p, 't4.mux_sector_deg'))
     laser_x = float(vp.get(p, 'lidar.x_m'))
+    lid = vp.get(p, 'lidar')
+    fov = (float(lid['fov_min_deg']), float(lid['fov_max_deg']))
+    self_mask = [tuple(float(v) for v in m) for m in (lid.get('self_mask') or [])]
     veh = vp.get(p, 'vehicle')
     body = (float(veh['body_length_m']), float(veh['body_width_m']), float(veh['front_bumper_x_m']))
     t3_geom = (t3_geometry(prof['expect_steer'], vp.get(p, 't3'), float(veh['wheelbase_m']), *body,
@@ -1881,7 +1948,8 @@ def run(args):
             if prof.get('circle'):
                 # Clearance + visibility: ~1440 points, at most 5 Hz and only for a new scan (cached).
                 if scan is not None and scan is not self.t3_scan and now - self.t3_cache_at >= 0.2:
-                    self.t3_cache = (t3_clearance(scan, t3_geom, laser_x, *body), t3_visibility(scan))
+                    self.t3_cache = (t3_clearance(scan, t3_geom, laser_x, *body, mask=self_mask),
+                                     t3_visibility(scan, fov=fov, mask=self_mask))
                     self.t3_cache_at, self.t3_scan = now, scan
                 w['t3_clear'], w['t3_vis'] = self.t3_cache
             return w

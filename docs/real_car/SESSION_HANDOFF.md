@@ -141,6 +141,9 @@ distance (T4) before it can be considered.
    `max_steer_rad:=0.33`. **VESC timeout 300 ms + brake 5 A: configured AND VERIFIED 22 Nov (PASS 0.29 s, -2.44 A), T3 fallback lifted;** it was verified on the stand
    with `vesc_timeout_check`** (checklist section 0). Until a PASS the runner enforces the fallback (disk +1 m,
    0.3 m/s first); in a 5 x 5 m hall that excludes +/-0.18 and +0.26.
+   **22 Nov rehearsal:** refusals came from the own XT60 leads (now `lidar.self_mask`; tuck them in), real objects
+   ~3 m behind-left inside the disk, and the 270 deg LiDAR (blind rear now unknown, checked by eye).
+   Hall rule: operator, laptop, furniture outside the whole disk incl. behind the car. Always end the runner with q.
 4. **T4** (0.5 m/s is next step 3) straight line 0.5/1.0/1.5 m/s toward a wall, 3 repeats each (runner ground check): LiDAR vs VESC
    vs RF2O distance -> `speed_to_erpm_gain` (same value in both converter and vesc_to_odom), lateral drift
    -> steering offset, start delay, stopping distance and deceleration with the chosen stop method. Profile

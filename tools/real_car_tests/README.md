@@ -116,6 +116,12 @@ centre 0.335; the converter now clamps its servo output to 0.10-0.68). Runner:
   +0.26 3.31 m, -0.31 2.91 m, full lock 2.98 / 2.84 m diameter (fallback: +2 m each). Arm refused if any LiDAR return (car body excluded) is inside it.
 - **Mux visibility:** arm refused if, for any heading of the circle, the +/-20 deg window has fewer finite returns
   than the mux `manual_min_front_valid` + 0.05. The mux gate itself is unchanged and stays the backstop.
+  22 Nov: beams outside the LiDAR field of view (`lidar.fov_min/max_deg`, 270 deg, rear blind) and beams with a
+  `lidar.self_mask` return are unknown; only headings whose whole window lies inside the fov are predicted
+  (the `m` line shows how many). The clearance check ignores `self_mask` returns (own XT60 leads, < 0.30 m)
+  and cannot see behind the car: the operator checks that part by eye.
+- `lidar_self_mask.py <folder>` (22 Nov): field of view and self-return sectors from a still recording, as a
+  yaml snippet (writes nothing).
 - **Drive stops:** `TURNS_DONE` (gyro heading = 2 turns, bias from the 1 s before the start; the only counted
   stop), `TURNS_RF2O_BACKUP`, `GEOFENCE` (RF2O base_link > 0.20 m outside the largest circle), `TURN_CHECK_FAILED`
   (after 2 s the 0.5 s mean yaw rate must have the commanded sign and >= 30 % of v tan(steer) / L),

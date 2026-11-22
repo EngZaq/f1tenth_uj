@@ -23,6 +23,15 @@ lidar:                          # base_link -> laser, CONFIRMED, baseline 14 Nov
   y_m: 0.0
   z_m: 0.150
   yaw_rad: 0.0
+  fov_min_deg: -135.75          # MEASURED 22 Nov (T3 rehearsal 20261122_150925, 2598 still scans): no beam outside
+  fov_max_deg: 134.25           #   this ever returned (driver scan_range 45..315 = 270 deg). Rear 134.5..-136 deg is
+                                #   BLIND: T3 treats it as unknown (visibility not predicted, area checked by eye)
+  self_mask:                    # [from_deg, to_deg, max_range_m] in the laser frame: returns inside are the car itself;
+                                #   T3 clearance ignores them, T3 visibility counts those beams as unknown
+    - [96.0, 114.0, 0.30]       # 22 Nov, still scan 20261122_150925 (lidar_self_mask.py output): left front, XT60
+    - [116.0, 135.0, 0.30]      #   battery leads (Moatasem; to be tucked in, the mask stays as a backstop). Observed
+                                #   max 0.167 / 0.139 m; edge returns up to 0.30 m in 151103. Range cap 0.30 m (approved).
+                                #   114-116 deg: beams see past the leads (not masked)
 
 imu:                            # base_link -> imu_link
   status: PROVISIONAL           # stream + sign CONFIRMED (baseline 14 Nov); how the TF was published on 14 Nov is unknown (asking Zaid)

@@ -95,11 +95,27 @@ If the real lock is much weaker (R > 1.25 x 0.84 m), the geofence stops it: that
       rear axle at the "disk centre" distance from the table, on the side AWAY from the turn, pointing
       tangentially (perpendicular to the line to the centre). Mark each start with tape; repeats start
       from the same mark.
-- [ ] **No one inside the clear disk** while armed. The operator sits at the laptop outside it; the spotter
-      stands outside it.
+- [ ] **Hall rule (22 Nov): operator, laptop, chairs, tables, bags and boxes are outside the WHOLE clear disk,
+      including the part behind the car.** For a left circle the disk reaches ~2.2 m (0.18 rad) behind the start
+      point and 4.4 m to the left; in the 22 Nov rehearsal real objects ~3 m behind-left (bearing 115-124 deg)
+      were inside it and refused every run. Nobody inside the disk while armed; the spotter stands outside it.
+- [ ] **Behind the car is not seen by the LiDAR.** The LakiBeam scans 270 deg (`lidar.fov_min/max_deg`
+      -135.75 / +134.25): the rear ~90 deg is blind, so the clearance check cannot see that part of the disk.
+      **Before every `n`, look behind the car**: that part of the disk is empty and nobody is in it.
+- [ ] **Own-car returns:** tuck the yellow XT60 battery leads in (left front). They returned at 0.04-0.17 m,
+      96-135 deg and refused every LEFT circle. `lidar.self_mask` ignores returns < 0.30 m there as a
+      backstop (anything further away still counts). After tucking, re-record with a still scan:
+      `python3 ~/f1tenth_uj/tools/real_car_tests/lidar_self_mask.py <rehearsal folder>` (car still, nobody
+      near it); a changed mask goes into `vehicle_params.yaml` with a results row.
 - [ ] **Mux visibility.** The mux stops MANUAL below 75 % finite returns in its ±20 deg front window, and
       the LiDAR reports up to 100 m, so hall walls count.
-  - The runner predicts the visibility for every heading on the circle and refuses to arm below 0.80.
+  - The runner predicts the visibility for every heading on the circle whose ±20 deg window lies inside the
+    LiDAR's field of view, and refuses to arm below 0.80. Headings in the blind rear (and behind the masked
+    leads) cannot be predicted: there the mux gate itself is the backstop. A mux stop is safe; the run is just
+    not counted.
+  - 22 Nov rehearsal: the direction ~60 deg left of the start heading had only 40-50 % returns at 12-20 m
+    (an open area, doorway or glass), so the visibility there was 0.23-0.51. Close it off with boxes, or
+    turn the start so that direction faces a wall.
   - Problem directions are open doors, glass and black curtains.
   - Fix: close the door, or put LiDAR-visible boxes (cardboard, >= 0.3 m tall: the beam is ~0.18 m above
     the floor) in that direction **outside the clear disk + 0.8 m**.
@@ -125,7 +141,8 @@ all terminals or in none. **SSH over USB needs none of it.**
    - **0.3 m/s** (fallback first, or by choice): relaunch with `max_speed_mps:=0.3` and
      `vesc_t3_erpm2780.yaml`.
    - **Disarmed rehearsal (run 0, first):** the same launch with `enable_real_actuation:=false`.
-2. **Checks, then the runner** (one runner per command; the stack stays up; `q` ends each runner):
+2. **Checks, then the runner** (one runner per command; the stack stays up; **always end the runner with
+   `q`**: that closes its bag. The 22 Nov `151221` bag was left unclosed (no `metadata.yaml`)):
    ```bash
    ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
    # run 0, disarmed: no --live. Check: m readout, arm refusals, gyro / RF2O / visibility values. The car does
@@ -144,7 +161,8 @@ all terminals or in none. **SSH over USB needs none of it.**
    `ros2 bag record -o ~/f1tenth_hw_evidence/real_car_tests/$(date +%Y%m%d_%H%M%S)_ekf_shadow_live/bag /ekf_shadow/odom /ekf_shadow/in/vesc /ekf_shadow/in/vesc_dw /ekf_shadow/in/imu /ekf_shadow/in/rf2o`
 
 Per run:
-1. Place the car at the start mark and press `m`.
+1. Place the car at the start mark and press `m`. **Look behind the car** (blind sector: that part of the
+   disk empty, nobody in it).
 2. **Hands off for >= 2 s** (the gyro bias is the 1 s before the start).
 3. Press `n` and hold SPACE.
 
