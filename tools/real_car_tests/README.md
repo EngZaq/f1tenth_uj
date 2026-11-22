@@ -120,6 +120,11 @@ centre 0.335; the converter now clamps its servo output to 0.10-0.68). Runner:
   `lidar.self_mask` return are unknown; only headings whose whole window lies inside the fov are predicted
   (the `m` line shows how many). The clearance check ignores `self_mask` returns (own XT60 leads, < 0.30 m)
   and cannot see behind the car: the operator checks that part by eye.
+- **Low-visibility mode (22 Nov, T3 ONLY):** launch `t3_low_visibility:=true` passes Zaid's mux option
+  `manual_allow_reduced_visibility:=true` + `manual_min_front_valid` `t3.low_visibility_manual_min_front_valid`
+  (0.35); AUTO and the 0.80 m gate unchanged. The runner follows the mux threshold from its status (+0.05),
+  shows `LOW-VISIBILITY MODE ACTIVE` in the `m` line, refuses the mode for any test but `t3_circle` or without a
+  passed `vesc_timeout_check`, and requires a counted 0.3 m/s run of the same command before 0.5 m/s.
 - `lidar_self_mask.py <folder>` (22 Nov): field of view and self-return sectors from a still recording, as a
   yaml snippet (writes nothing).
 - **Drive stops:** `TURNS_DONE` (gyro heading = 2 turns, bias from the 1 s before the start; the only counted

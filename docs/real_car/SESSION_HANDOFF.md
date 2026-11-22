@@ -144,6 +144,8 @@ distance (T4) before it can be considered.
    **22 Nov rehearsal:** refusals came from the own XT60 leads (now `lidar.self_mask`; tuck them in), real objects
    ~3 m behind-left inside the disk, and the 270 deg LiDAR (blind rear now unknown, checked by eye).
    Hall rule: operator, laptop, furniture outside the whole disk incl. behind the car. Always end the runner with q.
+   **22 Nov decision: T3 ONLY with the mux low-visibility mode** (`t3_low_visibility:=true`, MANUAL 0.35, AUTO /
+   0.80 m gate unchanged): runner-enforced T3 only + verified timeout + 0.3 m/s first; spotter, look behind.
 4. **T4** (0.5 m/s is next step 3) straight line 0.5/1.0/1.5 m/s toward a wall, 3 repeats each (runner ground check): LiDAR vs VESC
    vs RF2O distance -> `speed_to_erpm_gain` (same value in both converter and vesc_to_odom), lateral drift
    -> steering offset, start delay, stopping distance and deceleration with the chosen stop method. Profile

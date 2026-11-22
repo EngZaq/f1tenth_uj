@@ -119,9 +119,18 @@ If the real lock is much weaker (R > 1.25 x 0.84 m), the geofence stops it: that
   - Problem directions are open doors, glass and black curtains.
   - Fix: close the door, or put LiDAR-visible boxes (cardboard, >= 0.3 m tall: the beam is ~0.18 m above
     the floor) in that direction **outside the clear disk + 0.8 m**.
-- [ ] **Do NOT use the mux low-visibility mode** (`manual_allow_reduced_visibility`). It is a gate change
-      (standing rule: gates never change), it is not in the test launch, and it lets "no return" pass as
-      free space. The 0.80 m obstacle check stays as it is.
+- [ ] **Low-visibility mode, T3 ONLY (decided 22 Nov, results doc).** The hall reads 0.44-0.65 in most
+      directions, so T3 runs with launch `t3_low_visibility:=true`: Zaid's manual-only option, MANUAL front
+      threshold 0.35. AUTO and the 0.80 m obstacle gate are unchanged. The mux then accepts a front window
+      where up to 65 % of the beams return nothing, and an obstacle in those beams is not seen. That is why
+      these conditions apply:
+  - the runner's clear-disk check stays on; its visibility prediction uses 0.35 (+0.05) and the `m` line
+    starts with `LOW-VISIBILITY MODE ACTIVE`;
+  - VESC timeout verified (`20261122_150252`); the runner refuses the mode without it, and for any other test;
+  - **0.3 m/s first for every command**, then 0.5 m/s (the runner refuses 0.5 until the 0.3 run of the same
+    command is counted);
+  - look behind the car before every `n`; a spotter stands outside the disk.
+  - Never use it for T4 or any other test: relaunch without the flag.
 - [ ] Press `m` in the runner (once the stack is up). It shows the clear disk (and FALLBACK if it applies),
       the clearance at the worst bearing, the visibility at the worst heading, and RF2O. Arm only when all
       are OK.

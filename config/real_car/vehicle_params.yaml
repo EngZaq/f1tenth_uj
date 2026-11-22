@@ -140,6 +140,11 @@ t3:                                 # T3 constant-steering circles on the ground
   mux_cap_max_rad: 0.33             # launch max_steer_rad:=0.33 covers both limits (mux ceiling 0.40); arm refused above
   fallback_extra_m: 1.0             # VESC timeout NOT verified (no passed vesc_timeout_check): clear disk radius + this,
                                     #   and 0.5 m/s only after a counted 0.3 m/s run of the same command (+ spotter)
+  low_visibility_manual_min_front_valid: 0.35  # launch t3_low_visibility:=true (Moatasem 22 Nov, T3 ONLY): mux
+                                    #   manual_allow_reduced_visibility true + manual_min_front_valid this (Zaid's
+                                    #   floor 0.35; hall 0.44-0.65 needs <= 0.39 with the +0.05 runner margin).
+                                    #   AUTO 0.90 and the 0.80 m obstacle gate unchanged. Runner: T3 only, VESC
+                                    #   timeout verified, 0.3 m/s first for every command
   servo_gain_left: -0.874           # T2 19 Nov per-side fit (fit.json left_gain), TEST-ONLY: T3 converter yaml only
   servo_gain_right: -1.062          # T2 19 Nov per-side fit (fit.json right_gain), TEST-ONLY
   target_turns: 2.0                 # stop (brake 5 A) once the gyro heading change reaches this many turns

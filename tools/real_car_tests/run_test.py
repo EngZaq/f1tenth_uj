@@ -437,6 +437,18 @@ def timeout_verified(root):
     return False, 'VESC timeout NOT verified (%s)' % ('; '.join(seen[:3]) or 'no analysed vesc_timeout_check run')
 
 
+def lowvis_gate(test, status, timeout_ok):
+    """Mux low-visibility mode (manual_allow_reduced_visibility, launch t3_low_visibility:=true) is for T3 ONLY
+    and only with the VESC timeout verified (Moatasem 22 Nov). -> (active, refusal or None)."""
+    if not (status or {}).get('manual_low_visibility_enabled'):
+        return False, None
+    if test != 't3_circle':
+        return True, ('mux low-visibility mode is T3 ONLY: relaunch without t3_low_visibility for %s' % test)
+    if not timeout_ok:
+        return True, 'mux low-visibility mode needs the verified VESC timeout (vesc_timeout_check PASS)'
+    return True, None
+
+
 def t3_slow_gate(root, prof, slow=0.3):
     """VESC-timeout fallback: 0.5 m/s only after a counted (TURNS_DONE) live run of the same command at
     `slow` m/s. -> (ok, reason)."""
@@ -457,8 +469,9 @@ def t3_slow_gate(root, prof, slow=0.3):
                 if any(e['event'] == 'ZERO_COMMAND' and e['detail'].startswith('TURNS_DONE')
                        for e in csv.DictReader(fp)):
                     return True, 'counted %.2f m/s run of this command: %s' % (slow, info_path.parent.name)
-    return False, ('VESC timeout not verified: %.2f m/s needs a counted %.2f m/s run of the same command first'
-                   % (prof['speed'], slow))
+    return False, ('%.2f m/s needs a counted %.2f m/s run of the same command first (%s)'
+                   % (prof['speed'], slow, 'mux low-visibility mode rule' if prof.get('mux_low_visibility')
+                      else 'VESC timeout not verified'))
 
 
 def step_gate(root, test, method, speed, steps, repeats):
@@ -614,12 +627,24 @@ class Machine:
         have = self.ahead(w)
         return (math.isfinite(have) and need <= have <= top), need, have
 
+    def sync_mux_visibility(self, w):
+        """Runner arm threshold = the mux's MANUAL threshold (from its status) + t3.visibility_margin; returns the
+        LOW-VISIBILITY banner ('' in the standard mode)."""
+        st = w.get('status') or {}
+        if st.get('manual_min_front_valid_fraction') is not None:
+            self.min_visible = float(st['manual_min_front_valid_fraction']) + float(self.t3['visibility_margin'])
+        if not st.get('manual_low_visibility_enabled'):
+            return ''
+        return ('LOW-VISIBILITY MODE ACTIVE (T3 only: mux MANUAL front >= %.2f, AUTO and the 0.80 m obstacle gate '
+                'unchanged; spotter, look behind the car) | ' % float(st.get('manual_min_front_valid_fraction', 0)))
+
     def circle_text(self, w):
+        lowvis = self.sync_mux_visibility(w)
         g, c, v = self.geom, w.get('t3_clear'), w.get('t3_vis')
         what = ('FULL LOCK (command %+.3f rad, expected %+.3f)' % (self.prof['steer'], self.expect_steer)
                 if self.prof.get('full_lock') else 'steer %+.2f rad' % self.prof['steer'])
         fb = (' incl. +%.1f m VESC-timeout FALLBACK' % g['extra_m']) if g.get('extra_m') else ''
-        return ('circle %s %s: R nominal %.2f m (assumed %.2f..%.2f), clear disk %.2f m diameter%s, centre '
+        return lowvis + ('circle %s %s: R nominal %.2f m (assumed %.2f..%.2f), clear disk %.2f m diameter%s, centre '
                 '%.2f m to the %s | clearance %s | mux visibility min %s (needs >= %.2f) | RF2O %s' % (
                     'LEFT' if g['side'] > 0 else 'RIGHT', what, g['r_nom'], g['r_min'], g['r_max'],
                     g['diameter_m'], fb, g['r_max'], 'left' if g['side'] > 0 else 'right',
@@ -632,9 +657,7 @@ class Machine:
                 + ' | LiDAR rear blind sector NOT checked: look behind the car (disk empty, nobody inside)')
 
     def circle_refusal(self, w):
-        mux_min = (w.get('status') or {}).get('manual_min_front_valid_fraction')
-        if mux_min is not None:
-            self.min_visible = float(mux_min) + float(self.t3['visibility_margin'])
+        self.sync_mux_visibility(w)
         c, v = w.get('t3_clear'), w.get('t3_vis')
         if c is None or v is None:
             return 'CIRCLE_NO_SCAN'
@@ -1172,8 +1195,9 @@ def self_test():
     assert abs(t3_fence(st0, g26, (1.0 - 2 * g26['r_max'], 2.0, 0)) - 0.0) < 1e-9
     assert t3_fence(st0, g26, (1.0, 2.0, 0)) == 0.0 - 0.0 and t3_fence(st0, g26, (1.5, 2.0, 0)) > 0.4
 
-    def c3world(pose, gz, mode='STOP', clear=2.0, vis=1.0, rf_age=0.05, sector=3.0, **kw):
-        st = dict(mode=mode, last_mode_request='MANUAL', manual_min_front_valid_fraction=0.75)
+    def c3world(pose, gz, mode='STOP', clear=2.0, vis=1.0, rf_age=0.05, sector=3.0, lowvis=False, **kw):
+        st = dict(mode=mode, last_mode_request='MANUAL', manual_min_front_valid_fraction=0.35 if lowvis else 0.75,
+                  manual_low_visibility_enabled=lowvis)
         return world(front_m=float('nan'), sector_min_m=sector, scan_age=0.05, left_m=2.0, right_m=2.0, st=st,
                      gz=gz, gz_mean_1s=0.003, gz_std_1s=0.0005, rf2o_pose=pose, rf2o_age=rf_age,
                      t3_clear=dict(min_m=clear, bearing_deg=45.0, n=1440),
@@ -1251,6 +1275,25 @@ def self_test():
     a3f = Machine(dict(pr3, clear_extra_m=1.0), p, live=False, ground_ok=True)
     a3f.step(0.0, 'm', False, c3world((0, 0, 0), 0.003))
     assert 'clear disk 5.31 m diameter incl. +1.0 m VESC-timeout FALLBACK' in a3f.events[-1]['detail']
+    # 22 Nov: mux low-visibility mode (T3 only): the runner follows the mux threshold 0.35 (+0.05) and says so
+    lv = Machine(pr3, p, live=False, ground_ok=True)
+    lv.step(0.0, 'm', False, c3world((0, 0, 0), 0.003, lowvis=True, vis=0.44))
+    assert lv.events[-1]['detail'].startswith('LOW-VISIBILITY MODE ACTIVE (T3 only: mux MANUAL front >= 0.35')
+    assert 'needs >= 0.40' in lv.events[-1]['detail'], lv.events[-1]['detail']
+    lv.step(0.1, 'n', False, c3world((0, 0, 0), 0.003, lowvis=True, vis=0.38))
+    assert lv.state == 'IDLE' and lv.events[-1]['detail'].startswith('CIRCLE_LOW_VISIBILITY(0.38 < 0.40'), lv.events[-1]
+    lv.step(0.2, 'n', False, c3world((0, 0, 0), 0.003, lowvis=True, vis=0.44))
+    assert lv.state == 'ARMING', lv.events[-1]
+    sd_ = Machine(pr3, p, live=False, ground_ok=True)                   # standard mode: 0.44 refused, no banner
+    sd_.step(0.0, 'm', False, c3world((0, 0, 0), 0.003, vis=0.44))
+    assert not sd_.events[-1]['detail'].startswith('LOW-VISIBILITY')
+    sd_.step(0.1, 'n', False, c3world((0, 0, 0), 0.003, vis=0.44))
+    assert sd_.events[-1]['detail'].startswith('CIRCLE_LOW_VISIBILITY(0.44 < 0.80'), sd_.events[-1]
+    lvst = dict(manual_low_visibility_enabled=True, manual_min_front_valid_fraction=0.35)
+    assert lowvis_gate('t3_circle', lvst, True) == (True, None)
+    assert 'T3 ONLY' in lowvis_gate('t4_straight', lvst, True)[1] and 'T3 ONLY' in lowvis_gate('t1b_stop', lvst, True)[1]
+    assert 'VESC timeout' in lowvis_gate('t3_circle', lvst, False)[1]
+    assert lowvis_gate('t4_straight', dict(manual_low_visibility_enabled=False), False) == (False, None)
     a3l = Machine(resolve_profile('t3_circle', 0.5, None, p, 'right'), p, live=False, ground_ok=True)
     a3l.step(0.0, 'm', False, c3world((0, 0, 0), 0.003))
     assert 'FULL LOCK (command -0.325 rad, expected -0.321)' in a3l.events[-1]['detail'], a3l.events[-1]['detail']
@@ -1310,6 +1353,7 @@ def self_test():
         assert timeout_verified(root)[0]
         p18 = resolve_profile('t3_circle', 0.5, 0.18, p)
         assert not t3_slow_gate(root, p18)[0] and t3_slow_gate(root, resolve_profile('t3_circle', 0.3, 0.18, p))[0]
+        assert 'low-visibility' in t3_slow_gate(root, dict(p18, mux_low_visibility=True))[1]
 
         def t3run(name, steer, lock, reason, live=True):
             d_ = root / name
@@ -1345,6 +1389,8 @@ def self_test():
     print('      vesc_timeout_check stand profiles.')
     print('      22 Nov: self_mask (own XT60 leads no longer refuse a left circle, a real box behind them still')
     print('      does), 270 deg FOV: blind / masked beams unknown, visibility only for headings fully in the FOV.')
+    print('      Mux low-visibility mode: runner threshold follows the mux (0.35 + 0.05), m-line banner, T3 only,')
+    print('      needs the verified VESC timeout, 0.3 m/s first.')
 
     # ---- KILL: any key but SPACE while arming / armed / driving / stopping -> zero, latched until n
     def armed(m, front=2.8):
@@ -2019,6 +2065,14 @@ def drive_session(args, p, prof, r, node):
     if node.status is None:
         raise SystemExit('No /control/status in 3 s: start the test stack first.')
     st = dict(node.status)
+    lowvis, why_lv = lowvis_gate(args.test, st, bool((prof.get('vesc_timeout') or {}).get('verified')))
+    if why_lv:
+        raise SystemExit(why_lv)
+    prof['mux_low_visibility'] = lowvis
+    if lowvis:
+        say('LOW-VISIBILITY MODE ACTIVE (mux MANUAL front >= %.2f; T3 only; AUTO and the 0.80 m obstacle gate '
+            'unchanged). Conditions: clear disk on, look behind the car before every n, spotter outside the disk, '
+            '0.3 m/s first for every command.' % float(st.get('manual_min_front_valid_fraction', 0)))
     real = bool(st.get('real_actuation_enabled'))
     if real != args.live:
         raise SystemExit('Mux real_actuation_enabled=%s but --live=%s: refusing.' % (real, args.live))
@@ -2074,7 +2128,7 @@ def drive_session(args, p, prof, r, node):
                                         circle_info['servo_planned'], g['r_nom'], g['diameter_m'],
                                         ' (incl. fallback +%.1f m)' % g['extra_m'] if g['extra_m'] else '',
                                         g['r_max'], 'left' if prof['steer'] > 0 else 'right'))
-        if args.live and not prof['vesc_timeout']['verified']:
+        if args.live and (not prof['vesc_timeout']['verified'] or prof.get('mux_low_visibility')):
             ok, why = t3_slow_gate(args.out_root or vp.evidence_root(), prof)
             if not ok:
                 raise SystemExit('T3 fallback gate: ' + why)
