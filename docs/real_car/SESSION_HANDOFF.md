@@ -1,9 +1,98 @@
-# Real-car tests: session handoff (updated 2026-11-22, end of day)
+# Real-car tests: session handoff (updated 2026-11-23, laptop session, no car)
 
 For Moatasem and for the next Claude Code session. Read this, then
 [REAL_CAR_BASELINE_2026-11-14.md](REAL_CAR_BASELINE_2026-11-14.md) (standard values) and
 [REAL_CAR_TEST_RESULTS.md](REAL_CAR_TEST_RESULTS.md) (every measured result). Code:
-`tools/real_car_tests/` (README there). Numbers: `config/real_car/vehicle_params.yaml` only.
+`tools/real_car_tests/` (README there, section "23 Nov"). Numbers: `config/real_car/vehicle_params.yaml` only.
+
+**Status 23 Nov (laptop night session 22-23 Nov, no car; nothing actuated; ROS domain 43/44, localhost only):**
+- **A. Fixed: `run_test.py` refused T5b with "t1b_stop_converter parameters unreadable: {}".** Cause (reproduced
+  live with the converter alone): rclpy Humble `parameter_service.py` answers a GetParameters batch with an EMPTY
+  list as soon as one requested name is declared but unset; in gain mode `steer_table_left/right` are typed and
+  unset, so `method` etc. were lost too (not a timeout, not the node name). Fix: per-name read after a short
+  answer (unset = None = gain mode), required parameters named when missing. Live-tested: gain mode read OK
+  (tables None, mode gain), table yaml read OK (limits +/-0.28), an invalid table set at runtime still refused.
+- **B. Faster tests:** `--fast` (no T3 clear-disk / visibility refusal, no 0.3-first gate, no
+  `--t1-passed-confirmed`, hands-off 0.5 s; kept: SPACE release = brake 5 A, converter + stop-method check, caps,
+  IMU freeze, VESC status, step gate T1, T3 geofence / turn check; `"fast": true` in run_info.json); bags zstd per
+  file (all analysis reads them: `analyze.read_bag`); mux armed + no `--live` -> live mode on with one line.
+- **C. Analysis (bags in `~/Data/real_car_evidence`, results doc rows "T3 gyro noise in turns" and "C1 replay in
+  circles"):** gyro z white noise in T3 steady turns sigma_hf 0.0065 rad/s (var 4.2e-5, ~48x T5a static R
+  8.85e-7; tile T4 cruise ~4.5e-5, carpet 3.0e-4). **Proposed imu0 R_gz 1.2e-3** (`ekf_shadow_inputs.R_IMU_WZ`,
+  read by imu0 of `ekf_real_shadow.yaml`; now 8.0e-3; NOT applied). C1 replay on the T3 circles (13 repeats): heading = A (gyro), EKF turns **1.2 % less than RF2O in tight turns** (~4 deg per turn), path +2.9 % vs RF2O, end position error 0.143 m mean (A 0.173); R 1.2e-3 changes nothing measurable.
+- **D/E. Hall loop:** `teleop` runner profile (keyboard: hold `w`/SPACE straight, `a` left, `d` right; release =
+  brake 5 A; table steering +/-0.28 rad, 0.7 rad/s; tested on the laptop through the real mux + converter with a
+  stub VESC: servo 0.110..0.660, brake 5 A 2 s after every release / KILL, never speed 0); `hall_loop_record.sh`
+  (hand-push fallback, sensor check + zstd record); `hall_loop_map.py` (offline slam_toolbox, loop closing off /
+  on, lap closure at the tape mark; tested on T3 bag `155039`: 2.02 laps, both maps ~170 m^2, closure RF2O 0.170 m /
+  +8.9 deg, SLAM off 0.182 / +10.1, on 0.237 / +12.6 (T3 stops ~720 deg after the start, not on a mark); the 4 Nov
+  "manual push" bag did not move, correctly reported). The team keyboard GUI `~/continuous_keyboard_mux.py` is not
+  used: not in the repo (not reviewable from here), a GUI over SSH, F-13 latch unresolved. PS4: not used (the joy node would be a second `/joy`
+  publisher next to the runner; the runner refuses that).
+
+**Next car session, in order (all Moatasem's runs; every terminal: ROS + `install/setup.bash` sourced, domain 42,
+`source ~/f1tenth_uj/tools/real_car_tests/local_env.sh` over Wi-Fi):**
+1. **Update:** `cd ~/f1tenth_uj && git pull --ff-only origin moatasem/real-car-tests` (Python tools only, no
+   colcon build), then `for t in run_test analyze t1b_stop_converter hall_loop_map; do python3
+   tools/real_car_tests/$t.py --self-test; done`.
+2. **Sensor check** (with the stack of step 3 up, terminal C): `~/f1tenth_uj/tools/real_car_tests/hall_loop_record.sh
+   --check-only`. Needs /scan >= 25 Hz, /imu/data_raw >= 90 Hz not frozen, /odom_rf2o >= 10 Hz; it says what to
+   restart (LiDAR exit -6 / IMU not started / Errno 121 retry).
+3. **Hall loop by TELEOP** (0.3 m/s: better scans, first teleop on the car; 0.5 allowed with `vesc_t3_erpm4630.yaml`
+   + `max_speed_mps:=0.5` + `--speed 0.5`). Car on the START TAPE MARK, still while the stack starts (IMU
+   calibration 10 s).
+   ```bash
+   # A
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.3 max_steer_rad:=0.28 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t3_erpm2780.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_t3_table.yaml
+   # B
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test teleop --speed 0.3 --fast
+   ```
+   Wait 3 s after the runner starts (still reference), `n`, HOLD `w` (or SPACE) to drive, roll to `a` / `d` (press
+   the new key before releasing the old one), release everything = brake. 2 laps; each release ends a segment,
+   `n` re-arms. Keep >= 1 m from walls ahead (mux front gate 0.80 m latches STOP: `n` again). If the mux latches
+   `FRONT_UNKNOWN` again and again (hall visibility 0.44-0.65 < 0.75; low-visibility mode stays T3 only): go to
+   3b. At the end put the car back ON the tape mark (pushing by hand is fine, RF2O tracks it), still 5 s, `q`.
+   The runner bag is the recording (`/scan /imu/data_raw /odom_rf2o /tf /tf_static /sensors/core
+   /odom_vesc_observe /control/status /manual/drive /t1b_stop_converter/status ...`; `/drive` is never recorded:
+   mux subscriber count; the command side is `/control/status` + `/manual/drive` + the converter status).
+   **3b. Fallback, hand push** (nothing commands the VESC):
+   ```bash
+   # A
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+   ros2 launch f1tenth_bringup observe_only.launch.py enable_vesc:=true
+   # B (car still 10 s)
+   ros2 launch f1tenth_imu imu.launch.py
+   # C
+   ~/f1tenth_uj/tools/real_car_tests/hall_loop_record.sh
+   ```
+   Map (laptop, after copying the folder; stack down): `python3 tools/real_car_tests/hall_loop_map.py <folder>`
+   -> `maps/map_lc_off.*`, `maps/map_lc_on.*`, lap-closure table.
+4. **T5b with --fast** (stand, wheels off the ground; gain mode now accepted):
+   ```bash
+   # A
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.5 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t1b_erpm4630.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0
+   # B
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t5b_stand_imu --speed 0.5 --fast
+   python3 ~/f1tenth_uj/tools/real_car_tests/t5_imu_analyze.py stand
+   ```
+5. **Steering-table ground check** (hall, low-visibility mode, 0.3 m/s; expect **R ~1.43 m, pass 1.29-1.57 m**
+   both sides; clear disk 4.42 m: with `--fast` the runner does not check it, look yourself, spotter outside):
+   ```bash
+   # A
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.3 max_steer_rad:=0.33 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t3_erpm2780.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 t3_low_visibility:=true converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_t3_table.yaml
+   # B
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t3_circle --speed 0.3 --steer -0.18 --fast
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test t3_circle --speed 0.3 --steer 0.18 --fast
+   python3 ~/f1tenth_uj/tools/real_car_tests/t3_analyze.py
+   ```
+   `m` must show `converter steer_mode table (limits -0.28 / +0.28 rad)`. The geofence (R_max 1.79 m + 0.20 m) still
+   stops a circle that is much wider than planned (22 Nov: two GEOFENCE stops at -0.18 with the gain converter).
 
 **Status 22 Nov (end of day; battery dead, no more driving):**
 - **Done 22 Nov:**

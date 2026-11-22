@@ -14,6 +14,9 @@ so it also works while driving).
   stand <T5b folder>    (T5 b) run_test.py t5b_stand_imu: still / 90 s steady (motor on, car not moving) /
                         after the brake: per axis mean, std, sigma_hf; gz bias shift with the motor running,
                         drift in the steady window, vibration spectrum peaks vs wheel frequency.
+  circles <T3 folders>  (23 Nov) the same on t3_circle runs: steady-yaw-rate windows (start delay + ramp + settle ..
+                        zero - 0.1 s, >= 3 s, as t3_analyze.py): gz sigma_hf (the yaw rate is constant, the second
+                        difference removes it), 1 s block spread of the rate, gz vs RF2O. Driving R_gz in turns.
   static <T5a folder>   (T5 c) 15 min static recording: residual bias, R (variance), Allan deviation (angle random
                         walk, bias instability), 60 s block drift, integrated heading drift, frozen-sample check.
 Writes t5_<mode>.json into the (first) folder.
@@ -35,6 +38,7 @@ FROZEN_RUN = 10          # >= this many identical consecutive samples (0.1 s) = 
 GAP_S = 0.03             # header-stamp gap counted as a dropout (100 Hz expected)
 C1_R_GZ = 8.0e-3         # C1 shadow EKF R for gyro vyaw (ekf_shadow_inputs.R_IMU_WZ; gyro - reference, T4 cruise)
 START_DELAY_S = 0.3      # command -> motion (T4)
+T5A_R_GZ = 8.85e-7       # T5a static 15 min on the car, 22 Nov (results doc): comparison only
 SETTLE_S = 1.0           # after the ramp (as t3_analyze)
 
 
@@ -384,6 +388,77 @@ def mode_driving(folders, p):
     return out
 
 
+def mode_circles(folders, p, min_window_s=3.0):
+    """T3 circles: gz noise in the steady-yaw-rate windows (see the module doc). -> pooled dict."""
+    import numpy as np
+    import analyze as A
+    rows_out, hfs, resid = [], [], []
+    print('| T3 run | steer rad | windows | steady s | dup % | yaw rate rad/s | 1 s block spread | gz hf | '
+          'gz hf var | gz - RF2O std (lag ms) |')
+    print('|---|---|---|---|---|---|---|---|---|---|')
+    for folder in folders:
+        data = A.read_bag(folder / 'bag')
+        raw = imu_rows(data)
+        imu, rep = dedup(raw) if raw else ([], dict(frozen=True, longest_run=0))
+        if not raw or rep['frozen']:
+            print('%s: IMU missing or FROZEN, skipped' % folder.name)
+            continue
+        wins, info = drive_windows(folder, p)
+        wins = [w for w in wins if w[2] - w[1] >= min_window_s]
+        if not wins:
+            print('| %s | - | 0 | - | - | - | - | - | - | - |' % folder.name[:15])
+            continue
+        rf = sorted((stamp(m), A.quat_yaw(m.pose.pose.orientation)) for _, m in data.get('/odom_rf2o', []))
+        hv_w, rates, spreads, ts, wz, ints = [], [], [], [], [], []
+        for t0, a, b in wins:
+            seg = sel(imu, a, b)
+            g = np.array([r[3] for r in seg])
+            hv_w.append((hf_var(g), len(g)))
+            st = sel(imu, t0 - 1.0, t0 - 0.02)
+            bias = float(np.mean([r[3] for r in st])) if st else 0.0
+            rates.append(-(float(g.mean()) - bias))
+            tt = np.array([r[0] for r in seg])
+            blocks = [g[(tt >= x) & (tt < x + 1.0)].mean() for x in np.arange(a, b - 1.0, 1.0)]
+            spreads.append(float(np.std(blocks)) if len(blocks) > 1 else 0.0)
+            seg2 = sel(imu, a - 0.3, b + 0.3)
+            ts += [r[0] for r in seg2]
+            wz += [-(r[3] - bias) for r in seg2]
+            ints += rate_from_poses([q for q in rf if a <= q[0] <= b])
+        hv = sum(v * n for v, n in hv_w) / sum(n for _, n in hv_w)
+        res = dict(folder=folder.name, steer=(info.get('circle') or {}).get('steer_rad', info['profile'].get('steer')),
+                   windows=len(wins), steady_s=sum(b - a for _, a, b in wins), duplicates=rep['duplicate_share'],
+                   yaw_rate=float(np.mean(rates)), block_spread=float(np.mean(spreads)), gz_hf_std=math.sqrt(hv),
+                   gz_hf_var=hv)
+        if ints and len(ts) > 50:
+            order = np.argsort(ts)
+            bl = best_lag(np.asarray(ts)[order], np.asarray(wz)[order], ints, [k * 0.01 for k in range(-5, 16)])
+            if bl:
+                res['rf2o'] = dict(lag_s=bl[0], residual_std=bl[1], n=bl[2], residual_mean=bl[3])
+                resid.append((bl[1], bl[2]))
+        hfs.append((hv, sum(n for _, n in hv_w), res['gz_hf_std']))
+        rows_out.append(res)
+        r2 = res.get('rf2o')
+        print('| %s | %+.3f | %d | %.1f | %.1f | %+.3f | %.4f | %.4f | %.1e | %s |' % (
+            folder.name[:15], float(res['steer']), res['windows'], res['steady_s'], 100 * res['duplicates'],
+            res['yaw_rate'], res['block_spread'], res['gz_hf_std'], hv,
+            '-' if not r2 else '%.4f (%.0f)' % (r2['residual_std'], 1000 * r2['lag_s'])))
+    if not hfs:
+        raise SystemExit('no analysable T3 window')
+    pooled_var = sum(v * n for v, n, _ in hfs) / sum(n for _, n, _ in hfs)
+    worst = max(x for _, _, x in hfs)
+    med = float(sorted(x for _, _, x in hfs)[len(hfs) // 2])
+    rstd = (math.sqrt(sum(s_ ** 2 * n for s_, n in resid) / sum(n for _, n in resid)) if resid else None)
+    out = dict(runs=rows_out, pooled_hf_var=pooled_var, pooled_hf_std=math.sqrt(pooled_var), worst_hf_std=worst,
+               recommended_r_gz=recommend_r_gz(worst), median_run_r_gz=recommend_r_gz(med),
+               rf2o_residual_std=rstd, static_t5a_r=T5A_R_GZ, c1_r_gz=C1_R_GZ)
+    print('\nPooled T3 steady-yaw windows: gz sigma_hf %.5f rad/s (var %.2e); worst run %.4f; RF2O residual std %s'
+          % (out['pooled_hf_std'], pooled_var, worst, '-' if rstd is None else '%.4f' % rstd))
+    print('R_gz rule (2 x sigma_hf)^2: worst run %.1e, median run %.1e; T5a static R %.2e; C1 uses %.1e'
+          % (out['recommended_r_gz'], out['median_run_r_gz'], T5A_R_GZ, C1_R_GZ))
+    (folders[0] / 't5_circles.json').write_text(json.dumps(out, indent=1))
+    return out
+
+
 def mode_stand(folder, p):
     import numpy as np
     import analyze as A
@@ -401,7 +476,12 @@ def mode_stand(folder, p):
     t0, a, b = max(wins, key=lambda w: w[2] - w[1])           # the longest repeat; b = zero command - 0.1
     tz = b + 0.1
     a = a - SETTLE_S + float(t5['settle_s'])
-    phases = dict(still=sel(imu, t0 - float(t5['still_s']), t0 - 0.02), steady=sel(imu, a, b),
+    # run_test.py --fast (23 Nov): hands off only 0.5 s before the drive -> still reference = that window
+    still_s = float(t5['still_s'])
+    if info.get('fast'):
+        still_s = min(still_s, float((info.get('profile') or {}).get('hands_off_s', 0.5)))
+        print('FAST run: still reference %.1f s before the drive (the T5a static R is the real still value)' % still_s)
+    phases = dict(still=sel(imu, t0 - still_s, t0 - 0.02), steady=sel(imu, a, b),
                   after=sel(imu, tz + 2.5, tz + 2.5 + float(t5['still_s'])))
     core = [(t, m.state.speed) for t, m in data.get('/sensors/core', []) if a <= t <= b]
     erpm = float(np.mean([e for _, e in core])) if core else None
@@ -511,7 +591,7 @@ def mode_static(folder, p):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('mode', nargs='?', choices=['driving', 'stand', 'static'])
+    ap.add_argument('mode', nargs='?', choices=['driving', 'circles', 'stand', 'static'])
     ap.add_argument('folders', nargs='*')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
@@ -526,6 +606,8 @@ def main():
         if not folders:
             folders = sorted(vp.evidence_root().glob('*_t4_straight_*_armed'))
         mode_driving(folders, p)
+    elif args.mode == 'circles':
+        mode_circles(folders or sorted(vp.evidence_root().glob('*_t3_circle_*_armed')), p)
     elif args.mode == 'stand':
         folders = folders or sorted(vp.evidence_root().glob('*_t5b_stand_imu_*_armed'))[-1:]
         mode_stand(folders[0], p)

@@ -90,7 +90,19 @@ PROFILES = {
         place='stand', steps=[0.5], steer=0.0, steady_s=20.0, repeats=1, extra_repeats=1, post_zero_s=4.0,
         live_allowed=True, converter='t1b_stop_converter', stop_method='brake5A',
         note='VESC timeout, wheels off the ground: 0.5 m/s, kill -9 the converter during steady. 1 run.'),
+    # Teleop (23 Nov, hall-loop mapping drive): keyboard driving through the same chain (runner -> mux MANUAL ->
+    # t1b converter brake 5 A + steering TABLE -> vesc_driver). Every drive key is the deadman: hold w / SPACE =
+    # straight, a = left, d = right at --speed; release everything = zero -> mux STOP -> brake 5 A. Steering moves
+    # at TELEOP_STEER_RATE to +/-0.28 rad (table limit) and back to the centre when the key changes. No brake
+    # point / time profile: the mux 0.80 m front gate is the obstacle backstop. Segments repeat until q.
+    'teleop': dict(
+        place='ground', steps=[0.3, 0.5], no_step_gate=True, steer=0.28, steady_s=0.0, repeats=100000,
+        post_zero_s=1.0, live_allowed=True, converter='t1b_stop_converter', stop_method='brake5A',
+        teleop=True, teleop_max_s=300.0,
+        note='Teleop (hall-loop mapping): hold w/SPACE straight, a left, d right; release = brake 5 A. Until q.'),
 }
+TELEOP_KEYS = {'space': 0, 'w': 0, 'a': 1, 'd': -1}   # drive key -> steering direction (+ = left)
+TELEOP_STEER_RATE = 0.7                                # rad/s: 0 -> 0.28 in 0.4 s, and back on key change
 STEP_TOL = 1e-6
 SPEED_MAX_ROUNDING = 5.0  # ERPM: yaml values are rounded (4630 for 4627.7)
 
@@ -123,6 +135,8 @@ T1B_ONLY_TOPICS = ('/commands/motor/brake', '/commands/motor/current')  # t1b_st
 
 # BMI160 (/imu/data_raw) watch, 20 Nov: after one I2C timeout ([Errno 110]) the stream kept its
 # 100 Hz rate but repeated one sample until the node restarted (two sessions). Rate checks miss it.
+HANDS_OFF_S = 1.0         # T3 gyro bias = mean gz over this window before SPACE (--fast: FAST_HANDS_OFF_S)
+FAST_HANDS_OFF_S = 0.5
 IMU_WINDOW_S = 1.0        # look at the last second of samples
 IMU_FROZEN_SHARE = 0.5    # frozen: more than this share of consecutive samples identical
 IMU_STALE_S = 0.3         # stale: no sample for this long
@@ -422,6 +436,26 @@ def step_mismatch(speed, mux_cap, speed_max, gain, margin):
     return None
 
 
+def live_mode(real, live, live_allowed):
+    """Mux real actuation vs --live -> (real, live, one-line note or None). 23 Nov: mux real + no --live -> live is
+    switched on (one line) instead of refusing; --live with the mux disarmed and real on a never-live profile
+    still refuse."""
+    if real and not live_allowed:
+        raise SystemExit('Mux real_actuation_enabled=True but this profile never runs with real actuation: refusing.')
+    if live and not real:
+        raise SystemExit('Mux real_actuation_enabled=False but --live given: refusing (launch the armed stack, or '
+                         'drop --live for a disarmed run).')
+    if real and not live:
+        return real, True, 'Mux real actuation is ENABLED: live mode on (--live implied).'
+    return real, live, None
+
+
+def bag_command(out_dir, topics):
+    """ros2 bag record, zstd per file (23 Nov; analyze.read_bag reads both kinds)."""
+    return (['ros2', 'bag', 'record', '-o', str(out_dir), '--compression-mode', 'file',
+             '--compression-format', 'zstd'] + list(topics))
+
+
 def timeout_verified(root):
     """VESC firmware timeout verified on the stand: an armed vesc_timeout_check run whose timeout_check.json
     (vesc_timeout_check.py) passed. -> (ok, reason)."""
@@ -548,6 +582,12 @@ class Machine:
             self.target_rad = 2 * math.pi * float(self.t3['target_turns'])
             self.min_visible = 0.75 + float(self.t3['visibility_margin'])   # updated from the mux status
         self.ground_ok = ground_ok
+        # --fast (23 Nov): no T3 clear-disk / visibility refusal at arm, hands-off 0.5 s (gyro bias window).
+        # Kept: SPACE-release brake, converter brake, caps, IMU freeze refusal, VESC status, geofence.
+        self.fast = bool(prof.get('fast'))
+        self.teleop = bool(prof.get('teleop'))
+        self.steer_now, self.steer_t = 0.0, None
+        self.hands_off_s = float(prof.get('hands_off_s', HANDS_OFF_S))
         # brake_at_range (T4): drive until the brake point; the time limit is set per repeat.
         self.brake_at_range = bool(prof.get('brake_at_range'))
         # Only stops with this reason count (None = any stop from steady speed).
@@ -644,7 +684,9 @@ class Machine:
         what = ('FULL LOCK (command %+.3f rad, expected %+.3f)' % (self.prof['steer'], self.expect_steer)
                 if self.prof.get('full_lock') else 'steer %+.2f rad' % self.prof['steer'])
         fb = (' incl. +%.1f m VESC-timeout FALLBACK' % g['extra_m']) if g.get('extra_m') else ''
-        return lowvis + ('circle %s %s: R nominal %.2f m (assumed %.2f..%.2f), clear disk %.2f m diameter%s, centre '
+        fast = ('FAST: clear disk + visibility NOT checked (look at the disk yourself) | ' if self.fast else '')
+        return fast + lowvis + (
+            'circle %s %s: R nominal %.2f m (assumed %.2f..%.2f), clear disk %.2f m diameter%s, centre '
                 '%.2f m to the %s | clearance %s | mux visibility min %s (needs >= %.2f) | RF2O %s' % (
                     'LEFT' if g['side'] > 0 else 'RIGHT', what, g['r_nom'], g['r_min'], g['r_max'],
                     g['diameter_m'], fb, g['r_max'], 'left' if g['side'] > 0 else 'right',
@@ -659,12 +701,14 @@ class Machine:
     def circle_refusal(self, w):
         self.sync_mux_visibility(w)
         c, v = w.get('t3_clear'), w.get('t3_vis')
-        if c is None or v is None:
+        if self.fast:
+            c = v = None                      # --fast: clear disk + visibility not checked (operator + mux)
+        elif c is None or v is None:
             return 'CIRCLE_NO_SCAN'
-        if c['min_m'] < 0:
+        if c is not None and c['min_m'] < 0:
             return 'CIRCLE_NOT_CLEAR(return %.2f m inside the %.2f m clear disk at %.0f deg)' % (
                 -c['min_m'], self.geom['diameter_m'], c['bearing_deg'])
-        if v['min_fraction'] < self.min_visible:
+        if v is not None and v['min_fraction'] < self.min_visible:
             return 'CIRCLE_LOW_VISIBILITY(%.2f < %.2f at heading %.0f deg: the mux would stop there)' % (
                 v['min_fraction'], self.min_visible, v['heading_deg'])
         if w.get('rf2o_age', 1e9) > float(self.t3['rf2o_stale_s']) or w.get('rf2o_pose') is None:
@@ -716,6 +760,15 @@ class Machine:
             return 'TURNS_RF2O_BACKUP(gyro %.0f deg, RF2O %.0f deg)' % (math.degrees(self.turned),
                                                                        math.degrees(self.turned_rf))
         return None
+
+    def teleop_steer(self, now, direction):
+        """Teleop steering: move toward direction x steer max (0 = centre) at TELEOP_STEER_RATE."""
+        target = float(direction or 0) * abs(float(self.prof['steer']))
+        dt = 0.0 if self.steer_t is None else max(0.0, now - self.steer_t)
+        self.steer_t = now
+        step = TELEOP_STEER_RATE * dt
+        self.steer_now += max(-step, min(step, target - self.steer_now))
+        return self.steer_now
 
     def finished(self):
         if 'extra_repeats' not in self.prof:
@@ -791,6 +844,8 @@ class Machine:
                     elif self.circle:
                         reason = self.circle_refusal(w)
                         self.log(now, 'CIRCLE_FIT', self.circle_text(w))
+                    elif self.teleop:
+                        pass                      # no straight-length fit: the operator steers, mux gate = backstop
                     else:
                         ok, need, have = self.ground_fit(w)
                         top = self.ground_window()[1]
@@ -836,6 +891,11 @@ class Machine:
                                          steer_rad=self.prof['steer'], full_lock=self.prof.get('full_lock'),
                                          start_wall=time.time()))
                 detail = 'target=%.2f m/s' % self.prof['speed']
+                if self.teleop:
+                    self.steer_now, self.steer_t = 0.0, now
+                    self.hard_s = float(self.prof.get('teleop_max_s', 300.0))
+                    detail += ' TELEOP steer max %.2f rad, rate %.2f rad/s, segment limit %.0f s' % (
+                        abs(float(self.prof['steer'])), TELEOP_STEER_RATE, self.hard_s)
                 if self.brake_at_range:
                     # Time limit = expected time to the brake point + slack. A slower car (gain
                     # off, wheel slip) or a lost front return stops early, never late.
@@ -875,13 +935,14 @@ class Machine:
                 reason = 'MUX_LEFT_MANUAL_MODE(%s,%s)' % (mode, st.get('last_stop_reason'))
             if reason is None and self.quit:
                 reason = 'QUIT'  # lost terminal (keys are KILL, handled above)
-            if reason is None and not self.brake_at_range and not self.circle and elapsed >= self.ramp_s + self.steady_s:
+            if (reason is None and not self.brake_at_range and not self.circle and not self.teleop
+                    and elapsed >= self.ramp_s + self.steady_s):
                 reason = 'PROFILE_DONE'
             if reason is None and elapsed >= self.hard_s:
                 reason = 'HARD_TIME_LIMIT'
             if reason is None and self.circle:
                 reason = self.circle_step(now, elapsed, v, w)
-            if reason is None and self.ground and not self.circle:
+            if reason is None and self.ground and not self.circle and not self.teleop:
                 have = self.ahead(w)
                 if not math.isfinite(have):
                     reason = 'FRONT_RANGE_LOST'
@@ -892,6 +953,8 @@ class Machine:
             if not self.steady_logged and v >= float(self.prof['speed']):
                 self.steady_logged = True
                 self.log(now, 'STEADY_REACHED')
+            if self.teleop:
+                return v, self.teleop_steer(now, w.get('drive_dir')), 1, None
             return v, float(self.prof['steer']), 1, None
         if self.state == 'STOPPING':
             # Live F-01 readout from /sensors/core (same definition as analyze.py, which uses the
@@ -927,7 +990,11 @@ class Machine:
                     self.steady_count,
                     self.prof['repeats'], self.repeat + 1, self.max_repeats)
                 if self.brake_at_range or self.circle:
-                    self.message += ' Carry the car back to the start marks, hands off ~2 s, m to check.'
+                    self.message += (' Carry the car back to the start marks, hands off %.1f s, m to check.'
+                                     % (self.hands_off_s if self.fast else 2.0))
+            elif self.state == 'IDLE' and self.teleop:
+                self.message = '%s | teleop segment %d ended: release the keys, n to arm again, q to finish.' % (
+                    detail, self.repeat)
             elif self.state == 'IDLE':
                 self.message = '%s | Repeat %d/%d: release SPACE, press n to arm.' % (
                     detail, self.repeat + 1, self.prof['repeats'])
@@ -935,6 +1002,139 @@ class Machine:
                 self.message = '%s | %s' % (KILL_BANNER, self.message)
             return 0.0, 0.0, 0, 'STOP'
         return 0.0, 0.0, 0, None
+
+
+def self_test_23nov(p, world):
+    """23 Nov: converter parameter read (A), --fast / auto-live / zstd (B), teleop (E)."""
+    from rcl_interfaces.msg import ParameterValue
+    import t1b_stop_converter as conv
+
+    def pv(t, **kw):
+        return ParameterValue(type=t, **kw)
+    names = list(T1B_PARAMS_REQUIRED + T1B_PARAMS_OPTIONAL)
+    vals = [pv(4, string_value='brake'), pv(3, double_value=5.0), pv(3, double_value=2.0),
+            pv(3, double_value=0.335), pv(3, double_value=-0.5), pv(3, double_value=-0.5)]
+    table = [pv(8, double_array_value=[0.0, 0.335, 0.2042, 0.178, 0.28, 0.11]),
+             pv(8, double_array_value=[0.0, 0.335, -0.1414, 0.526, -0.28, 0.66])]
+    # gain mode as rclpy Humble answers it: the batch is EMPTY (unset tables), per name the tables are empty too
+    single = dict(zip(names, [[v] for v in vals] + [[], []]))
+    gain = params_from_answers(names, [], single.get)
+    assert gain['method'] == 'brake' and gain['steer_table_left'] is None and t1b_params_problem(gain) is None, gain
+    assert converter_steering(gain, 0.335)['mode'] == 'gain'
+    tab = params_from_answers(names, vals + table, None)             # table mode: one full batch answer
+    assert t1b_params_problem(tab) is None and converter_steering(tab, 0.335)['limits'] == (-0.28, 0.28)
+    assert params_from_answers(names, None, None) == {}               # unreachable
+    assert 'unreadable' in t1b_params_problem({})
+    assert 'missing: method' in t1b_params_problem(dict(gain, method=None))
+    try:
+        converter_steering(dict(tab, steer_table_left=[0.0, 0.340, 0.2, 0.178]), 0.335)
+        raise AssertionError('bad table accepted')
+    except SystemExit as exc:
+        assert 'table invalid' in str(exc)
+    # auto-live (B3)
+    assert live_mode(True, False, True)[1] is True and 'live mode on' in live_mode(True, False, True)[2]
+    assert live_mode(True, True, True)[2] is None and live_mode(False, False, True) == (False, False, None)
+    for args_ in ((False, True, True), (True, False, False), (True, True, False)):
+        try:
+            live_mode(*args_)
+            raise AssertionError(args_)
+        except SystemExit:
+            pass
+    bc = bag_command('/x/bag', BAG_TOPICS)
+    fmt_ = bc[bc.index('--compression-format') + 1]
+    assert bc[:3] == ['ros2', 'bag', 'record'] and '--compression-mode' in bc and fmt_ == 'zstd'
+    assert not any(is_protected(t) for t in bc[4:] if t.startswith('/'))
+    # --fast (B1): a T3 arm that the standard mode refuses (disk not clear, low visibility) arms in fast mode;
+    # IMU freeze / VESC telemetry / SPACE still refuse.
+    pr = resolve_profile('t3_circle', 0.3, -0.18, p)
+
+    def tw(clear, vis, **kw):
+        st = dict(mode='STOP', last_mode_request='MANUAL', manual_min_front_valid_fraction=0.75,
+                  real_actuation_enabled=kw.pop('real', False))
+        return world(front_m=float('nan'), sector_min_m=3.0, scan_age=0.05, st=st, gz=0.0, gz_mean_1s=0.0,
+                     rf2o_pose=(0.0, 0.0, 0.0), rf2o_age=0.05, t3_clear=clear, t3_vis=vis, **kw)
+    bad_c, bad_v = dict(min_m=-0.3, bearing_deg=90.0), dict(min_fraction=0.30, heading_deg=0.0)
+    std = Machine(pr, p, live=False, ground_ok=True)
+    std.step(0.0, 'n', False, tw(bad_c, bad_v))
+    assert std.state == 'IDLE' and std.events[-1]['detail'].startswith('CIRCLE_NOT_CLEAR'), std.events[-1]
+    fp = dict(pr, fast=True, hands_off_s=FAST_HANDS_OFF_S)
+    fm = Machine(fp, p, live=False, ground_ok=True)
+    fm.step(0.0, 'm', False, tw(None, None))
+    assert fm.events[-1]['detail'].startswith('FAST: clear disk + visibility NOT checked'), fm.events[-1]
+    assert fm.step(0.1, 'n', False, tw(None, None))[3] == 'MANUAL' and fm.state == 'ARMING', fm.events[-1]
+    for kw, why in ((dict(imu_problem='IMU_FROZEN(x)'), 'IMU_FROZEN'), (dict(vesc_fault=3), 'VESC_FAULT'),
+                    (dict(real=True), 'REAL_FLAG_MISMATCH')):
+        fm2 = Machine(fp, p, live=False, ground_ok=True)
+        fm2.step(0.0, 'n', False, tw(None, None, **kw))
+        assert fm2.state == 'IDLE' and fm2.events[-1]['detail'].startswith(why), (why, fm2.events[-1])
+    fm2 = Machine(fp, p, live=False, ground_ok=True)
+    fm2.step(0.0, 'n', True, tw(None, None))
+    assert fm2.events[-1]['detail'] == 'RELEASE_SPACE_FIRST'
+    assert fm.hands_off_s == 0.5 and std.hands_off_s == HANDS_OFF_S
+    # drive keys (E): a key change restarts the first-press window; SPACE alone behaves as before
+
+    class KS:
+        drive_keys, drive_key = TELEOP_KEYS, None
+    d, ks = Deadman(0.7, 0.25), KS()
+    for t_ in (0.0, 0.5, 0.53, 0.56):
+        assert drive_key_event(d, ks, 'w', t_)
+    assert d.held(0.80) and not d.held(0.82)                     # auto-repeat: 0.25 s gap
+    assert drive_key_event(d, ks, 'a', 0.58) and d.held(1.27) and not d.held(1.29)   # new key: 0.7 s window
+    assert not drive_key_event(d, ks, 'x', 0.6) and ks.drive_key == 'a'
+    # teleop Machine (E)
+    tp = resolve_profile('teleop', 0.5, None, p)
+    tm = Machine(tp, p, live=False, ground_ok=True)
+    gst = dict(mode='STOP', last_mode_request='MANUAL')
+
+    def tg(front=0.5, mode='STOP', direction=0, **kw):
+        return world(front_m=front, sector_min_m=1.2, scan_age=0.05, left_m=1.0, right_m=1.0,
+                     st=dict(gst, mode=mode), drive_dir=direction, **kw)
+    assert tm.step(0.0, 'n', False, tg())[3] == 'MANUAL', tm.events[-1]     # front 0.5 m: no speed-fit refusal
+    tm.step(0.05, None, False, tg(mode='MANUAL_READY'))
+    tm.step(0.10, None, True, tg(mode='MANUAL_READY'))
+    assert tm.state == 'DRIVING' and 'TELEOP' in tm.events[-1]['detail']
+    t_, steer_ = 0.10, []
+    for direction, n_ in ((0, 25), (1, 40), (0, 40), (-1, 40)):
+        for _ in range(n_):
+            t_ += 0.02
+            out = tm.step(t_, None, True, tg(front=0.9, mode='MANUAL_ACTIVE', direction=direction))
+            assert tm.state == 'DRIVING', tm.events[-1]
+            steer_.append(out[1])
+    assert abs(out[0] - 0.5) < 1e-9                                     # ramped to the cap, no brake point
+    assert abs(steer_[24]) < 1e-12 and abs(steer_[64] - 0.28) < 1e-9 and abs(steer_[104]) < 1e-9
+    assert abs(steer_[-1] + 0.28) < 1e-9
+    assert max(abs(b - a) for a, b in zip(steer_, steer_[1:])) <= TELEOP_STEER_RATE * 0.02 + 1e-9   # smooth
+    out = tm.step(t_ + 0.02, None, False, tg(mode='MANUAL_ACTIVE'))        # release -> zero
+    assert out[:3] == (0.0, 0.0, 0) and tm.events[-1]['detail'] == 'DEADMAN_RELEASED'
+    tm.step(t_ + 2.0, None, False, tg())
+    assert tm.state == 'IDLE' and 'teleop segment 1 ended' in tm.message, tm.message
+    assert tm.step(t_ + 2.1, 'n', False, tg())[3] == 'MANUAL'              # next segment
+    tm.step(t_ + 2.15, None, False, tg(mode='MANUAL_READY'))
+    tm.step(t_ + 2.2, None, True, tg(mode='MANUAL_READY'))
+    out = tm.step(t_ + 2.25, 'x', True, tg(mode='MANUAL_ACTIVE'))          # other key = KILL
+    assert out[:3] == (0.0, 0.0, 0) and tm.killed
+    out = tm.step(t_ + 2.30, None, True, tg(mode='STOP'))
+    assert tm.state == 'STOPPING'
+    tq = Machine(tp, p, live=False, ground_ok=True)
+    tq.step(0.0, 'q', False, tg())
+    assert tq.state == 'DONE'
+    # teleop pre-check: table + mux cap + vesc clip
+    smt = converter_steering(tab, 0.335)
+    ti = teleop_precheck(tp, smt, 0.28, dict(servo_min=0.10, servo_max=0.68))
+    assert abs(ti['servo_left'] - 0.11) < 1e-9 and abs(ti['servo_right'] - 0.66) < 1e-9, ti
+    assert abs(conv.servo_command(0.335, -0.5, -0.5, 0.0, smt['tables']) - 0.335) < 1e-12
+    for args_, why in (((converter_steering(gain, 0.335), 0.28, dict(servo_min=0.1, servo_max=0.68)), 'TABLE'),
+                       ((smt, 0.10, dict(servo_min=0.1, servo_max=0.68)), 'max_steer_rad'),
+                       ((smt, 0.28, dict(servo_min=0.27, servo_max=0.37)), 'clip')):
+        try:
+            teleop_precheck(tp, *args_)
+            raise AssertionError(why)
+        except SystemExit as exc:
+            assert why in str(exc), (why, exc)
+    print('PASS: 23 Nov: converter parameter read (gain mode = empty Humble batch -> per name, tables None; table')
+    print('      checked; unreachable / missing named), auto-live, zstd bag command, --fast (no disk / visibility')
+    print('      refusal, IMU / VESC / SPACE kept, hands-off 0.5 s), drive keys, teleop (no brake point, smooth')
+    print('      steering 0.7 rad/s to +/-0.28, release = zero, KILL, segments until q, table / cap / clip pre-check).')
 
 
 def self_test():
@@ -1645,6 +1845,7 @@ def self_test():
         and mi.events[-1]['detail'].startswith('IMU_FROZEN'), mi.events[-1]
     assert mi.step(0.1, 'n', False, world())[3] == 'MANUAL' and mi.state == 'ARMING'   # healthy -> arms
     print('PASS: IMU watch: healthy / frozen / stale / too few samples / node not running; arm refused on IMU_FROZEN.')
+    self_test_23nov(p, world)
     print('PASS: deadman timing, ramp, speed-fit length, front range, config = vehicle_params,')
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
@@ -1771,25 +1972,66 @@ class RosSession:
         return False
 
 
+def param_value(v):
+    """rcl_interfaces ParameterValue -> Python (None for NOT_SET / unsupported types)."""
+    return {1: v.bool_value, 2: v.integer_value, 3: v.double_value, 4: v.string_value,
+            7: list(v.integer_array_value), 8: list(v.double_array_value)}.get(v.type)
+
+
+def params_from_answers(names, batch, single):
+    """{name: value} from a GetParameters batch answer (list of ParameterValue, or None when unreachable) and a
+    per-name fallback single(name) -> [ParameterValue] or []. rclpy (Humble parameter_service.py) answers the WHOLE
+    batch with an empty list as soon as one name is declared but unset (ParameterUninitializedException): in gain
+    mode the converter's steer_table_left/right are typed and unset, so the 22 Nov batch read returned {} and the
+    runner refused ("parameters unreadable: {}"). Short answer -> ask per name; an unset name maps to None."""
+    if batch is None:
+        return {}
+    if len(batch) == len(names):
+        return {n: param_value(v) for n, v in zip(names, batch)}
+    out = {}
+    for n in names:
+        one = single(n)
+        out[n] = param_value(one[0]) if one else None
+    return out
+
+
 def get_node_params(node, node_name, names):
-    """{name: value} read from a running node (bool/int/double/string); {} if unreachable.
-    Needs `node` spinning in another thread (RosSession)."""
+    """{name: value} read from a running node (bool/int/double/string/arrays); {} if unreachable; a declared but
+    unset name (e.g. the converter's steering tables in gain mode) -> None. Needs `node` spinning in another
+    thread (RosSession)."""
     from rcl_interfaces.srv import GetParameters
     cli = node.create_client(GetParameters, '/%s/get_parameters' % node_name)
-    try:
-        if not cli.wait_for_service(timeout_sec=2.0):
-            return {}
-        fut = cli.call_async(GetParameters.Request(names=list(names)))
+
+    def ask(req_names):
+        fut = cli.call_async(GetParameters.Request(names=list(req_names)))
         t_end = time.monotonic() + 2.0
         while not fut.done() and time.monotonic() < t_end:
             time.sleep(0.02)
-        if not fut.done() or fut.result() is None:
+        return None if not fut.done() or fut.result() is None else list(fut.result().values)
+
+    try:
+        if not cli.wait_for_service(timeout_sec=2.0):
             return {}
-        return {name: {1: v.bool_value, 2: v.integer_value, 3: v.double_value, 4: v.string_value,
-                       7: list(v.integer_array_value), 8: list(v.double_array_value)}.get(v.type)
-                for name, v in zip(names, fut.result().values)}
+        return params_from_answers(list(names), ask(names), lambda n: ask([n]) or [])
     finally:
         node.destroy_client(cli)
+
+
+# t1b converter parameters the runner reads; the steering tables are optional (unset = gain mode).
+T1B_PARAMS_REQUIRED = ('method', 'brake_current_a', 'brake_hold_s', 'servo_offset', 'servo_gain_left',
+                       'servo_gain_right')
+T1B_PARAMS_OPTIONAL = ('steer_table_left', 'steer_table_right')
+
+
+def t1b_params_problem(cp):
+    """None if the t1b converter parameters are usable, else the refusal text (names what is missing)."""
+    if not cp:
+        return ('t1b_stop_converter parameters unreadable (no answer from /t1b_stop_converter/get_parameters '
+                'in 2 s: is the converter running in this ROS graph / domain?)')
+    missing = [n for n in T1B_PARAMS_REQUIRED if cp.get(n) is None]
+    if missing:
+        return 't1b_stop_converter parameters missing: %s (got %s)' % (', '.join(missing), cp)
+    return None
 
 
 def shutdown_probe(mode):
@@ -1812,16 +2054,31 @@ def shutdown_probe(mode):
 
 # ---------------------------------------------------------------- terminal
 
+def drive_key_event(deadman, state, key, now):
+    """A drive key (state.drive_keys) presses the deadman. A CHANGE of drive key starts a new press (first-press
+    window), because the terminal auto-repeats only the last key and needs its start delay again (teleop: roll
+    from w to a by pressing a before releasing w). Returns False for any other key."""
+    if key not in state.drive_keys:
+        return False
+    if key != state.drive_key:
+        deadman.reset()
+        state.drive_key = key
+    deadman.press(now)
+    return True
+
+
 class Keyboard:
     """Single keys from the SSH terminal (no Enter) in a background thread."""
 
-    def __init__(self, deadman):
+    def __init__(self, deadman, drive_keys=None):
         if not sys.stdin.isatty():
             raise SystemExit('stdin is not a terminal: the SPACE deadman needs a real TTY')
         self.fd = sys.stdin.fileno()
         self.old = termios.tcgetattr(self.fd)
         tty.setcbreak(self.fd)
         self.deadman = deadman
+        self.drive_keys = drive_keys or {'space': 0}
+        self.drive_key = None
         self.lock = threading.Lock()
         self.pending = []
         self.log = []  # (wall, mono, key)
@@ -1846,14 +2103,16 @@ class Keyboard:
             key = 'space' if ch == b' ' else ch.decode(errors='ignore').lower()
             with self.lock:
                 self.log.append((time.time(), now, key))
-                if key == 'space':
-                    self.deadman.press(now)
-                else:
+                if not drive_key_event(self.deadman, self, key, now):
                     self.pending.append(key)
 
     def held(self, now):
         with self.lock:
             return not self.eof and self.deadman.held(now)
+
+    def direction(self):
+        with self.lock:
+            return self.drive_keys.get(self.drive_key)
 
     def get_key(self):
         with self.lock:
@@ -1917,9 +2176,15 @@ def run(args):
         prof['clear_extra_m'] = 0.0 if ok else float(vp.get(p, 't3.fallback_extra_m'))
         say(why + ('' if ok else ': FALLBACK rules: clear disk +%.1f m, 0.3 m/s first, spotter outside the disk'
                    % prof['clear_extra_m']))
+    prof['fast'] = bool(args.fast)
+    prof['hands_off_s'] = FAST_HANDS_OFF_S if args.fast else HANDS_OFF_S
+    if args.fast:
+        say('FAST MODE: no T3 clear-disk / visibility refusal, no 0.3-first gate, no --t1-passed-confirmed, hands '
+            'off %.1f s. Kept: SPACE release = brake, brake converter, caps, IMU freeze, VESC status, geofence.'
+            % FAST_HANDS_OFF_S)
     if args.live and not prof['live_allowed']:
         raise SystemExit('profile %s never runs with real actuation' % args.test)
-    if prof['place'] == 'ground' and not args.t1_passed_confirmed:
+    if prof['place'] == 'ground' and not (args.t1_passed_confirmed or args.fast):
         raise SystemExit('ground profile: needs --t1-passed-confirmed (Moatasem written T1 pass)')
     mism = vp.config_mismatches(p)
     if mism:
@@ -2051,14 +2316,16 @@ def run(args):
                 w['conv'], w['conv_age'] = self.conv, (now - self.conv_at) if self.conv_at else 1e9
                 w['imu_problem'] = self.imu_watch.status(now, imu_publishers)
                 if prof.get('circle'):
-                    gz = [x for _, x in self.gz_hist]
+                    gz = [x for t_, x in self.gz_hist if now - t_ <= prof['hands_off_s']]
                     w.update(gz=self.gz, gz_mean_1s=statistics.mean(gz) if gz else None,
                              gz_std_1s=statistics.pstdev(gz) if len(gz) > 1 else None,
                              rf2o_pose=self.rf2o, rf2o_age=(now - self.rf2o_at) if self.rf2o_at else 1e9)
                     scan = self.scan
             if prof.get('circle'):
                 # Clearance + visibility: ~1440 points, at most 5 Hz and only for a new scan (cached).
-                if scan is not None and scan is not self.t3_scan and now - self.t3_cache_at >= 0.2:
+                if prof['fast']:
+                    self.t3_cache = (None, None)   # --fast: clear disk + visibility not computed, not checked
+                elif scan is not None and scan is not self.t3_scan and now - self.t3_cache_at >= 0.2:
                     self.t3_cache = (t3_clearance(scan, self.t3_geom, laser_x, *body, mask=self_mask),
                                      t3_visibility(scan, fov=fov, mask=self_mask))
                     self.t3_cache_at, self.t3_scan = now, scan
@@ -2107,6 +2374,31 @@ def steer_mode_text(w):
         c.get('steer_mode', 'gain'),
         ' (limits %+.2f / %+.2f rad)' % (lim[0], lim[1]) if lim else '',
         ' STALE %.1f s' % age if age > 1.0 else '')
+
+
+def teleop_precheck(prof, steering, steer_cap, clip):
+    """Teleop refusals (SystemExit): the converter must steer with a TABLE (gain mode would give about half the angle,
+    T2/T3), the table ends and the mux steer cap must reach the profile's +/-steer, and both servo ends must be inside
+    the vesc_driver clip (vesc_t3_erpm<N>.yaml: 0.10-0.68). -> info for run_info.json."""
+    import t1b_stop_converter as conv
+    smax = abs(float(prof['steer']))
+    if not steering or steering['mode'] != 'table':
+        raise SystemExit('teleop needs the converter steering TABLE (launch converter_params_file:=/home/ftenth/'
+                         'f1tenth_uj/config/real_car/t1b_converter_t3_table.yaml)')
+    right_end, left_end = steering['limits']
+    if left_end < smax - 1e-9 or -right_end < smax - 1e-9:
+        raise SystemExit('teleop: converter table ends %+.2f / %+.2f rad do not reach +/-%.2f'
+                         % (right_end, left_end, smax))
+    if steer_cap < smax - 1e-9:
+        raise SystemExit('teleop: mux max_steer_rad %.2f < %.2f (launch max_steer_rad:=%.2f)' % (steer_cap, smax, smax))
+    sl = conv.servo_command(steering['offset'], -0.5, -0.5, smax, steering['tables'])
+    sr = conv.servo_command(steering['offset'], -0.5, -0.5, -smax, steering['tables'])
+    if (len(clip) < 2 or None in clip.values() or not all(
+            float(clip['servo_min']) - 1e-9 <= s_ <= float(clip['servo_max']) + 1e-9 for s_ in (sl, sr))):
+        raise SystemExit('teleop: servo %.3f / %.3f outside the vesc_driver clip %s (launch vesc_yaml:=/home/ftenth/'
+                         'f1tenth_uj/config/real_car/vesc_t3_erpm<N>.yaml)' % (sl, sr, clip))
+    return dict(steer_max_rad=smax, steer_rate_rad_s=TELEOP_STEER_RATE, servo_left=sl, servo_right=sr,
+                vesc_servo_clip=clip, keys=TELEOP_KEYS)
 
 
 def t3_precheck(prof, p, steer_cap, converter_params, base_off, clip):
@@ -2183,8 +2475,9 @@ def drive_session(args, p, prof, r, node):
             'unchanged). Conditions: clear disk on, look behind the car before every n, spotter outside the disk, '
             '0.3 m/s first for every command.' % float(st.get('manual_min_front_valid_fraction', 0)))
     real = bool(st.get('real_actuation_enabled'))
-    if real != args.live:
-        raise SystemExit('Mux real_actuation_enabled=%s but --live=%s: refusing.' % (real, args.live))
+    real, args.live, why_live = live_mode(real, args.live, prof['live_allowed'])
+    if why_live:
+        say(why_live)
     cap = float(st.get('max_speed_mps', vp.get(p, 'caps.mux_default_max_speed_mps')))
     steer_cap = float(st.get('max_steer_rad', vp.get(p, 'caps.mux_default_max_steer_rad')))
     if prof['speed'] > cap + 1e-9 or abs(prof['steer']) > steer_cap + 1e-9:
@@ -2206,23 +2499,26 @@ def drive_session(args, p, prof, r, node):
     base_off = float(vp.get(p, 'steering.servo_offset'))
     method = 'speed0'
     if prof['converter'] == 't1b_stop_converter':
-        converter_params = node.get_params('t1b_stop_converter',
-                                           ['method', 'brake_current_a', 'brake_hold_s', 'servo_offset',
-                                            'servo_gain_left', 'servo_gain_right',
-                                            'steer_table_left', 'steer_table_right'])
-        base_off = float(vp.get(p, 'steering.servo_offset'))
-        if converter_params.get('servo_offset') is not None and \
-                abs(float(converter_params['servo_offset']) - base_off) > 1e-9:
+        converter_params = node.get_params('t1b_stop_converter', T1B_PARAMS_REQUIRED + T1B_PARAMS_OPTIONAL)
+        bad = t1b_params_problem(converter_params)
+        if bad:
+            raise SystemExit(bad)
+        if abs(float(converter_params['servo_offset']) - base_off) > 1e-9:
             print('TEST servo_offset %.3f in the converter (baseline %.3f): recorded in run_info.json.'
                   % (float(converter_params['servo_offset']), base_off))
-        method = converter_params.get('method')
+        method = converter_params['method']
         if method == 'brake':
-            method = 'brake%gA' % converter_params.get('brake_current_a')
-        if not method:
-            raise SystemExit('t1b_stop_converter parameters unreadable: %s' % converter_params)
+            method = 'brake%gA' % converter_params['brake_current_a']
     steering = converter_steering(converter_params, base_off) if prof['converter'] == 't1b_stop_converter' else None
     if steering:
         say('Converter steering: %s%s' % (steering['mode'], ' %s / %s' % steering['tables'] if steering['tables'] else ''))
+    teleop_info = None
+    if prof.get('teleop'):
+        teleop_info = teleop_precheck(prof, steering, steer_cap,
+                                      node.get_params('vesc_driver', ['servo_min', 'servo_max']))
+        say('TELEOP: steer +/-%.2f rad -> servo %.3f (left) / %.3f (right), table mode, vesc clip %s'
+            % (teleop_info['steer_max_rad'], teleop_info['servo_left'], teleop_info['servo_right'],
+               teleop_info['vesc_servo_clip']))
     if prof.get('stop_method') and method != prof['stop_method']:
         raise SystemExit('%s needs stop method %s, the converter runs %s (launch converter:=t1b '
                          'stop_method:=brake brake_current_a:=5.0)' % (args.test, prof['stop_method'], method))
@@ -2244,7 +2540,9 @@ def drive_session(args, p, prof, r, node):
                                         circle_info['servo_planned'], g['r_nom'], g['diameter_m'],
                                         ' (incl. fallback +%.1f m)' % g['extra_m'] if g['extra_m'] else '',
                                         g['r_max'], 'left' if prof['steer'] > 0 else 'right'))
-        if args.live and (not prof['vesc_timeout']['verified'] or prof.get('mux_low_visibility')):
+        if args.fast:
+            say('T3 0.3-first gate: skipped (--fast)')
+        elif args.live and (not prof['vesc_timeout']['verified'] or prof.get('mux_low_visibility')):
             ok, why = t3_slow_gate(args.out_root or vp.evidence_root(), prof)
             if not ok:
                 raise SystemExit('T3 fallback gate: ' + why)
@@ -2271,9 +2569,9 @@ def drive_session(args, p, prof, r, node):
     out.mkdir(parents=True, exist_ok=False)
     commit = subprocess.run(['git', '-C', str(vp.REPO), 'rev-parse', '--short', 'HEAD'],
                             capture_output=True, text=True).stdout.strip()
-    info = dict(test=args.test, profile=prof, live=args.live, started=stamp, git_commit=commit,
+    info = dict(test=args.test, profile=prof, live=args.live, fast=bool(args.fast), started=stamp, git_commit=commit,
                 stop_method=method, converter=prof['converter'], converter_params=converter_params,
-                step_gate=gate,
+                step_gate=gate, teleop=teleop_info,
                 mux_status_at_start=st, mux_max_speed_mps=cap, mux_max_steer_rad=steer_cap,
                 vesc_speed_max_erpm=speed_max, publish_hz=r['publish_hz'], circle=circle_info,
                 ramp_accel_mps2=r['ramp_accel_mps2'], vehicle_params=p, bag_topics=BAG_TOPICS)
@@ -2288,14 +2586,15 @@ def drive_session(args, p, prof, r, node):
             prof['converter'], method, gate,
             float(r['publish_hz']), float(r['ramp_accel_mps2']), commit))
 
-    machine = Machine(prof, p, live=args.live, ground_ok=args.t1_passed_confirmed)
-    kb = Keyboard(Deadman(float(r['deadman_first_press_s']), float(r['deadman_repeat_s'])))
+    machine = Machine(prof, p, live=args.live, ground_ok=args.t1_passed_confirmed or args.fast)
+    kb = Keyboard(Deadman(float(r['deadman_first_press_s']), float(r['deadman_repeat_s'])),
+                  TELEOP_KEYS if prof.get('teleop') else None)
     # Audit log only from the vesc_driver of THIS ROS graph (a process on another domain is not ours).
     in_graph = 'vesc_driver' in node.get_node_names()
     audit_pid, t_run0 = (vesc_driver_pid() if in_graph else None), time.time()
     bag_log = open(out / 'bag.log', 'w')
     # stdin DEVNULL: the bag must never share the terminal that carries the SPACE deadman.
-    bag = subprocess.Popen(['ros2', 'bag', 'record', '-o', str(out / 'bag')] + BAG_TOPICS,
+    bag = subprocess.Popen(bag_command(out / 'bag', BAG_TOPICS),
                            stdin=subprocess.DEVNULL, stdout=bag_log, stderr=subprocess.STDOUT,
                            start_new_session=True)
 
@@ -2315,11 +2614,15 @@ def drive_session(args, p, prof, r, node):
         if bag.poll() is not None:
             raise SystemExit('ros2 bag record exited; see %s' % (out / 'bag.log'))
         say('\n%s -> %s' % (args.test, out))
-        if machine.ground:
+        if machine.ground and not machine.teleop:
             need, top = machine.ground_window()
             say('Ground: arm only with %.2f..%.2f m free ahead (LiDAR); runner brakes at %.2f m '
                 '(mux gate %.2f m = backstop). m = placement readout.' % (
                     need, top, machine.brake_range(prof['speed']), machine.gate))
+        if machine.teleop:
+            say('TELEOP keys: n = arm; HOLD w or SPACE = straight, a = left, d = right (%.2f m/s, steer +/-%.2f rad); '
+                'change key by pressing the new one BEFORE releasing the old; release all = brake 5 A; q = finish '
+                '(idle). While armed/driving any other key = KILL.' % (prof['speed'], abs(prof['steer'])))
         say('Keys: n = arm, hold SPACE = drive, s = skip, q = quit (idle). While armed/driving ANY other '
             'key = KILL (brake, latched until n). ' + machine.message)
         last_msg = None
@@ -2342,6 +2645,7 @@ def drive_session(args, p, prof, r, node):
             w = node.world(now, half_width, imu_pubs)
             w['graph_fault'] = graph
             w['keyboard_lost'] = kb.eof
+            w['drive_dir'] = kb.direction()
             if w.get('imu_problem') != last_imu:
                 last_imu = w.get('imu_problem')
                 machine.log(now, 'IMU_STATUS', last_imu or 'OK')
@@ -2393,8 +2697,8 @@ def drive_session(args, p, prof, r, node):
         except Exception as exc:  # noqa: BLE001
             say('Writing runner outputs failed: %s' % exc)
         say('VESC audit: %s' % audit)
-        say('Results: %s\nNext: python3 %s %s' % (
-            out, Path(__file__).with_name('analyze.py'), out))
+        nxt = 'hall_loop_map.py' if prof.get('teleop') else 'analyze.py'
+        say('Results: %s\nNext: python3 %s %s' % (out, Path(__file__).with_name(nxt), out))
 
 
 def write_outputs(out, machine, intervals, keys, status_log, extra):
@@ -2428,6 +2732,9 @@ def main():
                     help='Mux real actuation is enabled for an approved step. Never for dry_run.')
     ap.add_argument('--t1-passed-confirmed', action='store_true',
                     help='Ground profiles only, after Moatasem confirmed T1 in writing.')
+    ap.add_argument('--fast', action='store_true',
+                    help='Skip the T3 clear-disk / visibility refusals, the T3 0.3-first gate and '
+                         '--t1-passed-confirmed; hands-off 0.5 s. Recorded as "fast": true in run_info.json.')
     ap.add_argument('--params', help='vehicle_params.yaml (default config/real_car/)')
     ap.add_argument('--out-root', help='results root (default ~/f1tenth_hw_evidence/real_car_tests)')
     ap.add_argument('--self-test', action='store_true')

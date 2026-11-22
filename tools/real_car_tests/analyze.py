@@ -600,15 +600,29 @@ def read_bag(bag_dir):
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
     meta = yaml.safe_load((Path(bag_dir) / 'metadata.yaml').read_text())
-    storage = meta['rosbag2_bagfile_information']['storage_identifier']
-    reader = rosbag2_py.SequentialReader()
-    reader.open(rosbag2_py.StorageOptions(uri=str(bag_dir), storage_id=storage),
-                rosbag2_py.ConverterOptions('cdr', 'cdr'))
-    types = {x.name: get_message(x.type) for x in reader.get_all_topics_and_types()}
-    data = {name: [] for name in types}
-    while reader.has_next():
-        topic, raw, t_ns = reader.read_next()
-        data[topic].append((t_ns * 1e-9, deserialize_message(raw, types[topic])))
+    info = meta['rosbag2_bagfile_information']
+    storage = info['storage_identifier']
+    # 23 Nov: run_test.py records with --compression-mode file --compression-format zstd. The plain
+    # SequentialReader cannot open those ("No storage could be initialized"); the compression reader refuses
+    # uncompressed bags, so pick by metadata. Humble decompresses each file to a .db3 next to the .zstd and
+    # leaves it there: remove the ones this call created (the .zstd stays the record).
+    compressed = str(info.get('compression_mode') or '').upper() not in ('', 'NONE')
+    before = set(Path(bag_dir).glob('*.db3'))
+    reader = rosbag2_py.SequentialCompressionReader() if compressed else rosbag2_py.SequentialReader()
+    try:
+        reader.open(rosbag2_py.StorageOptions(uri=str(bag_dir), storage_id=storage),
+                    rosbag2_py.ConverterOptions('cdr', 'cdr'))
+        types = {x.name: get_message(x.type) for x in reader.get_all_topics_and_types()}
+        data = {name: [] for name in types}
+        while reader.has_next():
+            topic, raw, t_ns = reader.read_next()
+            data[topic].append((t_ns * 1e-9, deserialize_message(raw, types[topic])))
+    finally:
+        del reader
+        if compressed:
+            for f in set(Path(bag_dir).glob('*.db3')) - before:
+                if f.with_name(f.name + '.zstd').exists():
+                    f.unlink()
     return data
 
 

@@ -12,6 +12,8 @@ Test tools for the physical car. Owner: Moatasem. Standard values:
 | `analyze.py` | Bag -> `summary.json`, CSVs, plots, `## Analysis` in the folder README. |
 | `preflight.sh` | Read-only checks: `clean` before launching, `stack` before the runner. |
 | `params.py` | Loads `vehicle_params.yaml`; checks `config/real_car/*.yaml` agree with it. |
+| `hall_loop_record.sh` | Hand-push hall loop (23 Nov): checks `/scan` / `/imu/data_raw` / `/odom_rf2o` rates (refuses with the fix), records them + `/tf*` + the VESC / converter topics that exist (zstd) to `~/f1tenth_hw_evidence/hall_loop_<stamp>/`. |
+| `hall_loop_map.py` | Offline (laptop): slam_toolbox map from a hall-loop or teleop bag, loop closing off and on, both maps + lap-closure error at the start tape mark. |
 
 ## Rules
 
@@ -32,7 +34,7 @@ Test tools for the physical car. Owner: Moatasem. Standard values:
 
 ## Keys (SSH terminal, no Enter)
 
-`n` arm (SPACE released) · hold `SPACE` drive · `s` skip (idle) · `q` quit (idle) · `m` placement (ground).
+`n` arm (SPACE released) · hold `SPACE` drive (teleop: `w` / `a` / `d` too) · `s` skip (idle) · `q` quit (idle) · `m` placement (ground).
 **KILL** (20 Nov): while arming, armed, driving or stopping, ANY key but SPACE sends zero at once (same
 path as a SPACE release: mux STOP -> converter brake), prints `*** KILL ***` and latches: nothing drives
 until SPACE is released and `n` pressed. `q` there kills, then the runner ends. KILL stops never count.
@@ -51,6 +53,33 @@ ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_rea
 python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test dry_run
 python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py <results folder printed by the runner>
 ```
+
+## 23 Nov: --fast, auto-live, zstd bags, teleop, hall loop
+
+- **`--fast`** (any profile): no T3 clear-disk / visibility refusal at `n` (the clearance is not even computed; look
+  at the disk yourself), no T3 0.3-before-0.5 gate, no `--t1-passed-confirmed`, hands-off 0.5 s (T3 gyro bias =
+  mean of the last 0.5 s; T5b still reference 0.5 s). Kept: SPACE release = zero -> brake 5 A, the brake converter
+  and stop-method check, mux / profile speed and steer caps, IMU freeze / stale refusal, VESC telemetry / fault,
+  `vesc_driver` speed_max, the T1 step gate (0.5 -> 1.0 -> 1.5), the T3 geofence and turn check, the mux
+  low-visibility T3-only rule. `run_info.json` has `"fast": true`.
+- **Auto-live:** mux `real_actuation_enabled` true and no `--live` -> live mode on with one line. `--live` with a
+  disarmed mux, and an armed mux with `dry_run`, still refuse.
+- **Bags** are recorded with `--compression-mode file --compression-format zstd` (`bag_0.db3.zstd`).
+  `analyze.read_bag` (all analysis scripts) picks the compression reader from `metadata.yaml` and removes the
+  `.db3` Humble decompresses next to it; `ros2 bag play` reads them directly.
+- **Converter parameters** (22 Nov bug): rclpy Humble answers a GetParameters batch with an EMPTY list when one
+  name is declared but unset, so gain mode (no steering table) read as `{}`. The runner now asks per name after a
+  short answer (unset tables = None = gain mode) and names any missing required parameter.
+- **`teleop`** (hall-loop mapping drive): `run_test.py --test teleop --speed 0.3|0.5 --fast`, stack with the
+  steering TABLE (`converter_params_file:=.../t1b_converter_t3_table.yaml`), `max_steer_rad:=0.28` and
+  `vesc_t3_erpm<N>.yaml` (servo clip 0.10-0.68; the runner checks all three). Keys: HOLD `w` or SPACE = straight,
+  `a` = left, `d` = right; change key by pressing the new one BEFORE releasing the old one (the terminal repeats
+  only the last key; a key change restarts the 0.7 s first-press window); release all = zero -> mux STOP ->
+  brake 5 A; `n` re-arms (one segment per arm); any other key = KILL; `q` (idle) ends. Steering moves at 0.7 rad/s
+  to +/-0.28 rad and back to the centre. No runner brake point or straight-length fit: the mux 0.80 m front gate is
+  the obstacle backstop. The runner bag is the hall-loop recording (`hall_loop_map.py <run folder>`).
+- **Hall loop by hand** (fallback): `observe_only.launch.py enable_vesc:=true` + `f1tenth_imu imu.launch.py`
+  (observe_only does not start the IMU), then `hall_loop_record.sh`.
 
 ## T1: stop behaviour on the stand (F-01)
 

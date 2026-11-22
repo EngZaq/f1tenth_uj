@@ -23,6 +23,10 @@ Writes ekf_shadow_replay.json into each run folder; prints a per-variant summary
   ekf_shadow_replay.py --rf2o-cpu [<folder>]
   ekf_shadow_replay.py --live-check [<folder>]    live node (ekf_shadow_inputs.py) vs replay inputs
   ekf_shadow_replay.py --live [<shadow bag>] [<T4 folder>]   recorded LIVE shadow EKF vs LiDAR (reads only)
+  ekf_shadow_replay.py --circles <T3 folders> [--variants C1] [--r-imu-wz R] [--domain N]
+                        (23 Nov) T3 circles: EKF vs RF2O in turns, each in its own start frame (pose at the
+                        command): heading change, path length and end-position error over drive + brake hold.
+                        --r-imu-wz overrides ekf_shadow_inputs.R_IMU_WZ (gyro yaw-rate variance) for this replay.
   ekf_shadow_replay.py --self-test
 """
 import argparse
@@ -140,9 +144,24 @@ def self_test():
         assert ('/ekf_shadow/in/vesc_dw' in topics) == key.startswith('C'), node
         q = p['process_noise_covariance']
         assert q[6 * 15 + 6] == 0.05 and q[11 * 15 + 11] == 0.02, node
+    # circles (23 Nov): the same circle in two odom frames (shifted + rotated start) -> zero error; EKF turning
+    # 2 % less -> heading error -2 % of the turn, path error ~0 (same speed)
+
+    def circ(t, x0, y0, a0, rate=0.3, v=0.3):
+        yaw = a0 + rate * t
+        r = v / rate
+        return (t, x0 + r * (math.sin(yaw) - math.sin(a0)), y0 - r * (math.cos(yaw) - math.cos(a0)), wrap_pi(yaw))
+    ts_ = [i * 0.05 for i in range(1001)]
+    ref_ = [circ(t, 1.0, -2.0, 2.5) for t in ts_]
+    same = circle_compare([circ(t, 0.0, 0.0, 0.0) for t in ts_], ref_, 1.0, 49.0)
+    assert abs(same['heading_err_end_deg']) < 1e-6 and same['max_pos_err_m'] < 1e-6, same
+    assert abs(same['rf2o_heading_deg'] - math.degrees(0.3 * 48)) < 1e-6 and abs(same['rf2o_path_m'] - 14.4) < 0.01
+    slow = circle_compare([circ(t, 0.0, 0.0, 0.0, rate=0.294) for t in ts_], ref_, 1.0, 49.0)
+    assert abs(slow['heading_err_end_deg'] + 0.02 * math.degrees(0.3 * 48)) < 0.01 and abs(slow['path_err_m']) < 1e-3
     print('PASS: laser progress along the wall normal (200 random poses, frame invariant, rotation in place),')
     print('      yaw unwrap, brake-state lookup, summary; yaml: 5 variants, publish_tf false, Q_vx 0.05,')
-    print('      Q_vyaw 0.02, topics = ekf_shadow_inputs.TOPICS, de-weighted VESC only in C*.')
+    print('      Q_vyaw 0.02, topics = ekf_shadow_inputs.TOPICS, de-weighted VESC only in C*;')
+    print('      circles: EKF vs RF2O in their own start frames (heading, path, position).')
 
 
 # ---------------------------------------------------------------- bag -> inputs -> EKF
@@ -521,6 +540,9 @@ def main():
     ap.add_argument('--live', nargs='?', const='LATEST', default=None, metavar='SHADOW_BAG',
                     help='compare a recorded LIVE shadow EKF bag (default: latest *_ekf_shadow_live) with the '
                          'LiDAR of a T4 folder (positional; default: latest t4_straight armed folder)')
+    ap.add_argument('--circles', action='store_true', help='T3 circle folders: EKF vs RF2O in turns')
+    ap.add_argument('--r-imu-wz', type=float, default=None, help='override R_IMU_WZ for this replay')
+    ap.add_argument('--domain', type=int, default=DOMAIN, help='isolated ROS domain (default %d)' % DOMAIN)
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
     if args.self_test:
@@ -537,7 +559,7 @@ def main():
         print('REFUSED: a car stack (or another EKF) is running; offline replays only with the stack down:')
         print('\n'.join('  ' + b for b in busy))
         return 2
-    os.environ['ROS_DOMAIN_ID'] = str(DOMAIN)       # before rclpy.init; also for the children
+    os.environ['ROS_DOMAIN_ID'] = str(args.domain)  # before rclpy.init; also for the children
     env = dict(os.environ)
     gain = args.gain or inp.gain_from_params()
     p = vp.load()
@@ -548,6 +570,11 @@ def main():
         r = live_check(folders[-1], work, env, gain)
         (work / 'live_check.json').write_text(json.dumps(r, indent=1))
         return 0
+    if args.r_imu_wz is not None:
+        inp.R_IMU_WZ = float(args.r_imu_wz)
+    if args.circles:
+        return circles_replay(folders, work, env, gain, args.variants if len(args.variants) < len(VARIANTS)
+                              else ['C1'], args.domain)
     if args.rf2o_cpu:
         r = rf2o_cpu(folders[-1], work, env)
         (work / 'rf2o_cpu.json').write_text(json.dumps(r, indent=1))
@@ -612,6 +639,130 @@ def main():
         rec.close()
     print_tables(rows, args.variants)
     return 0
+
+
+def wrap_pi(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def frame_track(ts, xs, ys, yaws, t_start, times):
+    """Poses at `times` in the frame of the pose at t_start: [(x, y, yaw - yaw0)] (yaw unwrapped first)."""
+    import numpy as np
+    yaw = np.asarray(unwrap_series(list(yaws)))
+    x0, y0, a0 = (float(np.interp(t_start, ts, v)) for v in (xs, ys, yaw))
+    c, s_ = math.cos(-a0), math.sin(-a0)
+    out = []
+    for t in times:
+        dx, dy = float(np.interp(t, ts, xs)) - x0, float(np.interp(t, ts, ys)) - y0
+        out.append((c * dx - s_ * dy, s_ * dx + c * dy, float(np.interp(t, ts, yaw)) - a0))
+    return out
+
+
+def path_length(track):
+    return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(track, track[1:]))
+
+
+def circle_compare(ekf, rf, t_start, t_end, dt=0.05):
+    """EKF vs RF2O between t_start and t_end, each in its own start frame. ekf / rf = [(t, x, y, yaw)]."""
+    n = max(2, int((t_end - t_start) / dt) + 1)
+    times = [t_start + i * (t_end - t_start) / (n - 1) for i in range(n)]
+    tr = {}
+    for k, ser in (('ekf', ekf), ('rf2o', rf)):
+        ts, xs, ys, yaws = zip(*ser)
+        tr[k] = frame_track(ts, xs, ys, yaws, t_start, times)
+    e, r = tr['ekf'], tr['rf2o']
+    herr = [math.degrees(a[2] - b[2]) for a, b in zip(e, r)]
+    perr = [math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(e, r)]
+    le, lr = path_length(e), path_length(r)
+    return dict(window_s=t_end - t_start, rf2o_heading_deg=math.degrees(r[-1][2]),
+                ekf_heading_deg=math.degrees(e[-1][2]),
+                heading_err_end_deg=herr[-1], heading_err_maxabs_deg=max(abs(h) for h in herr),
+                rf2o_path_m=lr, ekf_path_m=le, path_err_m=le - lr, path_err_pct=100.0 * (le - lr) / lr if lr else None,
+                end_pos_err_m=perr[-1], max_pos_err_m=max(perr))
+
+
+def circles_replay(folders, work, env, gain, variants, domain):
+    """--circles: T3 repeats through the shadow EKF variants, compared with RF2O (see the module doc)."""
+    import csv as _csv
+    import analyze as A
+    print('domain %d, gain %.0f, R_IMU_WZ %.2e, variants %s, work %s' % (domain, gain, inp.R_IMU_WZ, variants, work))
+    rec, rows = Recorder(), []
+    try:
+        for folder in folders:
+            info = json.loads((folder / 'run_info.json').read_text())
+            hold = float((info.get('converter_params') or {}).get('brake_hold_s') or 2.0)
+            with open(folder / 'runner_events.csv') as fp:
+                ev = list(_csv.DictReader(fp))
+            starts = [float(e['wall']) for e in ev if e['event'] == 'DRIVE_START']
+            zeros = [(float(e['wall']), e['detail']) for e in ev if e['event'] == 'ZERO_COMMAND']
+            data = A.read_bag(folder / 'bag')
+            imu = data['/imu/data_raw']
+            rf = sorted((stamp(m), m.pose.pose.position.x, m.pose.pose.position.y, A.quat_yaw(m.pose.pose.orientation))
+                        for _, m in data['/odom_rf2o'])
+            for i, tc in enumerate(starts):
+                z = next(((t, d) for t, d in zeros if t > tc), None)
+                if z is None or z[0] - tc < 3.0:
+                    continue
+                tz, reason = z
+                cal = calib_window(imu, tc - BIAS_S, tc - 0.02)
+                if not cal or cal['moving']:
+                    print('  %s r%d: car not still before the command, skipped' % (folder.name[:15], i))
+                    continue
+                name = '%s_r%d_circ_g%.0f_r%.1e' % (folder.name[:15], i, gain, inp.R_IMU_WZ)
+                in_bag = work / (name + '_in')
+                if not in_bag.exists():
+                    build_inputs(data, tc - BIAS_S - 0.2, tz + hold + 0.3, cal, gain, in_bag)
+                t_end = tz + hold
+                res = dict(run=folder.name[:15], repeat=i, reason=reason.split('(')[0],
+                           steer=(info.get('circle') or {}).get('steer_rad'), calib_bias_gz=cal['bias_gz'])
+                for v in variants:
+                    samples, cpu, wall = run_node(ekf_cmd(VARIANTS[v][0]), in_bag, env,
+                                                  work / ('%s_%s.log' % (name, v)), rec)
+                    res[v] = (circle_compare([q[:4] for q in samples], rf, tc, t_end) if samples
+                              and samples[0][0] <= tc and samples[-1][0] >= t_end - 0.5 else None)
+                print('  %s r%d %s: %s' % (folder.name[:15], i, res['reason'], ' | '.join(
+                    '%s heading %+.2f deg, path %+.3f m (%+.1f %%), end %.3f m' % (
+                        v, res[v]['heading_err_end_deg'], res[v]['path_err_m'], res[v]['path_err_pct'],
+                        res[v]['end_pos_err_m']) for v in variants if res.get(v))))
+                rows.append(res)
+    finally:
+        rec.close()
+    tag = 'r%.1e' % inp.R_IMU_WZ
+    if rows:
+        (folders[0] / ('ekf_shadow_circles_%s.json' % tag)).write_text(json.dumps(dict(
+            gain=gain, yaml=str(YAML), domain=domain, r_imu_wz=inp.R_IMU_WZ, variants=variants, repeats=rows),
+            indent=1))
+    print('\n| T3 run | repeat | stop | steer | RF2O heading deg | RF2O path m | %s |' % ' | '.join(
+        '%s heading err deg (end / max) | %s path err m (%%) | %s end pos err m' % (v, v, v) for v in variants))
+    print('|---|---|---|---|---|---|%s' % ('---|---|---|' * len(variants)))
+    for r in rows:
+        ref = next((r[v] for v in variants if r.get(v)), None)
+        if ref is None:
+            continue
+        print('| %s | %d | %s | %+.3f | %+.1f | %.2f | %s |' % (
+            r['run'], r['repeat'], r['reason'], float(r['steer'] or 0), ref['rf2o_heading_deg'], ref['rf2o_path_m'],
+            ' | '.join('%+.2f / %.2f | %+.3f (%+.1f) | %.3f' % (
+                r[v]['heading_err_end_deg'], r[v]['heading_err_maxabs_deg'], r[v]['path_err_m'], r[v]['path_err_pct'],
+                r[v]['end_pos_err_m']) if r.get(v) else '- | - | -' for v in variants)))
+    for v in variants:
+        got = [r[v] for r in rows if r.get(v)]
+        if not got:
+            continue
+        # signed per turn: + = the EKF turns MORE than RF2O (left and right would cancel in the raw sum)
+        rel = [100.0 * g['heading_err_end_deg'] * math.copysign(1.0, g['rf2o_heading_deg'])
+               / abs(g['rf2o_heading_deg']) for g in got if abs(g['rf2o_heading_deg']) > 30.0]
+        print('%s over %d repeats: heading err end %s deg, |max| %.2f deg; path err %s %%; end pos err %s m; '
+              'turn-relative heading err %s %% (= %+.2f deg per 360 deg, + = EKF turns more)' % (
+                  v, len(got), fmt_rng(summarize([g['heading_err_end_deg'] for g in got]), 2),
+                  max(g['heading_err_maxabs_deg'] for g in got),
+                  fmt_rng(summarize([g['path_err_pct'] for g in got]), 1),
+                  fmt_rng(summarize([g['end_pos_err_m'] for g in got]), 3), fmt_rng(summarize(rel), 2),
+                  3.6 * statistics.mean(rel) if rel else float('nan')))
+    return 0
+
+
+def fmt_rng(s, nd):
+    return '-' if s is None else '%+.*f (%+.*f..%+.*f)' % (nd, s['mean'], nd, s['min'], nd, s['max'])
 
 
 def print_tables(rows, variants, labels=None):
