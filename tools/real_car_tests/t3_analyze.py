@@ -116,6 +116,24 @@ def t2_angle(fit, servo):
     return (servo - fit['%s_offset' % side]) / fit['%s_gain' % side]
 
 
+def run_tables(info):
+    """The run's converter steering tables [(delta, servo)] (left, right) from run_info converter_params, or None
+    (gain mode / runs before 22 Nov)."""
+    cp = info.get('converter_params') or {}
+    tl, tr = cp.get('steer_table_left') or [], cp.get('steer_table_right') or []
+    if not (tl and tr):
+        return None
+    return tuple(list(zip([float(v) for v in t[0::2]], [float(v) for v in t[1::2]])) for t in (tl, tr))
+
+
+def table_angle(table, servo):
+    """Inverse of one side's table: the angle the table assigns to this servo value (None outside the table)."""
+    for (d0, s0), (d1, s1) in zip(table, table[1:]):
+        if min(s0, s1) - 1e-9 <= servo <= max(s0, s1) + 1e-9 and s1 != s0:
+            return d0 + (d1 - d0) * (servo - s0) / (s1 - s0)
+    return None
+
+
 def lateral_axis(gravity):
     """Unit IMU +y made perpendicular to the still gravity vector (IMU frame)."""
     n = math.sqrt(sum(g * g for g in gravity))
@@ -153,8 +171,22 @@ def self_test():
     assert abs(sum(a * b for a, b in zip(l, (1.8, -0.55, -10.02)))) < 1e-9 and l[1] > 0.99
     u = unwrap([3.1, -3.1, -2.9])
     assert u[1] > 3.1 and abs(slope([0, 1, 2], [0, 2, 4]) - 2) < 1e-12
+    # steering table (22 Nov): inverse, run detection, column label
+    info_t = dict(converter_params=dict(steer_table_left=[0.0, 0.335, 0.2042, 0.178, 0.28, 0.11],
+                                        steer_table_right=[0.0, 0.335, -0.1414, 0.526, -0.28, 0.660]))
+    tl, tr = run_tables(info_t)
+    assert abs(table_angle(tl, 0.178) - 0.2042) < 1e-12 and abs(table_angle(tl, 0.11) - 0.28) < 1e-12
+    assert abs(table_angle(tr, 0.593) - (-0.1414 + (-0.1386) * (0.593 - 0.526) / 0.134)) < 1e-9
+    assert table_angle(tl, 0.335) == 0.0 and table_angle(tl, 0.10) is None
+    assert run_tables(dict(converter_params=dict(servo_offset=0.335))) is None and run_tables({}) is None
+    assert ref_label([('a', dict(yaw_rate_gyro=0, delta_ref='table'))]) == ('delta table', False)
+    assert ref_label([('a', dict(yaw_rate_gyro=0, delta_ref='T2'))]) == ('delta T2', False)
+    assert ref_label([('a', dict(yaw_rate_gyro=0))]) == ('delta T2', False)                     # pre-22 Nov runs
+    lab, mx = ref_label([('a', dict(yaw_rate_gyro=0, delta_ref='T2')), ('b', dict(yaw_rate_gyro=0, delta_ref='table'))])
+    assert mx and ref_cell(dict(delta_ref='table', delta_table_deg=11.7), mx) == '+11.7 (table)'
+    assert ref_cell(dict(delta_ref='table', delta_table_lock_deg=16.04), False, lock=True) == '+16.0'
     print('PASS: Kasa circle fit (noisy 1.5 turns), slip angle sign/size, bicycle angle, T2 per-side angle,')
-    print('      gravity-perpendicular IMU y axis, unwrap, slope. No ROS.')
+    print('      gravity-perpendicular IMU y axis, unwrap, slope; steering-table inverse, "delta table" column. No ROS.')
 
 
 # ---------------------------------------------------------------- bags
@@ -192,6 +224,7 @@ def analyze_run(folder, data, ekf, p, fit_t2):
     circ = info.get('circle') or {}
     steer = float(circ.get('steer_rad', info['profile'].get('steer')))
     lock = circ.get('full_lock') or info['profile'].get('full_lock')
+    tables = run_tables(info)
     side = 1.0 if steer > 0 else -1.0
     veh = vp.get(p, 'vehicle')
     hw, front_x = float(veh['body_width_m']) / 2.0, float(veh['front_bumper_x_m'])
@@ -264,10 +297,16 @@ def analyze_run(folder, data, ekf, p, fit_t2):
             delta_real_v_deg=math.degrees(d_v), delta_cmd_deg=math.degrees(steer),
             servo_sent=servo_sent, servo_planned=circ.get('servo_planned'),
             delta_t2_deg=math.degrees(t2_angle(fit_t2, servo_sent)) if (fit_t2 and servo_sent) else None,
+            delta_ref='table' if tables else 'T2',
+            delta_table_deg=(math.degrees(table_angle(tables[0] if side > 0 else tables[1], servo_sent))
+                             if (tables and servo_sent and table_angle(tables[0] if side > 0 else tables[1],
+                                                                       servo_sent) is not None) else None),
             ground_gain=(((servo_sent - centre) / (d_fit if d_fit is not None else d_v))
                          if (servo_sent and not lock) else None),
             delta_t2_clip_deg=(math.degrees(float(vp.get(p, 'steering.max_left_rad' if side > 0 else
                                                          'steering.max_right_rad'))) if lock else None),
+            delta_table_lock_deg=(math.degrees((tables[0] if side > 0 else tables[1])[-1][0])
+                                  if (lock and tables) else None),
             r_outer_corner=math.hypot((R_fit if R_fit else R_v.get('ekf', R_v['rf2o'])) + hw, front_x),
             slip_beta_deg=math.degrees(statistics.mean(beta)) if beta else None,
             slip_beta_sd_deg=math.degrees(statistics.pstdev(beta)) if len(beta) > 1 else None,
@@ -313,15 +352,29 @@ def main():
     return 0
 
 
+def ref_label(rows):
+    """Column name for the reference angle: 'delta table' / 'delta T2', or both (then each cell is marked)."""
+    refs = {r.get('delta_ref', 'T2') for _, r in rows if 'yaw_rate_gyro' in r}
+    return ('delta table' if refs == {'table'} else 'delta T2' if refs <= {'T2'} else 'delta T2 or table'), len(refs) > 1
+
+
+def ref_cell(r, mixed, fmt='%+.1f', lock=False):
+    tab = r.get('delta_ref') == 'table'
+    v = (r.get('delta_table_lock_deg') if tab else r.get('delta_t2_clip_deg')) if lock else \
+        (r.get('delta_table_deg') if tab else r.get('delta_t2_deg'))
+    return ('-' if v is None else fmt % v) + ((' (table)' if tab else ' (T2)') if mixed else '')
+
+
 def print_table(rows, p):
     def f(v, fmt):
         return '-' if v is None else fmt % v
-    print('| run | cnt | steer cmd deg | servo | v EKF / RF2O / VESC m/s | yaw rate gyro rad/s (gyro/RF2O) | '
-          'R v/w EKF m | R fit RF2O m (rms) | R fit EKF m | delta real fit / v deg | delta T2 deg | ground gain | '
-          'slip beta deg (vy m/s) | IMU y ratio |')
-    print('|' + '---|' * 14)
     locks = [(run, r) for run, r in rows if r.get('full_lock')]
     rows = [(run, r) for run, r in rows if not r.get('full_lock')]
+    ref, mixed = ref_label(rows)
+    print('| run | cnt | steer cmd deg | servo | v EKF / RF2O / VESC m/s | yaw rate gyro rad/s (gyro/RF2O) | '
+          'R v/w EKF m | R fit RF2O m (rms) | R fit EKF m | delta real fit / v deg | %s deg | ground gain | '
+          'slip beta deg (vy m/s) | IMU y ratio |' % ref)
+    print('|' + '---|' * 14)
     for run, r in rows:
         if 'yaw_rate_gyro' not in r:
             print('| %s | %s | %+.1f | - | %s |' % (run, 'y' if r['counted'] else 'n', math.degrees(r['steer_cmd_rad']),
@@ -333,7 +386,7 @@ def print_table(rows, p):
                   f(r['v_ekf'], '%.3f'), r['v_rf2o'], r['v_vesc'], r['yaw_rate_gyro'], f(r['gyro_over_rf2o'], '%.3f'),
                   f(r['R_v'].get('ekf'), '%.3f'), f(r['R_fit_rf2o'], '%.3f'), f(r['fit_rf2o_rms'], '%.3f'),
                   f(r['R_fit_ekf'], '%.3f'), f(r['delta_real_fit_deg'], '%+.1f'), r['delta_real_v_deg'],
-                  f(r['delta_t2_deg'], '%+.1f'), f(r['ground_gain'], '%.3f'), f(r['slip_beta_deg'], '%+.1f'),
+                  ref_cell(r, mixed), f(r['ground_gain'], '%.3f'), f(r['slip_beta_deg'], '%+.1f'),
                   f(r['vy_mps'], '%+.3f'), f(r['imu_y_ratio'], '%+.2f')))
     for side, name in ((1, 'left'), (-1, 'right')):
         g = [r['ground_gain'] for _, r in rows if r.get('ground_gain') and r['steer_cmd_rad'] * side > 0]
@@ -342,19 +395,21 @@ def print_table(rows, p):
                   % (name, ', '.join('%.3f' % x for x in g), statistics.mean(g),
                      {'left': -0.874, 'right': -1.062}[name], float(vp.get(p, 't3.servo_gain_%s' % name))))
     if locks:
-        print('\nFULL LOCK (servo at the T2 driving clip; minimum turning radius, not a gain):')
+        lref, lmixed = ref_label(locks)
+        print('\nFULL LOCK (servo at the driving clip or the table end; minimum turning radius, not a gain):')
         print('| run | cnt | side | servo | v EKF / RF2O m/s | yaw rate gyro rad/s | R min fit RF2O m (rms) | R v/w EKF m | '
-              'delta real fit / v deg | delta T2 at the clip deg | outer front corner radius m | slip deg | IMU y |')
+              'delta real fit / v deg | %s at the lock deg | outer front corner radius m | slip deg | IMU y |' % lref)
         print('|' + '---|' * 13)
         for run, r in locks:
             if 'yaw_rate_gyro' not in r:
                 print('| %s | %s | %s | - | %s |' % (run, 'y' if r['counted'] else 'n', r['full_lock'], r.get('note', '-')))
                 continue
-            print('| %s | %s | %s | %s | %s / %.3f | %+.3f | %s (%s) | %s | %s / %+.1f | %+.1f | %.3f | %s | %s |' % (
+            print('| %s | %s | %s | %s | %s / %.3f | %+.3f | %s (%s) | %s | %s / %+.1f | %s | %.3f | %s | %s |' % (
                 run, 'y' if r['counted'] else 'n', r['full_lock'], f(r['servo_sent'], '%.3f'), f(r['v_ekf'], '%.3f'),
                 r['v_rf2o'], r['yaw_rate_gyro'], f(r['R_fit_rf2o'], '%.3f'), f(r['fit_rf2o_rms'], '%.3f'),
                 f(r['R_v'].get('ekf'), '%.3f'), f(r['delta_real_fit_deg'], '%+.1f'), r['delta_real_v_deg'],
-                r['delta_t2_clip_deg'], r['r_outer_corner'], f(r['slip_beta_deg'], '%+.1f'), f(r['imu_y_ratio'], '%+.2f')))
+                ref_cell(r, lmixed, lock=True), r['r_outer_corner'], f(r['slip_beta_deg'], '%+.1f'),
+                f(r['imu_y_ratio'], '%+.2f')))
         rows = rows + locks                                       # IMU y sign from every run
     signs = [r['imu_y_sign'] for _, r in rows if r.get('imu_y_sign')]
     if signs:

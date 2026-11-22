@@ -675,13 +675,15 @@ class Machine:
 
     def placement(self, w):
         if self.circle:
-            return self.circle_text(w)
+            return self.circle_text(w) + (steer_mode_text(w) if self.prof.get('converter') == 't1b_stop_converter'
+                                          else '')
         need, top = self.ground_window()
         return ('front %.2f m | arm window %.2f..%.2f m | brake point %.2f m | mux nearest +/-20deg %.2f m '
                 '(arm needs >= %.2f, mux brakes < %.2f) | side L %.2f R %.2f m' % (
                     self.ahead(w), need, top, self.brake_range(float(self.prof['speed'])),
                     w.get('sector_min_m', float('nan')), self.gate + self.guard, self.gate,
-                    w.get('left_m', float('nan')), w.get('right_m', float('nan'))))
+                    w.get('left_m', float('nan')), w.get('right_m', float('nan')))
+                + (steer_mode_text(w) if self.prof.get('converter') == 't1b_stop_converter' else ''))
 
     def circle_step(self, now, elapsed, v, w):
         """T3 while driving: integrate the gyro heading (base yaw rate = -(gz - bias)) and the RF2O yaw;
@@ -1337,6 +1339,54 @@ def self_test():
         raise AssertionError('full lock with the T4 VESC clip accepted')
     except SystemExit as e:
         assert 'vesc_driver clip' in str(e)
+    # 22 Nov: steering TABLE in the converter (t1b_converter_t3_table.yaml) is accepted instead of the gains
+    import yaml as _yaml
+    tbl = _yaml.safe_load((vp.CONFIG / 't1b_converter_t3_table.yaml').read_text())['t1b_stop_converter']['ros__parameters']
+    t3t = dict(servo_offset=0.335, servo_gain_left=-0.5, servo_gain_right=-0.5, **tbl)    # gains = baseline (unused)
+    assert converter_steering(dict(servo_offset=0.335), 0.335)['mode'] == 'gain'
+    smt = converter_steering(t3t, 0.335)
+    assert smt['mode'] == 'table' and smt['limits'] == (-0.28, 0.28), smt
+    for bad_t, why_ in ((dict(t3t, steer_table_right=[]), 'only one steering table'),
+                        (dict(t3t, servo_offset=0.340), 'table invalid')):          # centre != table (0, 0.335)
+        try:
+            converter_steering(bad_t, 0.335)
+            raise AssertionError('accepted %s' % why_)
+        except SystemExit as e:
+            assert why_ in str(e), str(e)
+    ct = t3_precheck(resolve_profile('t3_circle', 0.3, 0.18, p), p, 0.33, t3t, 0.335, wide)
+    assert ct['steer_mode'] == 'table' and ct['servo_gain_side'] is None
+    assert abs(ct['servo_planned'] - (0.335 + (0.178 - 0.335) * 0.18 / 0.2042)) < 1e-9, ct['servo_planned']
+    for lk_, end_, sv_ in (('left', 0.28, 0.11), ('right', -0.28, 0.660)):     # lock = the table's end point
+        ct = t3_precheck(resolve_profile('t3_circle', 0.3, None, p, lk_), p, 0.33, t3t, 0.335, wide)
+        assert ct['steer_rad'] == end_ == ct['expect_steer_rad'] and abs(ct['servo_planned'] - sv_) < 1e-9, ct
+        assert abs(ct['geometry']['r_nom'] - L / math.tan(0.28)) < 1e-12
+    for st_, why_ in ((-0.31, 'beyond the converter table end'), (0.27, None)):
+        try:
+            ct = t3_precheck(resolve_profile('t3_circle', 0.3, st_, p), p, 0.33, t3t, 0.335, wide)
+            assert why_ is None, 'accepted %s' % st_
+        except SystemExit as e:
+            assert why_ and why_ in str(e), str(e)
+    try:
+        t3_precheck(resolve_profile('t3_circle', 0.3, None, p, 'left'), p, 0.33, t3t, 0.335,
+                    dict(servo_min=0.27, servo_max=0.37))
+        raise AssertionError('table lock with the T4 VESC clip accepted')
+    except SystemExit as e:
+        assert 'vesc_driver clip' in str(e)
+    try:                                           # neither the T3 gains nor a table
+        t3_precheck(pr3, p, 0.33, dict(servo_offset=0.335, servo_gain_left=-0.5, servo_gain_right=-0.5), 0.335, wide)
+        raise AssertionError('baseline gains without a table accepted')
+    except SystemExit as e:
+        assert 'or a steering table' in str(e)
+    # m readout: steer_mode from /t1b_stop_converter/status (T3 and T4)
+    cv = dict(conv=dict(steer_mode='table', steer_limits=[-0.28, 0.28]), conv_age=0.05)
+    mt = Machine(pr3, p, live=False, ground_ok=True)
+    mt.step(0.0, 'm', False, dict(c3world((0, 0, 0), 0.003), **cv))
+    assert mt.events[-1]['detail'].endswith('converter steer_mode table (limits -0.28 / +0.28 rad)'), mt.events[-1]
+    m4 = Machine(resolve_profile('t4_straight', 0.5, None, p), p, live=False, ground_ok=True)
+    m4.step(0.0, 'm', False, world(front_m=2.8, sector_min_m=2.8, left_m=1.0, right_m=1.0, scan_age=0.05,
+                                   conv=dict(steer_mode='gain', steer_limits=None), conv_age=2.0))
+    assert m4.events[-1]['detail'].endswith('converter steer_mode gain STALE 2.0 s'), m4.events[-1]
+    assert steer_mode_text({}).endswith('no /t1b_stop_converter/status)')
     # VESC timeout evidence + fallback 0.3 m/s gate (folders as the runner / vesc_timeout_check.py write them)
     import tempfile
     with tempfile.TemporaryDirectory() as tdir:
@@ -1391,6 +1441,8 @@ def self_test():
     print('      does), 270 deg FOV: blind / masked beams unknown, visibility only for headings fully in the FOV.')
     print('      Mux low-visibility mode: runner threshold follows the mux (0.35 + 0.05), m-line banner, T3 only,')
     print('      needs the verified VESC timeout, 0.3 m/s first.')
+    print('      Converter steering TABLE accepted instead of the T3 gains (--steer within the table end, full lock')
+    print('      = table end, bad / one-sided table refused); steer_mode in the m readout (T3 and T4).')
 
     # ---- KILL: any key but SPACE while arming / armed / driving / stopping -> zero, latched until n
     def armed(m, front=2.8):
@@ -1733,8 +1785,8 @@ def get_node_params(node, node_name, names):
             time.sleep(0.02)
         if not fut.done() or fut.result() is None:
             return {}
-        return {name: {1: v.bool_value, 2: v.integer_value, 3: v.double_value,
-                       4: v.string_value}.get(v.type)
+        return {name: {1: v.bool_value, 2: v.integer_value, 3: v.double_value, 4: v.string_value,
+                       7: list(v.integer_array_value), 8: list(v.double_array_value)}.get(v.type)
                 for name, v in zip(names, fut.result().values)}
     finally:
         node.destroy_client(cli)
@@ -1901,6 +1953,10 @@ def run(args):
             self.gz, self.gz_hist = None, []           # T3: latest raw gz and the last 1 s
             self.rf2o = self.rf2o_at = None
             self.t3_cache, self.t3_cache_at, self.t3_scan = (None, None), 0.0, None
+            self.t3_geom = t3_geom                     # replaced by drive_session after the T3 pre-check
+            self.conv = self.conv_at = None
+            if prof.get('converter') == 't1b_stop_converter':
+                self.create_subscription(String, '/t1b_stop_converter/status', self.on_conv, 10)
             self.create_subscription(Imu, '/imu/data_raw', self.on_imu, qos_profile_sensor_data)
             if prof.get('circle'):
                 self.create_subscription(Odometry, '/odom_rf2o', self.on_rf2o, qos_profile_sensor_data)
@@ -1915,6 +1971,14 @@ def run(args):
             with self.lock:
                 self.status, self.status_at = st, time.monotonic()
                 self.status_log.append((time.time(), msg.data))
+
+        def on_conv(self, msg):
+            try:
+                c = json.loads(msg.data)
+            except (TypeError, ValueError):
+                return
+            with self.lock:
+                self.conv, self.conv_at = c, time.monotonic()
 
         def on_scan(self, msg):
             with self.lock:
@@ -1984,6 +2048,7 @@ def run(args):
                              left_m=front_range(self.scan, half_width, 90.0),
                              right_m=front_range(self.scan, half_width, -90.0))
                 w['erpm'] = (self.tele or {}).get('erpm')
+                w['conv'], w['conv_age'] = self.conv, (now - self.conv_at) if self.conv_at else 1e9
                 w['imu_problem'] = self.imu_watch.status(now, imu_publishers)
                 if prof.get('circle'):
                     gz = [x for _, x in self.gz_hist]
@@ -1994,7 +2059,7 @@ def run(args):
             if prof.get('circle'):
                 # Clearance + visibility: ~1440 points, at most 5 Hz and only for a new scan (cached).
                 if scan is not None and scan is not self.t3_scan and now - self.t3_cache_at >= 0.2:
-                    self.t3_cache = (t3_clearance(scan, t3_geom, laser_x, *body, mask=self_mask),
+                    self.t3_cache = (t3_clearance(scan, self.t3_geom, laser_x, *body, mask=self_mask),
                                      t3_visibility(scan, fov=fov, mask=self_mask))
                     self.t3_cache_at, self.t3_scan = now, scan
                 w['t3_clear'], w['t3_vis'] = self.t3_cache
@@ -2014,44 +2079,88 @@ def run(args):
         drive_session(args, p, prof, r, node)
 
 
+def converter_steering(converter_params, base_off):
+    """Steering mode of the running t1b converter from its parameters: 'table' (steer_table_left/right, checked
+    with the converter's own parse_steer_table) or 'gain'. SystemExit on a bad or one-sided table (the converter
+    refuses those too). -> dict(mode, tables, limits=(right end, left end) or None, offset)."""
+    import t1b_stop_converter as conv
+    off = float(converter_params.get('servo_offset') or base_off)
+    tl, tr = converter_params.get('steer_table_left') or [], converter_params.get('steer_table_right') or []
+    if not tl and not tr:
+        return dict(mode='gain', tables=None, limits=None, offset=off)
+    if not (tl and tr):
+        raise SystemExit('t1b converter has only one steering table (left %s / right %s)' % (bool(tl), bool(tr)))
+    try:
+        tables = (conv.parse_steer_table(tl, 'left', off), conv.parse_steer_table(tr, 'right', off))
+    except ValueError as exc:
+        raise SystemExit('t1b converter steering table invalid: %s' % exc)
+    return dict(mode='table', tables=tables, limits=(tables[1][-1][0], tables[0][-1][0]), offset=off)
+
+
+def steer_mode_text(w):
+    """Placement readout of /t1b_stop_converter/status steer_mode ('' if this stack has no t1b status)."""
+    c, age = w.get('conv'), w.get('conv_age', 1e9)
+    if c is None:
+        return ' | converter steer_mode - (no /t1b_stop_converter/status)'
+    lim = c.get('steer_limits')
+    return ' | converter steer_mode %s%s%s' % (
+        c.get('steer_mode', 'gain'),
+        ' (limits %+.2f / %+.2f rad)' % (lim[0], lim[1]) if lim else '',
+        ' STALE %.1f s' % age if age > 1.0 else '')
+
+
 def t3_precheck(prof, p, steer_cap, converter_params, base_off, clip):
-    """T3 refusals before anything is armed (SystemExit with the fix): mux steer cap <= t3.mux_cap_max_rad,
-    converter per-side gains = the T3 values, planned servo inside the vesc_driver servo clip and, for a
-    --steer run, inside the converter clip (not clamped: the command is an angle); for --full-lock exactly
-    at the converter clip of that side (the clamp is the point). -> circle info for run_info.json."""
+    """T3 refusals before anything is armed (SystemExit with the fix): mux steer cap <= t3.mux_cap_max_rad; the
+    converter steers either with the T3 per-side GAINS or with a valid steering TABLE (22 Nov). Gains: a --steer
+    servo must not be clamped by the converter clip, --full-lock must land exactly on the clip. Table: a --steer
+    must stay within the table's end angle on its side; --full-lock = the table's end point (its angle is then
+    also the expected angle). The planned servo must be inside the vesc_driver clip.
+    -> circle info for run_info.json (steer_rad / expect_steer_rad may differ from prof for a table full lock)."""
     import t1b_stop_converter as conv
     t3, veh = vp.get(p, 't3'), vp.get(p, 'vehicle')
     steer, lock = float(prof['steer']), prof.get('full_lock')
+    expect = float(prof.get('expect_steer', steer))
     if steer_cap > float(t3['mux_cap_max_rad']) + 1e-9:
         raise SystemExit('t3_circle: mux max_steer_rad %.2f > t3.mux_cap_max_rad %.2f (launch max_steer_rad:=%.2f)'
                          % (steer_cap, float(t3['mux_cap_max_rad']), float(t3['mux_cap_max_rad'])))
+    sm = converter_steering(converter_params, base_off)
+    off = sm['offset']
     gl, gr = converter_params.get('servo_gain_left'), converter_params.get('servo_gain_right')
-    if (gl is None or gr is None or abs(float(gl) - float(t3['servo_gain_left'])) > 1e-6
-            or abs(float(gr) - float(t3['servo_gain_right'])) > 1e-6):
-        raise SystemExit('t3_circle needs the T3 converter gains %.3f / %.3f, the converter has %s / %s '
-                         '(launch converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/'
-                         't1b_converter_t3_t2gain.yaml)' % (float(t3['servo_gain_left']),
-                                                            float(t3['servo_gain_right']), gl, gr))
-    off = float(converter_params.get('servo_offset') or base_off)
-    gside = float(gl) if steer > 0 else float(gr)
-    servo = conv.servo_command(off, float(gl), float(gr), steer)
-    linear = off + gside * steer
-    if lock:
-        clip_side = conv.SERVO_DRIVE_CLIP[0] if steer > 0 else conv.SERVO_DRIVE_CLIP[1]
-        if abs(servo - clip_side) > 1e-9:
-            raise SystemExit('t3_circle --full-lock %s: steer %+.3f rad gives servo %.4f, not the clip %.2f '
-                             '(t3.steer_max_*_rad / converter gains disagree)' % (lock, steer, servo, clip_side))
-    elif abs(servo - linear) > 1e-9:
-        raise SystemExit('t3_circle: steer %+.3f rad needs servo %.4f, outside the converter clip %s: '
-                         'choose a smaller --steer, or --full-lock for the clip itself'
-                         % (steer, linear, conv.SERVO_DRIVE_CLIP))
+    if sm['mode'] == 'table':
+        end = sm['limits'][1] if steer > 0 else sm['limits'][0]
+        if lock:
+            steer = expect = end                      # the table's own lock: its end point
+        elif abs(steer) > abs(end) + 1e-9:
+            raise SystemExit('t3_circle: steer %+.3f rad is beyond the converter table end %+.2f rad: choose a '
+                             'smaller --steer, or --full-lock for the table end' % (steer, end))
+        servo = conv.servo_command(off, -0.5, -0.5, steer, sm['tables'])
+        gside = None
+    else:
+        if (gl is None or gr is None or abs(float(gl) - float(t3['servo_gain_left'])) > 1e-6
+                or abs(float(gr) - float(t3['servo_gain_right'])) > 1e-6):
+            raise SystemExit('t3_circle needs the T3 converter gains %.3f / %.3f or a steering table; the converter '
+                             'has gains %s / %s and no table (launch converter_params_file:=/home/ftenth/f1tenth_uj/'
+                             'config/real_car/t1b_converter_t3_t2gain.yaml or t1b_converter_t3_table.yaml)'
+                             % (float(t3['servo_gain_left']), float(t3['servo_gain_right']), gl, gr))
+        gside = float(gl) if steer > 0 else float(gr)
+        servo = conv.servo_command(off, float(gl), float(gr), steer)
+        linear = off + gside * steer
+        if lock:
+            clip_side = conv.SERVO_DRIVE_CLIP[0] if steer > 0 else conv.SERVO_DRIVE_CLIP[1]
+            if abs(servo - clip_side) > 1e-9:
+                raise SystemExit('t3_circle --full-lock %s: steer %+.3f rad gives servo %.4f, not the clip %.2f '
+                                 '(t3.steer_max_*_rad / converter gains disagree)' % (lock, steer, servo, clip_side))
+        elif abs(servo - linear) > 1e-9:
+            raise SystemExit('t3_circle: steer %+.3f rad needs servo %.4f, outside the converter clip %s: '
+                             'choose a smaller --steer, or --full-lock for the clip itself'
+                             % (steer, linear, conv.SERVO_DRIVE_CLIP))
     if (len(clip) < 2 or None in clip.values()
             or not (float(clip['servo_min']) - 1e-9 <= servo <= float(clip['servo_max']) + 1e-9)):
         raise SystemExit('t3_circle: planned servo %.3f outside the vesc_driver clip %s (launch '
                          'vesc_yaml:=.../vesc_t3_erpm<N>.yaml)' % (servo, clip))
-    expect = float(prof.get('expect_steer', steer))
     return dict(steer_rad=steer, full_lock=lock, expect_steer_rad=expect, servo_planned=servo, servo_offset=off,
-                servo_gain_side=gside, vesc_servo_clip=clip, t3=t3, vesc_timeout=prof.get('vesc_timeout'),
+                servo_gain_side=gside, steer_mode=sm['mode'], steer_table=sm['tables'], steer_limits=sm['limits'],
+                vesc_servo_clip=clip, t3=t3, vesc_timeout=prof.get('vesc_timeout'),
                 geometry=t3_geometry(expect, t3, float(veh['wheelbase_m']), float(veh['body_length_m']),
                                      float(veh['body_width_m']), float(veh['front_bumper_x_m']),
                                      float(prof.get('clear_extra_m', 0.0))))
@@ -2099,7 +2208,8 @@ def drive_session(args, p, prof, r, node):
     if prof['converter'] == 't1b_stop_converter':
         converter_params = node.get_params('t1b_stop_converter',
                                            ['method', 'brake_current_a', 'brake_hold_s', 'servo_offset',
-                                            'servo_gain_left', 'servo_gain_right'])
+                                            'servo_gain_left', 'servo_gain_right',
+                                            'steer_table_left', 'steer_table_right'])
         base_off = float(vp.get(p, 'steering.servo_offset'))
         if converter_params.get('servo_offset') is not None and \
                 abs(float(converter_params['servo_offset']) - base_off) > 1e-9:
@@ -2110,6 +2220,9 @@ def drive_session(args, p, prof, r, node):
             method = 'brake%gA' % converter_params.get('brake_current_a')
         if not method:
             raise SystemExit('t1b_stop_converter parameters unreadable: %s' % converter_params)
+    steering = converter_steering(converter_params, base_off) if prof['converter'] == 't1b_stop_converter' else None
+    if steering:
+        say('Converter steering: %s%s' % (steering['mode'], ' %s / %s' % steering['tables'] if steering['tables'] else ''))
     if prof.get('stop_method') and method != prof['stop_method']:
         raise SystemExit('%s needs stop method %s, the converter runs %s (launch converter:=t1b '
                          'stop_method:=brake brake_current_a:=5.0)' % (args.test, prof['stop_method'], method))
@@ -2121,6 +2234,9 @@ def drive_session(args, p, prof, r, node):
     if prof.get('circle'):
         circle_info = t3_precheck(prof, p, steer_cap, converter_params, base_off,
                                   node.get_params('vesc_driver', ['servo_min', 'servo_max']))
+        if circle_info['steer_rad'] != prof['steer']:      # table full lock: command and expectation = table end
+            prof['steer'], prof['expect_steer'] = circle_info['steer_rad'], circle_info['expect_steer_rad']
+        node.t3_geom = circle_info['geometry']           # the node's live clearance check uses the same disk
         g = circle_info['geometry']
         say('T3 circle %s %s%+.3f rad -> servo %.3f; R nominal %.2f m; clear disk %.2f m diameter%s, centre %.2f m '
             'to the %s of the start' % ('LEFT' if prof['steer'] > 0 else 'RIGHT',

@@ -12,7 +12,8 @@
 # there). Re-measure after the steering-play fix. The table must start at (0, servo_offset): the converter takes
 # servo_offset from vehicle_params.yaml (0.335 PROVISIONAL) and refuses to start if they differ.
 # Flat [delta_rad, servo, delta_rad, servo, ...]; floats only (written with a decimal point).
-# Not usable with run_test.py t3_circle yet: its pre-check requires the per-side GAIN yaml.
+# run_test.py (22 Nov) accepts it for t3_circle and t4_straight: --steer within +/-0.28, --full-lock = the table end
+# (0.28 -> 0.11 left, -0.28 -> 0.660 right); the m readout shows the converter's steer_mode.
 # Use: real_car_test.launch.py converter:=t1b ... converter_params_file:=<this file>
 t1b_stop_converter:
   ros__parameters:

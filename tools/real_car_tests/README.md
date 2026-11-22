@@ -125,6 +125,12 @@ centre 0.335; the converter now clamps its servo output to 0.10-0.68). Runner:
   (0.35); AUTO and the 0.80 m gate unchanged. The runner follows the mux threshold from its status (+0.05),
   shows `LOW-VISIBILITY MODE ACTIVE` in the `m` line, refuses the mode for any test but `t3_circle` or without a
   passed `vesc_timeout_check`, and requires a counted 0.3 m/s run of the same command before 0.5 m/s.
+- **Steering table (22 Nov):** the runner accepts a converter with `steer_table_left/right`
+  (`t1b_converter_t3_table.yaml`) as well as the T3 gains, for `t3_circle` and `t4_straight` (validated with the
+  converter's own `parse_steer_table`; recorded in `run_info.json`). With a table: `--steer` within the table end
+  (+/-0.28), `--full-lock` = the table end point (also the expected angle for the clear disk). The `m` line ends
+  with the converter's `steer_mode` from `/t1b_stop_converter/status`. `t3_analyze.py` then shows "delta table"
+  (the table's angle at the servo sent; the table end for full lock) instead of "delta T2".
 - `lidar_self_mask.py <folder>` (22 Nov): field of view and self-return sectors from a still recording, as a
   yaml snippet (writes nothing).
 - **Drive stops:** `TURNS_DONE` (gyro heading = 2 turns, bias from the 1 s before the start; the only counted

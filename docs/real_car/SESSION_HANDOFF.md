@@ -140,8 +140,9 @@ distance (T4) before it can be considered.
 3a. **T3 DONE 22 Nov (results doc "T3 ground circles"):** at 0.3 m/s, min radius ~0.87 m right / ~0.90 m left,
    max real angle ~0.28 rad both sides, left stop reached at ~0.11, right understeers ~20 % near the centre vs T2,
    IMU +y = base +y. Decision: per-side steering TABLE (`t1b_converter_t3_table.yaml`, limit 0.28 rad, left clip
-   0.11) instead of gains; proposal section 8 updated. Not yet usable with `t3_circle` (its pre-check wants the
-   gain yaml). 0.5 m/s circles not run. History of the preparation:
+   0.11) instead of gains; proposal section 8 updated. The runner accepts the table yaml for `t3_circle` and
+   `t4_straight` (full lock = table end; `m` shows `steer_mode`); `t3_analyze.py` then reports "delta table".
+   0.5 m/s circles not run. History of the preparation:
    **T3 PREPARED 21 Nov, updated the same evening:** `t3_circle` runner profile, T3 converter / VESC
    yamls, `t3_analyze.py`, hall checklist `T3_HALL_CHECKLIST.md`. Order: disarmed rehearsal, +/-0.18, then per-side
    ~90 % (left +0.26 / servo 0.108, right -0.31 / servo 0.664), then `--full-lock left|right` (servo exactly
