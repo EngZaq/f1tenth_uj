@@ -20,9 +20,9 @@ For Moatasem and for the next Claude Code session. Read this, then
   - Also: LiDAR self-mask (XT60 leads) + 270 deg field of view (blind rear unknown), `local_env.sh` for Wi-Fi
     SSH, T5 analysis tools, VESC timeout check tool.
 - **Next session, in order** (all Moatasem's runs):
-  1. **T5a**: 15 min static IMU recording (IMU-only launch + `ros2 bag record`), then
-     `t5_imu_analyze.py static` (bias, R, Allan, drift, frozen check). Commands: README "VESC timeout check and
-     T5"; the 21 Nov chat gave the exact lines.
+  1. ~~**T5a**~~ **DONE 22 Nov 17:00** (results doc "T5a"): `home_data/t5a_static_1644`, 89 939 samples at 100 Hz,
+     no freeze, gz residual bias +0.003 deg/s, R 8.85e-7, ARW 0.36 deg/sqrt(h), bias instability 18.6 deg/h
+     (bench 5.5), tilt 9.95 deg, |g| +4.1 %. First start hit I2C Errno 121 (node exited; retry OK).
   2. **T5b**: stand, 0.5 m/s for 90 s (`run_test.py --test t5b_stand_imu --speed 0.5 --live`, T1b stack with
      `vesc_t1b_erpm4630.yaml`), then `t5_imu_analyze.py stand`.
   3. **Steering-table ground check**: `t3_circle --steer -0.18` and `--steer +0.18` at 0.3 m/s with
@@ -34,7 +34,9 @@ For Moatasem and for the next Claude Code session. Read this, then
 - **Open for Zaid** (section 4a, converter proposal):
   - left-wheel play and the left stop at ~0.11 (0.100 gives less angle than 0.108);
   - toe ~8 deg (difference at the first centre reading);
-  - F-18 BMI160 freeze + exit on start-up motion (`IMU_DRIVER_PROPOSAL_F18.md`);
+  - F-18 BMI160 freeze + exit on start-up motion (`IMU_DRIVER_PROPOSAL_F18.md`); **22 Nov T5a: the node also
+    exits on a start-up I2C `[Errno 121]`** (0x69 answered right after; retry worked) and the accel norm reads
+    **+4.1 %** (10.21 m/s^2): check the accel calibration file;
   - IMU mount: **pitch pi** (x back, y left, z down) + ~9 deg tilt, derived from T3 + T4, to be confirmed and
     the TF fixed (the test launch publishes roll pi);
   - the permanent converter proposal (`PERMANENT_STOP_CONVERTER_PROPOSAL.md`: 7 decisions, steering table
