@@ -159,3 +159,11 @@ only the VESC's own timeout stops the car. Today that releases the motor after ~
 together with you. Verified on the stand with `run_test.py --test vesc_timeout_check` and
 `vesc_timeout_check.py` (converter killed with SIGKILL while the wheels spin; pass = drive current gone within
 0.40 s and a braking current). It matters for every future ground test, not only T3.
+
+**Done 22 Nov (Moatasem), for your information:** written in VESC Tool, App Settings > General:
+`timeout_msec` **300** (planned ~250; the previous value was not read, firmware default assumed) and
+`timeout_brake_current` **5.0 A** (was **0**, i.e. release and coast). Effect: if commands stop (dead
+converter, frozen Jetson, USB lost), the VESC brakes with 5 A after 0.3 s instead of coasting after ~1 s.
+Anything that commands the VESC must now send at least every 0.3 s (the converters send at 50 Hz;
+`/drive` publishers >= 10 Hz). Not yet verified on the stand (next: `vesc_timeout_check`). If you use VESC
+Tool on this controller, please do not reset the app config without telling us.

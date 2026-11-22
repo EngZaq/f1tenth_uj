@@ -23,7 +23,7 @@ screenshots are optional.
 | 11 | Motor Settings, Current | `l_current_max`, `l_current_min` (motor brake), `l_in_current_max`, `l_in_current_min` (battery regen), `l_abs_current_max` | | Braking/regen limits; 12 Nov rebound drew +18 A phase current |
 | 12 | Motor Settings, RPM | `l_max_erpm`, `l_min_erpm`, `l_erpm_start` | | Firmware ERPM limits (the ROS clip was 3500; the rebound peaked at 3911) |
 | 13 | Motor Settings, Voltage | `l_battery_cut_start`, `l_battery_cut_end`, battery cell count | | The battery read 11.1 V on 14 Nov after a power loss: check the cut-off is not active |
-| 14 | App Settings, General | app to use (`app_to_use`), `timeout_msec`, `timeout_brake_current` | | What the VESC does when commands stop; the earlier stand test saw a ~1 s release |
+| 14 | App Settings, General | app to use (`app_to_use`), `timeout_msec`, `timeout_brake_current` | **22 Nov (Moatasem): `timeout_msec` 300 (was unknown / default), `timeout_brake_current` 5.0 A (was 0)**; `app_to_use` not reported | What the VESC does when commands stop; the earlier stand test saw a ~1 s release |
 | 15 | App Settings, General | `can_mode` / controller ID | | Confirms a single controller |
 
 ## Hypothesis being tested (baseline C-7)

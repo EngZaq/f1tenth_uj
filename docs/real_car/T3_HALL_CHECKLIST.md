@@ -14,21 +14,23 @@ Software stops cover:
 - the runner's geofence, turn, IMU and RF2O checks.
 
 A frozen Jetson or a dead converter is stopped only by the VESC's own timeout: today ~1 s, then coasting
-(24 Oct). Decision: **timeout 250 ms + timeout brake current 5 A**, coordinated with Zaid
+(24 Oct). Decision: **timeout ~250 ms + timeout brake current 5 A**, coordinated with Zaid. **Configured 22 Nov:
+300 ms + 5 A** (previous: timeout unknown / default, brake current 0)
 (converter proposal section 9).
 
-1. [ ] **Read and note (change nothing yet):**
+1. [x] **Read and note (change nothing yet):** done 22 Nov (results doc).
    - VESC Tool (Windows): save the motor config and the app config as XML
      (`T1_VESC_TOOL_CHECKLIST.md` "First").
    - Write down App Settings > General `timeout_msec` and `timeout_brake_current` (row 14 there) in the
      results doc.
    - Tell Zaid what will change.
-2. [ ] **Before-check on the stand** (recommended: proves the method). Do it with the current values,
+2. [ ] ~~**Before-check on the stand**~~ no longer possible (values already changed); the 24 Oct ~1 s release is the
+   "before" reference. (Recommended: proves the method.) Do it with the current values,
    using the stand commands below. Expected result: `FAIL: timeout onset ~1.0 s ... released / coasting`.
-3. [ ] **Set** `timeout_msec` = 250 and `timeout_brake_current` = 5.0, then Write App Configuration.
+3. [x] **Set** `timeout_msec` = 250 (set: **300**) and `timeout_brake_current` = 5.0, then Write App Configuration.
    Re-read both values and note them.
 4. [ ] **Stand check, after the change** (car on the stand, wheels free; same commands). Expected result:
-   `PASS: timeout onset ~0.25-0.30 s ..., BRAKED`.
+   `PASS: timeout onset ~0.30-0.34 s ..., BRAKED` (300 ms setting; the limit is 0.40 s).
    This `timeout_check.json` lifts the T3 fallback rules automatically.
 5. [ ] **Optional USB check** (the frozen-Jetson case; no telemetry):
    - relaunch the stack and start the runner again;

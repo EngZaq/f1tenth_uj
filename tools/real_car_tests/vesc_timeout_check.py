@@ -93,6 +93,8 @@ def self_test():
         return status, core
     r = timeout_metrics(*synth(0.25, True), cfg)
     assert r['pass_'] and 0.24 <= r['onset_delay_s'] <= 0.30 and r['verdict'].startswith('PASS'), r
+    r = timeout_metrics(*synth(0.30, True), cfg)                       # configured 22 Nov: 300 ms + 5 A
+    assert r['pass_'] and 0.29 <= r['onset_delay_s'] <= 0.34, r
     r = timeout_metrics(*synth(1.0, False), cfg)                       # 24 Oct behaviour: ~1 s, coasting
     assert not r['pass_'] and 0.99 <= r['onset_delay_s'] <= 1.05 and 'coasting' in r['verdict'], r
     r = timeout_metrics(*synth(0.25, False), cfg)                      # fast timeout but brake current 0
@@ -106,7 +108,7 @@ def self_test():
     st_, co_ = synth(0.25, True)
     r = timeout_metrics(st_ + [(5.6, 'DRIVE')], co_, cfg)               # killed later, wheels already stopped
     assert r['verdict'].startswith('INVALID: wheels not driven steadily'), r
-    print('PASS: VESC timeout check: 0.25 s + brake -> PASS; 1 s coasting (24 Oct), 0.25 s coasting, 1 s braked')
+    print('PASS: VESC timeout check: 0.25 / 0.30 s + brake -> PASS; 1 s coasting (24 Oct), 0.25 s coasting, 1 s braked')
     print('      -> FAIL; killed outside DRIVE / converter back within 1 s / wheels not steady -> INVALID. No ROS.')
 
 
