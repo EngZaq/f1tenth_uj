@@ -167,3 +167,8 @@ converter, frozen Jetson, USB lost), the VESC brakes with 5 A after 0.3 s instea
 Anything that commands the VESC must now send at least every 0.3 s (the converters send at 50 Hz;
 `/drive` publishers >= 10 Hz). Not yet verified on the stand (next: `vesc_timeout_check`). If you use VESC
 Tool on this controller, please do not reset the app config without telling us.
+
+**Verified 22 Nov on the stand** (`20261122_150252_vesc_timeout_check_v0.50_brake5A_erpmmax4630_armed`): converter killed while the wheels ran at 0.5 m/s ->
+drive current gone after **0.29 s**, braking current **-2.44 A**, wheels below 300 ERPM after **0.33 s**
+(before: ~1 s, then coasting). If you change the converter or the VESC config, this check
+(`run_test.py --test vesc_timeout_check` + `vesc_timeout_check.py`) is the one to repeat.

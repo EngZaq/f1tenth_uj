@@ -131,6 +131,10 @@ Full-lock runs get their own table (minimum radius from fit and v / yaw rate, re
 the clip, outer front corner radius) and never enter the gain; synthetic check (right lock R 0.80 m): R 0.800,
 -18.0 deg, corner 0.949 m.
 
+`local_env.sh` (22 Nov): `source` it in every terminal when SSH runs over Wi-Fi (phone hotspot). It sets
+ROS_LOCALHOST_ONLY=1, unsets CYCLONEDDS_URI and turns on lo multicast (sudo, once per boot), because DDS on the
+Wi-Fi link froze the SSH sessions. USB SSH: not needed.
+
 ## VESC timeout check and T5 (IMU noise), 21 Nov
 
 - `run_test.py --test vesc_timeout_check --speed 0.5 --live` (stand, T1b stack, 20 s steady): during steady,

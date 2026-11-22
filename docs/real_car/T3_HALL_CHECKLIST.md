@@ -29,7 +29,8 @@ A frozen Jetson or a dead converter is stopped only by the VESC's own timeout: t
    using the stand commands below. Expected result: `FAIL: timeout onset ~1.0 s ... released / coasting`.
 3. [x] **Set** `timeout_msec` = 250 (set: **300**) and `timeout_brake_current` = 5.0, then Write App Configuration.
    Re-read both values and note them.
-4. [ ] **Stand check, after the change** (car on the stand, wheels free; same commands). Expected result:
+4. [x] **Stand check, after the change** (**PASSED 22 Nov** `20261122_150252_vesc_timeout_check_v0.50_brake5A_erpmmax4630_armed`: onset 0.29 s, -2.44 A,
+   < 300 ERPM in 0.33 s; the T3 fallback is lifted) (car on the stand, wheels free; same commands). Expected result:
    `PASS: timeout onset ~0.30-0.34 s ..., BRAKED` (300 ms setting; the limit is 0.40 s).
    This `timeout_check.json` lifts the T3 fallback rules automatically.
 5. [ ] **Optional USB check** (the frozen-Jetson case; no telemetry):
@@ -110,6 +111,11 @@ If the real lock is much weaker (R > 1.25 x 0.84 m), the geofence stops it: that
       are OK.
 
 ## 3. Terminals (each: source ROS + workspace, `ROS_DOMAIN_ID=42`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`)
+
+**SSH over Wi-Fi (phone hotspot, hall Wi-Fi):** in EVERY terminal also run
+`source ~/f1tenth_uj/tools/real_car_tests/local_env.sh` before any ros2 command. On 22 Nov, launching the stack
+over a hotspot SSH session froze every session. The helper keeps DDS on the Jetson (no laptop RViz). Use it in
+all terminals or in none. **SSH over USB needs none of it.**
 
 1. **Stack** (stays running; keep the car still for 10 s after launch):
    ```bash

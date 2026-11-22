@@ -146,7 +146,8 @@ t3:                                 # T3 constant-steering circles on the ground
 
 vesc_timeout_check:                 # vesc_timeout_check.py (stand, converter killed during 0.5 m/s), design 21 Nov
   timeout_ms_target: 300            # VESC Tool App Settings > General: timeout_msec. CONFIGURED 22 Nov (Moatasem; planned
-                                    #   250); previous value unknown / default (24 Oct stand: release ~1 s). NOT verified yet
+                                    #   250); previous value unknown / default (24 Oct stand: release ~1 s). VERIFIED 22 Nov 20261122_150252:
+                                    #   PASS onset 0.29 s, braked -2.44 A, < 300 ERPM in 0.33 s
   brake_current_target_a: 5.0       #   timeout_brake_current. CONFIGURED 22 Nov (was 0 A = release, coasting)
   onset_max_s: 0.40                 # PASS: drive current gone <= this after the converter's last message
                                     #   (300 ms + telemetry 20 ms + converter tick 20 ms = 0.34 s, + 60 ms margin)
