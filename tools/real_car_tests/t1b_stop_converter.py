@@ -19,6 +19,11 @@ Parameters servo_gain_left / servo_gain_right (default = vehicle_params steering
 per-side steering gains (T3 21 Nov: config/real_car/t1b_converter_t3_t2gain.yaml, T2 per-side fit):
 servo = offset + (left gain if steer > 0 else right gain) x steer. Validated in SERVO_GAIN_RANGE. The servo
 output is clamped to the T2 driving clip 0.10-0.68 (the per-test VESC yaml clips again, usually tighter).
+Optional parameters steer_table_left / steer_table_right (T3 ground, 22 Nov: config/real_car/t1b_converter_t3_table.yaml)
+are TEST-ONLY per-side piecewise-linear steering tables, flat [delta_rad, servo, delta_rad, servo, ...] starting
+with (0, servo_offset); left angles >= 0 rising, right angles <= 0 falling, servo monotonic outward and inside
+the driving clip. When given (both or neither), they replace the per-side gains; the command is clamped to
+the table's end angles. Empty (default) = per-side gains, as before.
 
   t1b_stop_converter.py --self-test
 """
@@ -38,6 +43,7 @@ HOLD_MAX_S = 5.0
 SERVO_OFFSET_MAX_DELTA = 0.05     # test override at most this far from the baseline offset
 SERVO_DRIVE_CLIP = (0.10, 0.68)   # T2 19 Nov driving clip (REAL_CAR_TEST_RESULTS.md)
 SERVO_GAIN_RANGE = (-1.2, -0.4)  # test gain override limits (baseline -0.50, T2 fit -0.87 / -1.06)
+STEER_TABLE_MAX_RAD = 0.40       # table angles never beyond the mux steer ceiling
 STALE_S = 0.2           # same order as the mux COMMAND_TTL (0.22 s)
 RATE_HZ = 50.0
 
@@ -63,9 +69,45 @@ def validate_servo_gain(g):
         raise ValueError('servo gain %r must be in %.2f..%.2f' % (g, SERVO_GAIN_RANGE[0], SERVO_GAIN_RANGE[1]))
 
 
-def servo_command(offset, gain_left, gain_right, steer):
-    """Servo position for a steering angle (+ = left), per-side linear, clamped to the T2 driving clip."""
-    servo = offset + (gain_left if steer > 0 else gain_right) * steer
+def parse_steer_table(flat, side, offset):
+    """Flat [delta, servo, ...] -> [(delta, servo)] for side 'left' (delta >= 0, rising; servo falling) or
+    'right' (delta <= 0, falling; servo rising). First pair must be (0, offset). Raises ValueError."""
+    vals = [float(v) for v in flat]
+    if len(vals) < 4 or len(vals) % 2 or not all(math.isfinite(v) for v in vals):
+        raise ValueError('steer_table_%s needs >= 2 finite [delta_rad, servo] pairs, got %r' % (side, flat))
+    pts = list(zip(vals[0::2], vals[1::2]))
+    if abs(pts[0][0]) > 1e-9 or abs(pts[0][1] - offset) > 1e-6:
+        raise ValueError('steer_table_%s must start with (0, servo_offset %.3f), got %r' % (side, offset, pts[0]))
+    sgn = 1.0 if side == 'left' else -1.0
+    for (d0, s0), (d1, s1) in zip(pts, pts[1:]):
+        if not sgn * d1 > sgn * d0:
+            raise ValueError('steer_table_%s angles must move outward (%s): %r -> %r' % (side, side, d0, d1))
+        if not -sgn * s1 > -sgn * s0:          # left: servo falls; right: servo rises
+            raise ValueError('steer_table_%s servo must move outward: %r -> %r' % (side, s0, s1))
+    for d, sv in pts:
+        if abs(d) > STEER_TABLE_MAX_RAD + 1e-9 or not SERVO_DRIVE_CLIP[0] <= sv <= SERVO_DRIVE_CLIP[1]:
+            raise ValueError('steer_table_%s point (%r, %r) outside |delta| <= %.2f / servo %s'
+                             % (side, d, sv, STEER_TABLE_MAX_RAD, SERVO_DRIVE_CLIP))
+    return pts
+
+
+def table_servo(table, steer):
+    """Piecewise-linear servo for steer on one side's table; steer clamped to the table's end angle."""
+    d_end = table[-1][0]
+    steer = min(steer, d_end) if d_end > 0 else max(steer, d_end)
+    for (d0, s0), (d1, s1) in zip(table, table[1:]):
+        if min(d0, d1) <= steer <= max(d0, d1):
+            return s0 + (s1 - s0) * (steer - d0) / (d1 - d0)
+    return table[-1][1]
+
+
+def servo_command(offset, gain_left, gain_right, steer, tables=None):
+    """Servo position for a steering angle (+ = left): per-side table (tables = (left, right)) or per-side
+    linear gain, always clamped to the T2 driving clip."""
+    if tables:
+        servo = table_servo(tables[0], steer) if steer > 0 else table_servo(tables[1], steer)
+    else:
+        servo = offset + (gain_left if steer > 0 else gain_right) * steer
     return min(SERVO_DRIVE_CLIP[1], max(SERVO_DRIVE_CLIP[0], servo))
 
 
@@ -148,9 +190,43 @@ def self_test():
     assert abs(servo_command(0.335, -0.874, -1.062, -0.26) - 0.61112) < 1e-9       # T3 right 0.26 rad
     assert servo_command(0.335, -0.874, -1.062, 0.40) == SERVO_DRIVE_CLIP[0]        # clamped, never past
     assert servo_command(0.335, -0.874, -1.062, -0.40) == SERVO_DRIVE_CLIP[1]
+    # T3 ground table (22 Nov): config/real_car/t1b_converter_t3_table.yaml
+    import yaml
+    tp = yaml.safe_load((vp.CONFIG / 't1b_converter_t3_table.yaml').read_text())['t1b_stop_converter']['ros__parameters']
+    tl = parse_steer_table(tp['steer_table_left'], 'left', 0.335)
+    tr = parse_steer_table(tp['steer_table_right'], 'right', 0.335)
+    tab = (tl, tr)
+    assert servo_command(0.335, -0.5, -0.5, 0.0, tab) == 0.335
+    assert abs(servo_command(0.335, -0.5, -0.5, 0.2042, tab) - 0.178) < 1e-9          # left 11.7 deg point
+    assert abs(servo_command(0.335, -0.5, -0.5, -0.1414, tab) - 0.526) < 1e-9         # right 8.1 deg point
+    assert abs(servo_command(0.335, -0.5, -0.5, 0.1021, tab) - (0.335 + (0.178 - 0.335) * 0.5)) < 1e-9  # halfway
+    assert abs(servo_command(0.335, -0.5, -0.5, 0.40, tab) - 0.11) < 1e-9             # clamped: left clip 0.11
+    assert abs(servo_command(0.335, -0.5, -0.5, -0.40, tab) - tr[-1][1]) < 1e-9        # clamped at -0.28
+    assert tl[-1][0] == 0.28 and tr[-1][0] == -0.28
+    prev = 1.0
+    for k in range(1, 300):                                      # monotonic, continuous across the centre
+        sv = servo_command(0.335, -0.5, -0.5, 0.30 - k * 0.002, tab)
+        assert sv >= prev - 1e-12 or prev == 1.0, (k, sv, prev)
+        prev = sv
+    for bad, side in (([0.0, 0.335], 'left'),                                 # one pair only
+                      ([0.01, 0.335, 0.2, 0.18], 'left'),                     # does not start at 0
+                      ([0.0, 0.330, 0.2, 0.18], 'left'),                      # centre != servo_offset
+                      ([0.0, 0.335, 0.2, 0.40], 'left'),                      # left servo must fall
+                      ([0.0, 0.335, -0.2, 0.18], 'left'),                     # left angle must be > 0
+                      ([0.0, 0.335, 0.2, 0.05], 'left'),                      # below the 0.10 clip
+                      ([0.0, 0.335, -0.2, 0.30], 'right'),                    # right servo must rise
+                      ([0.0, 0.335, -0.45, 0.60], 'right'),                   # beyond the 0.40 ceiling
+                      ([0.0, 0.335, 0.2], 'left'), ([0.0, 0.335, float('nan'), 0.2], 'left')):
+        try:
+            parse_steer_table(bad, side, 0.335)
+        except ValueError:
+            continue
+        raise AssertionError('steer table %r (%s) accepted' % (bad, side))
+    assert servo_command(0.335, -0.874, -1.062, 0.26, None) == servo_command(0.335, -0.874, -1.062, 0.26)  # no table
     print('PASS: method/limit validation, drive pass-through, brake hold then release,')
     print('      current0, speed0, stale and non-finite /drive stop, servo_offset override limits,')
-    print('      per-side servo gains (limits, T3 values, baseline unchanged), output clamp 0.10-0.68.')
+    print('      per-side servo gains (limits, T3 values, baseline unchanged), output clamp 0.10-0.68;')
+    print('      steering table (T3 yaml points, interpolation, clamp to +/-0.28, monotonic, 10 bad tables refused).')
     print('      No ROS imported.')
 
 
@@ -166,6 +242,8 @@ def main():
     from rclpy.node import Node
     from ackermann_msgs.msg import AckermannDriveStamped
     from std_msgs.msg import Float64, String
+    from rclpy.parameter import Parameter
+    from rclpy.exceptions import ParameterUninitializedException
 
     p = vp.load()
     gain = float(vp.get(p, 'drivetrain.speed_to_erpm_gain'))
@@ -182,6 +260,8 @@ def main():
             self.declare_parameter('servo_offset', s_offset)
             self.declare_parameter('servo_gain_left', s_gain)
             self.declare_parameter('servo_gain_right', s_gain)
+            self.declare_parameter('steer_table_left', Parameter.Type.DOUBLE_ARRAY)    # unset = per-side gains
+            self.declare_parameter('steer_table_right', Parameter.Type.DOUBLE_ARRAY)
             method = str(self.get_parameter('method').value)
             brake_a = float(self.get_parameter('brake_current_a').value)
             hold_s = float(self.get_parameter('brake_hold_s').value)
@@ -198,6 +278,20 @@ def main():
             if abs(self.gain_left - s_gain) > 1e-9 or abs(self.gain_right - s_gain) > 1e-9:
                 self.get_logger().warn('TEST servo gains left %.3f / right %.3f (baseline %.3f in vehicle_params.yaml)'
                                        % (self.gain_left, self.gain_right, s_gain))
+            raw = {}
+            for side in ('left', 'right'):
+                try:
+                    raw[side] = list(self.get_parameter('steer_table_%s' % side).value or [])
+                except ParameterUninitializedException:
+                    raw[side] = []
+            if bool(raw['left']) != bool(raw['right']):
+                raise ValueError('steer_table_left and steer_table_right must be given together')
+            self.tables = None
+            if raw['left']:
+                self.tables = (parse_steer_table(raw['left'], 'left', self.servo_offset),     # raises -> node exits
+                               parse_steer_table(raw['right'], 'right', self.servo_offset))
+                self.get_logger().warn('TEST steering TABLE (gains unused): left %s | right %s' % (
+                    self.tables[0], self.tables[1]))
             self.speed_pub = self.create_publisher(Float64, '/commands/motor/speed', 10)
             self.brake_pub = self.create_publisher(Float64, '/commands/motor/brake', 10)
             self.current_pub = self.create_publisher(Float64, '/commands/motor/current', 10)
@@ -221,13 +315,15 @@ def main():
             pub = {'speed': self.speed_pub, 'brake': self.brake_pub, 'current': self.current_pub}[kind]
             pub.publish(Float64(data=float(value)))
             steer = self.steer if (age is not None and age < STALE_S and math.isfinite(self.steer)) else 0.0
-            servo = servo_command(self.servo_offset, self.gain_left, self.gain_right, steer)
+            servo = servo_command(self.servo_offset, self.gain_left, self.gain_right, steer, self.tables)
             self.servo_pub.publish(Float64(data=servo))
             self.status_pub.publish(String(data=json.dumps(dict(
                 method=self.logic.method, phase=phase, out=kind, value=round(value, 3),
                 speed_in=round(self.speed, 4), drive_age_s=None if age is None else round(age, 3),
                 servo=round(servo, 4), servo_offset=self.servo_offset, servo_gain_left=self.gain_left,
-                servo_gain_right=self.gain_right), separators=(',', ':'))))
+                servo_gain_right=self.gain_right, steer_mode='table' if self.tables else 'gain',
+                steer_limits=[self.tables[1][-1][0], self.tables[0][-1][0]] if self.tables else None),
+                separators=(',', ':'))))
 
     rclpy.init()
     node = Converter()

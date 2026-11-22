@@ -1,0 +1,20 @@
+# TEST-ONLY steering table for tools/real_car_tests/t1b_stop_converter.py (Moatasem, 22 Nov).
+# From T3 ground circles 22 Nov at 0.3 m/s (t3_analyze.py on the 8 *_t3_circle_*_armed runs 20261122_154013..155807;
+# results doc row "T3 ground circles"). delta = bicycle-equivalent angle at the rear axle, atan(0.26 / R).
+#   left : servo 0.178 -> +11.7 deg = 0.2042 rad (R 1.25); 0.108 -> +16.1 deg (R 0.90); 0.100 (full lock) -> +15.3
+#          deg (R 0.95): below ~0.11 the left side gains nothing (stop reached) -> left clip 0.11
+#   right: servo 0.526 -> -8.1 deg = -0.1414 rad (R 1.75-1.93); 0.664 -> -16.3 deg (R 0.89); 0.680 (full lock)
+#          -> -16.6 deg (R 0.84-0.89). Segment 155446 #3 (R 1.649) excluded as an outlier.
+# Steering limit 0.28 rad both sides (max real angle ~0.28 rad). End points:
+#   left  (0.28, 0.11): the decided clip / limit (the measured 0.178 -> 0.108 line gives 0.109 at 0.28 rad)
+#   right (-0.28, 0.660): interpolated between the 0.526 and 0.664 points
+# Near the centre (0..8 deg) there are no ground points: linear from the centre (right understeers ~20 % vs T2
+# there). Re-measure after the steering-play fix. The table must start at (0, servo_offset): the converter takes
+# servo_offset from vehicle_params.yaml (0.335 PROVISIONAL) and refuses to start if they differ.
+# Flat [delta_rad, servo, delta_rad, servo, ...]; floats only (written with a decimal point).
+# Not usable with run_test.py t3_circle yet: its pre-check requires the per-side GAIN yaml.
+# Use: real_car_test.launch.py converter:=t1b ... converter_params_file:=<this file>
+t1b_stop_converter:
+  ros__parameters:
+    steer_table_left: [0.0, 0.335, 0.2042, 0.178, 0.28, 0.11]
+    steer_table_right: [0.0, 0.335, -0.1414, 0.526, -0.28, 0.660]

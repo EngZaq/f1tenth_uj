@@ -121,6 +121,9 @@ distance (T4) before it can be considered.
 | Fitted gain **~-0.96** (left -0.87, right -1.06), offset 0.364, vs converter -0.50 / 0.320 | `fit.json` of the T2 run, rms 2.1 deg | If confirmed, a commanded angle gives about **half** the real wheel angle (e.g. mux 0.10 rad -> ~0.05 rad). Fits F-02 (much less yaw than the bicycle model). **Not applied** until the centre is confirmed. |
 | **Left-wheel play / uncertain centre** | Centre readings at the same command: left wheel -5 / +3 / -3 deg, right +3 / +7 / +7 deg; fitted backlash 2.2 deg | Check the left steering linkage (knuckle, ball joints, servo saver) for play. About 8 deg toe difference at the first centre reading: check the toe setting. |
 | **Servo horn off-centre** | Straight = servo 0.320 = 1320 us; VESC sends 1000-2000 us (firmware), servo accepts 500-2500 us | Left has 0.32 of servo travel, right 0.68. Re-mounting the horn so straight is near 0.5 gives symmetric travel; **T2 must be redone after that**. |
+| **Ground steering (T3, 22 Nov)** | `t3_analyze.py`, 8 runs `20261122_154013`..`155807` (results doc) | Real max angle ~0.28 rad (16-16.6 deg) both sides, below the stand T2 (17.2 / 18.4 deg); min radius ~0.90 m left / ~0.87 m right; not linear (right understeers ~20 % near the centre). Proposal: per-side steering **table** in the converter (proposal section 8). |
+| **Left stop reached at ~0.11** | T3: servo 0.100 (full lock) -> +15.3 deg, LESS than 0.108 -> +16.1 deg | Left driving clip 0.11 in the table. Please check the left end stop / linkage (it may be the play or the servo saver giving way under load). |
+| **IMU y axis confirmed** | T3: IMU +y = base +y in 13 / 13 circle segments | With x backward (21 Nov): the mount is **pitch pi** (x back, y left, z down) + ~9 deg tilt; the test-launch TF says roll pi, which flips y. Please confirm and fix the TF (and how it was published on 14 Nov). |
 | Servo power | 6 A UBEC from the battery; only the signal comes from the VESC | A binding servo can draw up to ~6 A that the VESC does not limit (two servos already burned). |
 | Old configs | `ackermann_to_vesc.yaml` / `vesc_to_odom.yaml` still at offset 0.361 | Real-car configs use 0.320; align after the centre re-check. |
 
@@ -134,7 +137,12 @@ distance (T4) before it can be considered.
 3. **T3** loaded steering on the stand, then mini-circles on the ground at 0.5 (then 1.0) m/s at 50 % and
    90 % of the measured max steer (`max_steer_rad` launch arg, approved per test); delta = atan(0.260 / R)
    vs T2. Runner profile not written yet.
-3a. **T3 PREPARED 21 Nov (not run), updated the same evening:** `t3_circle` runner profile, T3 converter / VESC
+3a. **T3 DONE 22 Nov (results doc "T3 ground circles"):** at 0.3 m/s, min radius ~0.87 m right / ~0.90 m left,
+   max real angle ~0.28 rad both sides, left stop reached at ~0.11, right understeers ~20 % near the centre vs T2,
+   IMU +y = base +y. Decision: per-side steering TABLE (`t1b_converter_t3_table.yaml`, limit 0.28 rad, left clip
+   0.11) instead of gains; proposal section 8 updated. Not yet usable with `t3_circle` (its pre-check wants the
+   gain yaml). 0.5 m/s circles not run. History of the preparation:
+   **T3 PREPARED 21 Nov, updated the same evening:** `t3_circle` runner profile, T3 converter / VESC
    yamls, `t3_analyze.py`, hall checklist `T3_HALL_CHECKLIST.md`. Order: disarmed rehearsal, +/-0.18, then per-side
    ~90 % (left +0.26 / servo 0.108, right -0.31 / servo 0.664), then `--full-lock left|right` (servo exactly
    0.10 / 0.68: real minimum radius, own table in `t3_analyze.py`). Per-side limits 0.27 / 0.325 rad, mux cap
@@ -201,7 +209,7 @@ distance (T4) before it can be considered.
 | Battery | Charged: >= 12.3 V during both 16 Nov runs (11.1 V idle on 14 Nov after a power loss). |
 | Stand LiDAR | Front valid fraction ~0.83 vs the 0.75 MANUAL gate; an operator hand at 0.10-0.12 m (+10..+19 deg) latches `OBSTACLE_NEAR`. |
 | F-13 | Runner input gaps never exceeded 44 ms; the keyboard GUI's latch was not reproduced (GUI not re-tested). |
-| IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. **21 Nov (T4 bags): IMU x points BACKWARD** (forward accel reads on -x: pitch pi or roll pi + yaw pi) **and the mount is tilted 8-10 deg**; gz sign unaffected. Not changed (Zaid); y sign needs T3. The shadow inputs handle it themselves (no TF). |
+| IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. **21 Nov (T4 bags): IMU x points BACKWARD** (forward accel reads on -x: pitch pi or roll pi + yaw pi) **and the mount is tilted 8-10 deg**; gz sign unaffected. Not changed (Zaid). **22 Nov T3: IMU +y = base +y confirmed** -> mount = pitch pi (not roll pi) + tilt (section 4a). The shadow inputs handle it themselves (no TF). |
 | Team notes | Repo configs still at offset 0.361; do not use `vesc.launch.py` (`config/vesc.yaml` brake 200000 A); listed in the results doc. |
 | DDS over Wi-Fi SSH (22 Nov) | Launching the stack over a phone-hotspot SSH session froze all sessions. Over Wi-Fi: `source tools/real_car_tests/local_env.sh` in every terminal (ROS_LOCALHOST_ONLY=1, CYCLONEDDS_URI unset, lo multicast on); no laptop RViz then. USB SSH: not needed. |
 | T1b converter | Test-only (approved with conditions: one command per tick, brake/current only after a zero request, new nonzero request returns to speed at once, method logged per stop). |

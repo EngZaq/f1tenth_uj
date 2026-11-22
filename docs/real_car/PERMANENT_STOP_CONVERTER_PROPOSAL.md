@@ -116,10 +116,10 @@ without a T1 repeat.
 5. `teleop.launch.py` / `teleop_mapping.launch.py` / `vesc.launch.py` still use `ackermann_to_vesc` with
    speed 0 and `config/vesc.yaml` (`brake_max 200000`, `speed_max 10000`): switch them to the new
    converter, or mark them sensors/disarmed only?
-6. Per-side steering gains and radian limits in the converter (section 8): OK?
+6. Per-side steering TABLE in the converter, limit 0.28 rad both sides, left clip 0.11 (section 8, T3 22 Nov): OK?
 7. VESC Tool timeout 250 ms + timeout brake current 5 A (section 9), set together with you: OK?
 
-## 8. Steering: per-side gains and radian limits (added 21 Nov, Moatasem)
+## 8. Steering: per-side table (added 21 Nov as per-side gains, table since T3 22 Nov, Moatasem)
 
 T2 (19 Nov, stand) shows the steering is **asymmetric in servo units, not at the wheels**:
 
@@ -132,23 +132,34 @@ The wheels reach nearly the same angle on both sides; the servo needs ~47 % more
 (servo horn off-centre on the spline + linkage geometry). One symmetric gain cannot be right on both
 sides. Today's -0.50 makes every steering command about half of what the wheels really do.
 
+**Update 22 Nov (T3 ground circles, results doc):** on the ground the per-side relation is **not linear**, so the
+proposal is now a **per-side steering table** instead of per-side gains. Measured (bicycle angle at the rear axle,
+0.3 m/s): left servo 0.178 -> +11.7 deg, 0.108 -> +16.1 deg, 0.100 -> +15.3 deg (the left stop is reached at ~0.11);
+right 0.526 -> -8.1 deg, 0.664 -> -16.3 deg, 0.680 -> -16.6 deg. Minimum radius ~0.90 m left / ~0.87 m right,
+maximum real angle **~0.28 rad on both sides** (less than T2 on the stand). Right understeers ~20 % near the
+centre compared with T2.
+
 Proposal for the converter (replaces `servo_offset + servo_gain * steer`):
 
 ```
-steer = clamp(steer, -limit_right, +limit_left)        # radians, before the gain
-servo = offset + (gain_left if steer > 0 else gain_right) * steer
-servo = clamp(servo, 0.10, 0.68)                       # T2 driving clip, never past it
+steer = clamp(steer, -0.28, +0.28)                       # radians: the table's end angles
+servo = interpolate(table_left if steer > 0 else table_right, steer)   # piecewise linear
+servo = clamp(servo, 0.10, 0.68)                         # T2 driving clip, never past it
+table_left  = (0, 0.335) (0.2042, 0.178) (0.28, 0.11)    # left clip 0.11 (stop reached)
+table_right = (0, 0.335) (-0.1414, 0.526) (-0.28, 0.660)
 ```
 
-- `gain_left -0.874`, `gain_right -1.062`: T2 per-side fit, **to be confirmed by T3** (ground circles,
-  `t3_analyze.py` "ground gain" per side). The test converter `t1b_stop_converter.py` already has these
-  two parameters (T3 only).
-- `limit_left 0.27`, `limit_right 0.325` rad: the first angle that reaches each clip
-  (0.235 / 0.874 = 0.269, 0.345 / 1.062 = 0.325). They are the real per-side steering limits a planner or
-  controller should know; `vesc_to_odom` needs the same per-side inverse for its yaw rate.
+- The tables are already in the test converter `t1b_stop_converter.py` (parameters `steer_table_left` /
+  `steer_table_right`, flat `[delta, servo, ...]`, must start at `(0, servo_offset)`; per-side gains stay the
+  default when they are empty) with `config/real_car/t1b_converter_t3_table.yaml`. TEST-ONLY until you agree.
+- 0.28 rad is the real steering limit a planner or controller should know (both sides); `vesc_to_odom` needs the
+  inverse table for its yaw rate.
+- No ground points between 0 and 8 deg yet (linear from the centre there); re-measure after the play fix.
+- History: the 21 Nov version proposed per-side gains -0.874 / -1.062 with radian limits 0.27 / 0.325 (stand
+  T2); T3 replaced it.
 - Re-mounting the horn one spline tooth would make the servo more symmetric, but it is **optional** and
   only worth doing together with the steering-play fix, because either one needs a T2 redo. The per-side
-  gains work with the horn as it is.
+  table works with the horn as it is.
 
 ## 9. VESC firmware timeout (added 21 Nov, Moatasem)
 
