@@ -1,9 +1,44 @@
-# Real-car tests: session handoff (2026-11-19)
+# Real-car tests: session handoff (updated 2026-11-22, end of day)
 
 For Moatasem and for the next Claude Code session. Read this, then
 [REAL_CAR_BASELINE_2026-11-14.md](REAL_CAR_BASELINE_2026-11-14.md) (standard values) and
 [REAL_CAR_TEST_RESULTS.md](REAL_CAR_TEST_RESULTS.md) (every measured result). Code:
 `tools/real_car_tests/` (README there). Numbers: `config/real_car/vehicle_params.yaml` only.
+
+**Status 22 Nov (end of day; battery dead, no more driving):**
+- **Done 22 Nov:**
+  - **VESC firmware timeout 300 ms + timeout brake current 5 A** (was default / 0 A), verified on the stand
+    `20261122_150252`: brake onset 0.29 s, -2.44 A. A dead converter / frozen Jetson / lost USB now brakes
+    after ~0.3 s instead of coasting after ~1 s. Still not an emergency stop.
+  - **T3 COMPLETE** (hall, 0.3 m/s, low-visibility mode T3 only; results doc "T3 ground circles"): minimum radius
+    **~0.87 m right / ~0.90 m left**, maximum real angle **~0.28 rad** both sides, **right understeers ~20 % near
+    the centre** vs T2, left stop reached at ~0.11, slip <= 2.3 deg (supports vy = 0), IMU +y = base +y.
+  - **Steering table implemented** (`cf0134f`): per-side piecewise-linear table in the t1b converter
+    (`config/real_car/t1b_converter_t3_table.yaml`, limit 0.28 rad, left clip 0.11), accepted by the runner for
+    `t3_circle` / `t4_straight`, `steer_mode` in the `m` line, "delta table" in `t3_analyze.py`. **NOT yet
+    checked on the ground.**
+  - Also: LiDAR self-mask (XT60 leads) + 270 deg field of view (blind rear unknown), `local_env.sh` for Wi-Fi
+    SSH, T5 analysis tools, VESC timeout check tool.
+- **Next session, in order** (all Moatasem's runs):
+  1. **T5a**: 15 min static IMU recording (IMU-only launch + `ros2 bag record`), then
+     `t5_imu_analyze.py static` (bias, R, Allan, drift, frozen check). Commands: README "VESC timeout check and
+     T5"; the 21 Nov chat gave the exact lines.
+  2. **T5b**: stand, 0.5 m/s for 90 s (`run_test.py --test t5b_stand_imu --speed 0.5 --live`, T1b stack with
+     `vesc_t1b_erpm4630.yaml`), then `t5_imu_analyze.py stand`.
+  3. **Steering-table ground check**: `t3_circle --steer -0.18` and `--steer +0.18` at 0.3 m/s with
+     `converter_params_file:=.../t1b_converter_t3_table.yaml` (stack as `T3_HALL_CHECKLIST.md` section 3, with
+     `t3_low_visibility:=true` in the hall). Expect **R ~1.43 m; pass 1.29-1.57 m** (+/-10 %) on both sides
+     (`t3_analyze.py`, "delta table" column). Clear disk 4.42 m.
+  4. Optional: `--steer +/-0.09` (R ~2.88 m, pass 2.59-3.17) **only in a larger space: it needs an 8.0 m clear
+     disk** (does not fit a 5 x 5 m hall).
+- **Open for Zaid** (section 4a, converter proposal):
+  - left-wheel play and the left stop at ~0.11 (0.100 gives less angle than 0.108);
+  - toe ~8 deg (difference at the first centre reading);
+  - F-18 BMI160 freeze + exit on start-up motion (`IMU_DRIVER_PROPOSAL_F18.md`);
+  - IMU mount: **pitch pi** (x back, y left, z down) + ~9 deg tilt, derived from T3 + T4, to be confirmed and
+    the TF fixed (the test launch publishes roll pi);
+  - the permanent converter proposal (`PERMANENT_STOP_CONVERTER_PROPOSAL.md`: 7 decisions, steering table
+    section 8, VESC timeout section 9).
 
 **Status 19 Nov (end of session):**
 - **T1 COMPLETE** (16 Nov, stand): brake 5 A, 23 steady stops at 0.5 / 1.0 / 1.5 m/s, 0 failing.
@@ -15,7 +50,7 @@ For Moatasem and for the next Claude Code session. Read this, then
   PROVISIONAL baseline** (tile; was 0.320; re-measure after the play fix); gain candidate ~8700 **withdrawn 21 Nov**
   (8414 kept: cruise-only 8280-8480); F-18 IMU freeze guarded in the runner and preflight.
 - **21 Nov:** F-18 second cause (IMU node exits on start-up motion; guard message added, driver proposal for Zaid). Phase F: shadow EKF **C1** (VESC de-weighted while braking / below 2000 ERPM + RF2O vx fallback) recommended offline and **validated live at 0.5 m/s straight** (total +0.029 m vs LiDAR, RF2O never stale). Gain 8414 kept. T4 tile at the default 0.330: heading -8.0 deg, non-monotonic vs 0.340 / 0.358 even within one start spot -> **steering play is the top blocker**. Then T4 at 0.335 (spot B -0.9 deg/m, mean heading -0.9 deg, C1 live +0.017 m): **steering centre 0.335 PROVISIONAL** (applied in vehicle_params + both real-car node yamls; clips unchanged, right steering 0.07 rad in the 0.27-0.37 yamls). IMU x axis points backward + ~10 deg tilt (for Zaid).
-- **Next:** a second, fully restarted T4 session at 0.335 (3 counted runs, spot B: session-to-session variation); then section 4, step 2 (play fix, then centre) stays the top blocker. Steering findings for Zaid: section 4a.
+- **Next (21 Nov plan, still open):** a second, fully restarted T4 session at 0.335 (3 counted runs, spot B: session-to-session variation); then section 4, step 2 (play fix, then centre) stays the top blocker. Steering findings for Zaid: section 4a.
 
 ## 1. Safety rules and standing approvals (Moatasem)
 
@@ -26,7 +61,8 @@ For Moatasem and for the next Claude Code session. Read this, then
 | Mux | Never change mux gates, thresholds or interlocks. Caps change only through the per-test launch args (`max_speed_mps`, `max_steer_rad`) and the per-step `vesc_yaml`. No new publishers or subscribers on `/drive` or `/commands/*` (the bag never records them; the mux counts subscribers). |
 | One stack | `preflight.sh clean` before every launch, `preflight.sh stack` (or `stack t1b`) before every runner. |
 | Speeds | 0.5 -> 1.0 -> 1.5 m/s, one step only after the previous passed (runner `step_gate`, unchanged). Ground runs: LiDAR range ahead must fit ramp + 1 m + stop + 0.5 m (runner checks). |
-| Git | Claude may commit **its own files by name** without asking, author `Moatasem <motasemfaousju04@gmail.com>` passed per commit with `git -c user.name=... -c user.email=...` (the Jetson's git config is Zaid's: never change it). **Never push.** Never `git add -A`. Never stash/reset/commit teammates' files. |
+| Git | Claude may commit **its own files by name** without asking, author `Moatasem <motasemfaousju04@gmail.com>` passed per commit with `git -c user.name=... -c user.email=...` (the Jetson's git config is Zaid's: never change it). **Push only when Moatasem asks in that session** (22 Nov:
+fast-forward to `origin/moatasem/real-car-tests`, never force). Never `git add -A`. Never stash/reset/commit teammates' files. |
 | Allowed without asking | Self-tests, `analyze.py`, offline replays (only when no car stack is running). |
 | Reporting | After each test: pass/fail, 3-5 numbers, the next exact commands, each terminal's command on its own. |
 | Sim repo | `~/f1tenth_uj_sim` (branch `moatasem/ekf-experiments`, at `9c581af`): read-only, `git pull` allowed, no commits. |
