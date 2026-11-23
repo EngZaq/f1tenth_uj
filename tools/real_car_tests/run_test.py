@@ -102,6 +102,7 @@ PROFILES = {
         note='Teleop (hall-loop mapping): hold w/SPACE straight, a left, d right; release = brake 5 A. Until q.'),
 }
 TELEOP_KEYS = {'space': 0, 'w': 0, 'a': 1, 'd': -1}   # drive key -> steering direction (+ = left)
+TELEOP_LOWVIS_MAX_SPEED = 0.3                          # m/s: teleop with a lowered mux visibility threshold
 TELEOP_STEER_RATE = 0.7                                # rad/s: 0 -> 0.28 in 0.4 s, and back on key change
 STEP_TOL = 1e-6
 SPEED_MAX_ROUNDING = 5.0  # ERPM: yaml values are rounded (4630 for 4627.7)
@@ -471,13 +472,26 @@ def timeout_verified(root):
     return False, 'VESC timeout NOT verified (%s)' % ('; '.join(seen[:3]) or 'no analysed vesc_timeout_check run')
 
 
-def lowvis_gate(test, status, timeout_ok):
-    """Mux low-visibility mode (manual_allow_reduced_visibility, launch t3_low_visibility:=true) is for T3 ONLY
-    and only with the VESC timeout verified (Moatasem 22 Nov). -> (active, refusal or None)."""
-    if not (status or {}).get('manual_low_visibility_enabled'):
+def lowvis_gate(test, status, timeout_ok, speed=None, t3_min=0.35):
+    """Mux low-visibility mode (manual_allow_reduced_visibility), only with the VESC timeout verified. T3 (Moatasem
+    22 Nov, launch t3_low_visibility:=true) with a threshold >= t3_min; teleop (23 Nov corridor, launch
+    manual_min_front_valid:=<f>) only at --speed <= TELEOP_LOWVIS_MAX_SPEED. Every other profile refuses.
+    -> (active, refusal or None)."""
+    st = status or {}
+    if not st.get('manual_low_visibility_enabled'):
         return False, None
-    if test != 't3_circle':
-        return True, ('mux low-visibility mode is T3 ONLY: relaunch without t3_low_visibility for %s' % test)
+    frac = float(st.get('manual_min_front_valid_fraction') or 0.0)
+    if test == 'teleop':
+        if speed is None or speed > TELEOP_LOWVIS_MAX_SPEED + 1e-9:
+            return True, ('mux low-visibility mode (MANUAL front >= %.2f): teleop only at --speed <= %.1f'
+                          % (frac, TELEOP_LOWVIS_MAX_SPEED))
+    elif test == 't3_circle':
+        if frac < t3_min - 1e-9:
+            return True, ('mux MANUAL front threshold %.2f < %.2f: T3 keeps its value (relaunch with '
+                          't3_low_visibility:=true, without manual_min_front_valid)' % (frac, t3_min))
+    else:
+        return True, ('mux low-visibility mode is for T3 and teleop <= %.1f m/s ONLY: relaunch without '
+                      't3_low_visibility / manual_min_front_valid for %s' % (TELEOP_LOWVIS_MAX_SPEED, test))
     if not timeout_ok:
         return True, 'mux low-visibility mode needs the verified VESC timeout (vesc_timeout_check PASS)'
     return True, None
@@ -1493,7 +1507,14 @@ def self_test():
     assert sd_.events[-1]['detail'].startswith('CIRCLE_LOW_VISIBILITY(0.44 < 0.80'), sd_.events[-1]
     lvst = dict(manual_low_visibility_enabled=True, manual_min_front_valid_fraction=0.35)
     assert lowvis_gate('t3_circle', lvst, True) == (True, None)
-    assert 'T3 ONLY' in lowvis_gate('t4_straight', lvst, True)[1] and 'T3 ONLY' in lowvis_gate('t1b_stop', lvst, True)[1]
+    assert 'T3 and teleop' in lowvis_gate('t4_straight', lvst, True)[1] and lowvis_gate('t1b_stop', lvst, True)[1]
+    lv10 = dict(manual_low_visibility_enabled=True, manual_min_front_valid_fraction=0.10)   # 23 Nov corridor teleop
+    assert lowvis_gate('teleop', lv10, True, 0.3) == (True, None)
+    assert '<= 0.3' in lowvis_gate('teleop', lv10, True, 0.5)[1]
+    assert 'VESC timeout' in lowvis_gate('teleop', lv10, False, 0.3)[1]
+    assert 'T3 keeps' in lowvis_gate('t3_circle', lv10, True, 0.3)[1]
+    assert 'T3 and teleop' in lowvis_gate('t5b_stand_imu', lv10, True, 0.5)[1]
+    assert lowvis_gate('teleop', dict(manual_low_visibility_enabled=False), False, 0.5) == (False, None)
     assert 'VESC timeout' in lowvis_gate('t3_circle', lvst, False)[1]
     assert lowvis_gate('t4_straight', dict(manual_low_visibility_enabled=False), False) == (False, None)
     a3l = Machine(resolve_profile('t3_circle', 0.5, None, p, 'right'), p, live=False, ground_ok=True)
@@ -2466,11 +2487,20 @@ def drive_session(args, p, prof, r, node):
     if node.status is None:
         raise SystemExit('No /control/status in 3 s: start the test stack first.')
     st = dict(node.status)
-    lowvis, why_lv = lowvis_gate(args.test, st, bool((prof.get('vesc_timeout') or {}).get('verified')))
+    t_ok = (prof.get('vesc_timeout') or {}).get('verified')
+    if t_ok is None and prof.get('teleop'):
+        t_ok = timeout_verified(args.out_root or vp.evidence_root())[0]
+    lowvis, why_lv = lowvis_gate(args.test, st, bool(t_ok), prof['speed'],
+                                 float(vp.get(p, 't3.low_visibility_manual_min_front_valid')))
     if why_lv:
         raise SystemExit(why_lv)
     prof['mux_low_visibility'] = lowvis
-    if lowvis:
+    if lowvis and prof.get('teleop'):
+        say('!' * 72 + '\nLOW-VISIBILITY TELEOP: mux MANUAL front >= %.2f (standard 0.75), --speed %.2f (max %.1f).\n'
+            'Kept: mux 0.80 m obstacle stop (needs a finite return), release = brake 5 A, caps, IMU / VESC checks.\n'
+            'The LiDAR sees little ahead: spotter ahead of the car, hand on the battery disconnect.\n' % (
+                float(st.get('manual_min_front_valid_fraction', 0)), prof['speed'], TELEOP_LOWVIS_MAX_SPEED) + '!' * 72)
+    elif lowvis:
         say('LOW-VISIBILITY MODE ACTIVE (mux MANUAL front >= %.2f; T3 only; AUTO and the 0.80 m obstacle gate '
             'unchanged). Conditions: clear disk on, look behind the car before every n, spotter outside the disk, '
             '0.3 m/s first for every command.' % float(st.get('manual_min_front_valid_fraction', 0)))

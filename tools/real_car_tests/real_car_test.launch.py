@@ -17,6 +17,7 @@ No explorer, lap watcher, joystick or trial adapter. Exactly one converter: an u
 
   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=false
 """
+import math
 import os
 import sys
 
@@ -49,15 +50,27 @@ def converter_cmd(script, method, brake_a, hold_s, params_file=''):
     return cmd
 
 
-def mux_visibility_params(flag, p):
+def mux_visibility_params(flag, p, manual='0.75'):
     """Mux MANUAL visibility parameters. t3_low_visibility:=true (T3 ONLY, Moatasem 22 Nov) turns on Zaid's
-    manual-only reduced-visibility option with t3.low_visibility_manual_min_front_valid; otherwise the standard
-    0.75. AUTO (0.90) and the 0.80 m obstacle gate are not touched. -> ['-p', ..., '-p', ...]"""
+    manual-only reduced-visibility option with t3.low_visibility_manual_min_front_valid. manual_min_front_valid:=<f>
+    (23 Nov, corridor teleop; run_test.py allows a lowered value for teleop at <= 0.3 m/s only) sets the MANUAL
+    threshold directly, 0.10..0.75; below 0.75 it turns the reduced-visibility option on. Default 0.75 = standard.
+    Not both. AUTO (0.90) and the 0.80 m obstacle gate are not touched. -> ['-p', ..., '-p', ...]"""
     flag = str(flag).strip().lower()
     if flag not in ('true', 'false'):
         raise RuntimeError('t3_low_visibility must be true or false, got %r' % flag)
+    try:
+        m = float(str(manual).strip())
+    except ValueError:
+        raise RuntimeError('manual_min_front_valid must be a number, got %r' % manual)
+    if not (math.isfinite(m) and 0.10 - 1e-9 <= m <= 0.75 + 1e-9):
+        raise RuntimeError('manual_min_front_valid %r outside 0.10..0.75' % manual)
+    if flag == 'true' and m < 0.75 - 1e-9:
+        raise RuntimeError('use t3_low_visibility:=true OR manual_min_front_valid:=<f>, not both')
     if flag == 'false':
-        return ['-p', 'manual_allow_reduced_visibility:=false', '-p', 'manual_min_front_valid:=0.75']
+        if m >= 0.75 - 1e-9:
+            return ['-p', 'manual_allow_reduced_visibility:=false', '-p', 'manual_min_front_valid:=0.75']
+        return ['-p', 'manual_allow_reduced_visibility:=true', '-p', 'manual_min_front_valid:=%.2f' % m]
     frac = float(vp.get(p, 't3.low_visibility_manual_min_front_valid'))
     if not 0.35 <= frac < 0.75:
         raise RuntimeError('t3.low_visibility_manual_min_front_valid %.2f outside 0.35..0.75' % frac)
@@ -81,6 +94,15 @@ def self_test():
                                                  '-p', 'manual_min_front_valid:=0.75']
     assert mux_visibility_params('True', p) == ['-p', 'manual_allow_reduced_visibility:=true',
                                                 '-p', 'manual_min_front_valid:=0.35']
+    assert mux_visibility_params('false', p, '0.10') == ['-p', 'manual_allow_reduced_visibility:=true',
+                                                         '-p', 'manual_min_front_valid:=0.10']
+    assert mux_visibility_params('false', p, '0.75')[1] == 'manual_allow_reduced_visibility:=false'
+    for bad_m, flag_ in (('0.05', 'false'), ('0.9', 'false'), ('nan', 'false'), ('x', 'false'), ('0.10', 'true')):
+        try:
+            mux_visibility_params(flag_, p, bad_m)
+            raise AssertionError('manual_min_front_valid %r (t3 %s) accepted' % (bad_m, flag_))
+        except RuntimeError:
+            pass
     for bad in ('yes', '', '1'):
         try:
             mux_visibility_params(bad, p)
@@ -88,7 +110,8 @@ def self_test():
         except RuntimeError:
             pass
     print('PASS: t1b converter command line, with and without the test params file; missing file refused.')
-    print('      Mux visibility: standard 0.75, t3_low_visibility:=true -> reduced 0.35 (vehicle_params), bad flag refused.')
+    print('      Mux visibility: standard 0.75, t3_low_visibility:=true -> reduced 0.35 (vehicle_params), bad flag refused;')
+    print('      manual_min_front_valid:=0.10 -> reduced 0.10, outside 0.10..0.75 / with t3_low_visibility refused.')
     print('      No ROS node started; nothing published.')
 
 
@@ -175,7 +198,8 @@ def generate_launch_description():
     t1b_converter = OpaqueFunction(function=t1b_converter_actions)
 
     def mux_actions(context):
-        vis = mux_visibility_params(LaunchConfiguration('t3_low_visibility').perform(context), p)
+        vis = mux_visibility_params(LaunchConfiguration('t3_low_visibility').perform(context), p,
+                                    LaunchConfiguration('manual_min_front_valid').perform(context))
         acts = [ExecuteProcess(
             cmd=['python3', '-u', os.path.join(bringup, 'python_nodes', 'physical_drive_mux.py'),
                  '--ros-args',
@@ -185,8 +209,9 @@ def generate_launch_description():
                  '-p', 'max_steer_rad:=%s' % max_steer.perform(context)],
             output='screen')]
         if 'manual_allow_reduced_visibility:=true' in vis:
-            acts.insert(0, LogInfo(msg='T3 LOW-VISIBILITY MODE: mux MANUAL front threshold %s (AUTO and the 0.80 m '
-                                       'obstacle gate unchanged). T3 only; spotter + look behind the car.' % vis[-1]))
+            acts.insert(0, LogInfo(msg='LOW-VISIBILITY MODE: mux MANUAL front threshold %s (AUTO and the 0.80 m '
+                                       'obstacle gate unchanged). Runner: T3 (t3_low_visibility) or teleop <= 0.3 m/s '
+                                       'only; spotter.' % vis[-1]))
         return acts
     mux = OpaqueFunction(function=mux_actions)
 
@@ -207,10 +232,13 @@ def generate_launch_description():
                               description='converter:=t1b, stop_method:=brake: amps, (0, 10].'),
         DeclareLaunchArgument('brake_hold_s', default_value='2.0',
                               description='converter:=t1b, stop_method:=brake: seconds, (0, 5].'),
+        DeclareLaunchArgument('manual_min_front_valid', default_value='0.75',
+                              description='Mux MANUAL front valid fraction 0.10..0.75; below 0.75 = reduced-'
+                                          'visibility mode (runner: teleop <= 0.3 m/s only).'),
         DeclareLaunchArgument('t3_low_visibility', default_value='false',
                               description='T3 ONLY (Moatasem 22 Nov): Zaid\'s manual-only reduced-visibility mux option '
                                           'with t3.low_visibility_manual_min_front_valid; AUTO and the obstacle gate '
-                                          'unchanged. The runner refuses every other test with it.'),
+                                          'unchanged. The runner allows it only for T3 and teleop <= 0.3 m/s.'),
         DeclareLaunchArgument('converter_params_file', default_value='',
                               description='converter:=t1b only: TEST-ONLY params yaml for t1b_stop_converter '
                                           '(e.g. config/real_car/t1b_converter_t4_offset0358.yaml). Empty = none.'),

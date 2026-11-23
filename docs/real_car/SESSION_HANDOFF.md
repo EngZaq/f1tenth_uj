@@ -30,6 +30,14 @@ For Moatasem and for the next Claude Code session. Read this, then
   used: not in the repo (not reviewable from here), a GUI over SSH, F-13 latch unresolved. PS4: not used (the joy node would be a second `/joy`
   publisher next to the runner; the runner refuses that).
 
+**23 Nov at the car: corridor teleop blocked by the mux front-visibility gate** (front valid fraction 0.175 < 0.75,
+`FRONT_UNKNOWN`, nearest 2.25 m: the far end is out of range). Approved by Moatasem: mux reduced-visibility floor
+0.35 -> 0.10 (`0eae65f`, own commit for Zaid's review), launch argument `manual_min_front_valid` (default 0.75;
+below 0.75 it turns the reduced-visibility option on), runner: a lowered threshold only for `teleop` at
+`--speed <= 0.3` (banner), T3 keeps >= 0.35, every other profile refuses. Kept: 0.80 m obstacle stop (needs a finite
+return), release = brake 5 A, caps, IMU / VESC checks, VESC timeout verified. Jetson: `git pull` then
+`colcon build --packages-select f1tenth_bringup` (the launch runs the installed mux copy).
+
 **Next car session, in order (all Moatasem's runs; every terminal: ROS + `install/setup.bash` sourced, domain 42,
 `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh` over Wi-Fi):**
 1. **Update:** `cd ~/f1tenth_uj && git pull --ff-only origin moatasem/real-car-tests` (Python tools only, no
