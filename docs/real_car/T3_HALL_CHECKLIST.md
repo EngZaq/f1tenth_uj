@@ -15,7 +15,8 @@ Software stops cover:
 
 A frozen Jetson or a dead converter is stopped only by the VESC's own timeout: today ~1 s, then coasting
 (24 Oct). Decision: **timeout ~250 ms + timeout brake current 5 A**, coordinated with Zaid. **Configured 22 Nov:
-300 ms + 5 A** (previous: timeout unknown / default, brake current 0)
+250 ms + 5 A** (reported as 300 ms on 22 Nov; VESC Tool reads 250 ms on 23 Nov) (previous: timeout unknown /
+default, brake current 0)
 (converter proposal section 9).
 
 1. [x] **Read and note (change nothing yet):** done 22 Nov (results doc).
@@ -27,16 +28,16 @@ A frozen Jetson or a dead converter is stopped only by the VESC's own timeout: t
 2. [ ] ~~**Before-check on the stand**~~ no longer possible (values already changed); the 24 Oct ~1 s release is the
    "before" reference. (Recommended: proves the method.) Do it with the current values,
    using the stand commands below. Expected result: `FAIL: timeout onset ~1.0 s ... released / coasting`.
-3. [x] **Set** `timeout_msec` = 250 (set: **300**) and `timeout_brake_current` = 5.0, then Write App Configuration.
+3. [x] **Set** `timeout_msec` = 250 (set: **250**; reported as 300 on 22 Nov, read back 250 on 23 Nov) and `timeout_brake_current` = 5.0, then Write App Configuration.
    Re-read both values and note them.
 4. [x] **Stand check, after the change** (**PASSED 22 Nov** `20261122_150252_vesc_timeout_check_v0.50_brake5A_erpmmax4630_armed`: onset 0.29 s, -2.44 A,
    < 300 ERPM in 0.33 s; the T3 fallback is lifted) (car on the stand, wheels free; same commands). Expected result:
-   `PASS: timeout onset ~0.30-0.34 s ..., BRAKED` (300 ms setting; the limit is 0.40 s).
+   `PASS: timeout onset ~0.25-0.29 s ..., BRAKED` (250 ms setting; the limit is 0.40 s; measured 0.29 s).
    This `timeout_check.json` lifts the T3 fallback rules automatically.
 5. [ ] **Optional USB check** (the frozen-Jetson case; no telemetry):
    - relaunch the stack and start the runner again;
    - during steady, pull the VESC USB cable;
-   - the wheels must stop within ~0.3 s instead of running on ~1 s (a phone slow-motion video is the
+   - the wheels must stop within ~0.25-0.3 s instead of running on ~1 s (a phone slow-motion video is the
      record);
    - plug the cable back in, check that `ls /dev/serial/by-id/` shows the ChibiOS port again, then relaunch.
 

@@ -15,15 +15,15 @@ screenshots are optional.
 | 3 | PID Controllers, Speed | `s_pid_kp`, `s_pid_ki`, `s_pid_kd`, `s_pid_kd_filter` | | `speed 0` is a speed-PID setpoint. High gain plus a lost observer at low ERPM can overshoot through 0 |
 | 4 | PID Controllers, Speed | `s_pid_min_erpm` | | Below this the speed loop does not regulate; how a 0 ERPM request is handled near it |
 | 5 | PID Controllers, Speed | `s_pid_allow_braking` | | Whether the speed loop may brake to reach 0, or only drive |
-| 6 | PID Controllers, Speed | `s_pid_ramp_erpms_s` | | Setpoint ramp; 12 Nov needed 0.555 s to reach 0.24 m/s |
-| 7 | FOC, Sensorless | `foc_openloop_rpm`, `foc_openloop_rpm_low`, `foc_openloop_hyst`, `foc_openloop_time` | | Open-loop region at low speed can drive the rotor with no feedback: a candidate for the rise 0.16-0.27 s after zero |
+| 6 | PID Controllers, Speed | `s_pid_ramp_erpms_s` | **23 Nov: 25000 ERPM/s (= 2.97 m/s^2 at 8414 ERPM per m/s)** | Setpoint ramp; 12 Nov needed 0.555 s to reach 0.24 m/s |
+| 7 | FOC, Sensorless | `foc_openloop_rpm`, `foc_openloop_rpm_low`, `foc_openloop_hyst`, `foc_openloop_time` | **23 Nov: open loop below 1400 ERPM (0.166 m/s)** | Open-loop region at low speed can drive the rotor with no feedback: a candidate for the rise 0.16-0.27 s after zero |
 | 8 | FOC, Sensorless | `foc_observer_gain`, observer type `foc_observer_type` | | Observer lock while slowing down |
 | 9 | FOC, Sensorless (hybrid only) | `foc_sl_erpm` | | Sensorless ERPM threshold, if a hybrid mode is set |
 | 10 | BLDC (only if BLDC) | `sl_min_erpm`, `sl_min_erpm_cycle_int_limit` | | BLDC sensorless minimum ERPM |
-| 11 | Motor Settings, Current | `l_current_max`, `l_current_min` (motor brake), `l_in_current_max`, `l_in_current_min` (battery regen), `l_abs_current_max` | | Braking/regen limits; 12 Nov rebound drew +18 A phase current |
+| 11 | Motor Settings, Current | `l_current_max`, `l_current_min` (motor brake), `l_in_current_max`, `l_in_current_min` (battery regen), `l_abs_current_max` | **23 Nov: brake / regen limit -15 A (`l_current_min`; Zaid's 5 Nov notes: -60 A)**; others: XML | Braking/regen limits; 12 Nov rebound drew +18 A phase current |
 | 12 | Motor Settings, RPM | `l_max_erpm`, `l_min_erpm`, `l_erpm_start` | | Firmware ERPM limits (the ROS clip was 3500; the rebound peaked at 3911) |
-| 13 | Motor Settings, Voltage | `l_battery_cut_start`, `l_battery_cut_end`, battery cell count | | The battery read 11.1 V on 14 Nov after a power loss: check the cut-off is not active |
-| 14 | App Settings, General | app to use (`app_to_use`), `timeout_msec`, `timeout_brake_current` | **22 Nov (Moatasem): `timeout_msec` 300 (was unknown / default), `timeout_brake_current` 5.0 A (was 0)**; `app_to_use` not reported | What the VESC does when commands stop; the earlier stand test saw a ~1 s release |
+| 13 | Motor Settings, Voltage | `l_battery_cut_start`, `l_battery_cut_end`, battery cell count | **23 Nov: `l_battery_cut_end` 9.6 V (3S: 3.2 V per cell)**; start: XML | The battery read 11.1 V on 14 Nov after a power loss: check the cut-off is not active |
+| 14 | App Settings, General | app to use (`app_to_use`), `timeout_msec`, `timeout_brake_current` | **22 Nov (Moatasem): `timeout_msec` 250 (reported as 300 on 22 Nov; VESC Tool reads 250 on 23 Nov; was unknown / default), `timeout_brake_current` 5.0 A (was 0)**; `app_to_use` not reported | What the VESC does when commands stop; the earlier stand test saw a ~1 s release |
 | 15 | App Settings, General | `can_mode` / controller ID | | Confirms a single controller |
 
 ## Hypothesis being tested (baseline C-7)

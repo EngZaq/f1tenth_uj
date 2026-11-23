@@ -6,7 +6,8 @@ Not an emergency stop: the battery disconnect / kill switch stays in the operato
 
 Contents (each actuator topic has exactly one publisher and one subscriber):
   observe_only.launch.py (LiDAR, RF2O odom->base_link, SLAM map->odom, base_link->laser; VESC off)
-  f1tenth_imu imu.launch.py (BMI160 -> /imu/data_raw) + static base_link->imu_link (PROVISIONAL)
+  f1tenth_imu imu.launch.py (BMI160 -> /imu/data_raw) + static base_link->imu_link (24 Nov: pitch pi + measured
+  tilt, from vehicle_params.yaml; position PROVISIONAL)
   vesc_driver        <- vesc_yaml (speed_max per speed step; one file per step)
   vesc_to_odom       -> /odom_vesc_observe, publish_tf false
   ackermann_to_vesc  <- /drive, config/real_car/ackermann_to_vesc_real.yaml (offset 0.335 provisional, gain -0.50)

@@ -38,11 +38,14 @@ imu:                            # base_link -> imu_link
   x_m: 0.091
   y_m: 0.057
   z_m: 0.046
-  roll_rad: 3.141592653589793   # mounted upside down. 21 Nov (T4 bags): forward accel reads on IMU -x, so x points
-                                # BACKWARD (pitch pi or roll pi + yaw pi, not roll pi), and the mount is tilted ~9-10 deg
-                                # (still specific force 1.6-1.8 / -0.5 / -10.0 m/s^2). gz sign (base = -gz) unaffected.
-                                # NOT changed: decide with Zaid; y sign needs a turn (T3). Results doc, Phase F.
-  pitch_rad: 0.0
+  # 23 Nov eve: rotation = the real mount, pitch pi (x back, y left, z down: T4 21 Nov x backward, T3 22 Nov IMU +y = base
+  # +y) + the tilt from the still specific force after the 23 Nov re-tape (1.54, -0.50, -10.05 m/s^2): up = (0.1513,
+  # -0.0491, -0.9873) in the IMU frame -> pitch = pi + asin(0.1513) = pi + 8.70 deg, roll = atan2(-0.0491 / cos p,
+  # -0.9873 / cos p) = 2.85 deg, total tilt 9.15 deg; yaw 0 (not observable from gravity; x back from T4). Was roll pi
+  # (flipped y). Position unchanged until re-measured (status stays PROVISIONAL). The shadow EKF inputs do not use this
+  # TF: they project the gyro on the session's own still gravity (ekf_shadow_inputs YAW_MODE tilt).
+  roll_rad: 0.0497
+  pitch_rad: 3.2935
   yaw_rad: 0.0
   gyro_z_bias_dps: null         # T5. Bench value -0.067 deg/s was the ESP32 board, not the car (baseline C-6)
   gyro_z_scale: null            # T5. Bench value 1.009, ESP32 board (baseline C-6)
@@ -106,6 +109,21 @@ runner:                             # tools/real_car_tests/run_test.py
   min_post_stop_zero_s: 1.0         # zero is sent at least this long after every stop
   arm_timeout_s: 1.5                # MANUAL_READY must arrive within this
 
+ps4:                                # run_test.py --test teleop_ps4 (23 Nov eve): PS4 controller on the JETSON (Bluetooth or
+                                    # USB), joy_node remapped to /ps4/joy; the runner stays the only /joy publisher.
+                                    # Indices = joy_node (SDL joystick) / joy_linux kernel order for a DS4: 0 cross,
+                                    # 1 circle, 2 triangle, 3 square, 4 L1, 5 R1, 6 L2, 7 R2, 8 share, 9 options, 10 PS.
+                                    # The runner's controller check confirms the deadman before anything can arm.
+  topic: /ps4/joy
+  deadman_button: 5                 # R1 held = drive (same index as the mux /joy button 5 convention)
+  kill_buttons: [0, 1, 3]           # cross, circle, square: KILL while armed / driving (latched until arm)
+  arm_button: 9                     # options = n (arm), deadman released
+  placement_button: 2               # triangle = m (placement readout, idle); while armed it is a KILL like any key
+  msg_ttl_s: 0.20                   # /ps4/joy older than this = deadman released (= mux JOY_TTL)
+  check_max_gap_s: 0.10             # controller check: joy_node must publish at >= ~20 Hz (autorepeat_rate 50)
+  steer_deadzone: 0.10              # stick |x| below this = straight; above, scaled to 0..1 x teleop steer max
+  check_timeout_s: 30.0             # each controller-check step
+
 t2:                                 # servo sweep rules (Moatasem, 14 Nov; two servos already burned)
   approved_servo_min: 0.10          # 19 Nov (was 0.22-0.455): Oct teleop clip 0.1-0.6 no binding +
   approved_servo_max: 0.60          # 18 Nov wheels free at 0.15/0.55 (REAL_CAR_TEST_RESULTS.md); = launch ceiling
@@ -159,12 +177,13 @@ t3:                                 # T3 constant-steering circles on the ground
   time_slack_s: 3.0                 # hard time limit = ramp + target_turns x 2 pi x R_max / v + this
 
 vesc_timeout_check:                 # vesc_timeout_check.py (stand, converter killed during 0.5 m/s), design 21 Nov
-  timeout_ms_target: 300            # VESC Tool App Settings > General: timeout_msec. CONFIGURED 22 Nov (Moatasem; planned
-                                    #   250); previous value unknown / default (24 Oct stand: release ~1 s). VERIFIED 22 Nov 20261122_150252:
-                                    #   PASS onset 0.29 s, braked -2.44 A, < 300 ERPM in 0.33 s
+  timeout_ms_target: 250            # VESC Tool App Settings > General: timeout_msec. CONFIGURED 22 Nov (Moatasem); reported
+                                    #   as 300 then, VESC Tool reads 250 (23 Nov) = the planned value; previous value unknown /
+                                    #   default (24 Oct stand: release ~1 s). VERIFIED 22 Nov 20261122_150252: PASS onset 0.29 s
+                                    #   (= 250 ms + telemetry / converter ticks), braked -2.44 A, < 300 ERPM in 0.33 s
   brake_current_target_a: 5.0       #   timeout_brake_current. CONFIGURED 22 Nov (was 0 A = release, coasting)
   onset_max_s: 0.40                 # PASS: drive current gone <= this after the converter's last message
-                                    #   (300 ms + telemetry 20 ms + converter tick 20 ms = 0.34 s, + 60 ms margin)
+                                    #   (250 ms + telemetry 20 ms + converter tick 20 ms = 0.29 s, + 110 ms margin)
   brake_current_min_a: 1.5          # PASS: current_motor reaches <= -this right after the onset. Stand T1b 14 Nov:
                                     #   brake 5 A -> -2.3..-3.7 A in the first 40 ms; release (current 0) -> 0.00 A
   converter_gap_min_s: 1.0          # VALID only if the converter really stopped (no status for >= this) while in DRIVE

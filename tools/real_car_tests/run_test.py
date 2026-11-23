@@ -101,6 +101,14 @@ PROFILES = {
         teleop=True, teleop_max_s=300.0,
         note='Teleop (hall-loop mapping): hold w/SPACE straight, a left, d right; release = brake 5 A. Until q.'),
 }
+# Teleop with a PS4 controller on the Jetson (23 Nov eve, after the day's Wi-Fi SSH key stalls): same chain + limits as
+# 'teleop'; the deadman is R1 on /ps4/joy (joy_node on the Jetson, no network in the loop), steering = left stick
+# (proportional, same 0.7 rad/s rate, +/-0.28 rad table limit). The keyboard keeps n / m / s / q, and every key
+# (SPACE too) is a KILL while armed.
+PROFILES['teleop_ps4'] = dict(
+    PROFILES['teleop'], ps4=True,
+    note='Teleop with the PS4 controller on the Jetson: hold R1 = drive, left stick = steer, options = arm, '
+         'cross/circle/square = KILL; release R1 = brake 5 A. Until q (keyboard).')
 TELEOP_KEYS = {'space': 0, 'w': 0, 'a': 1, 'd': -1}   # drive key -> steering direction (+ = left)
 TELEOP_LOWVIS_MAX_SPEED = 0.3                          # m/s: teleop with a lowered mux visibility threshold
 TELEOP_STEER_RATE = 0.7                                # rad/s: 0 -> 0.28 in 0.4 s, and back on key change
@@ -115,7 +123,7 @@ BAG_TOPICS = [
     '/scan', '/odom_rf2o', '/odom_vesc_observe', '/imu/data_raw', '/sensors/core',
     '/sensors/servo_position_command', '/control/status',
     '/manual/drive', '/joy', '/control/request_mode', '/tf', '/tf_static',
-    '/t1b_stop_converter/status',
+    '/t1b_stop_converter/status', '/ps4/joy',
 ]
 PROTECTED_TOPICS = ('/drive', '/drive_calibrated')
 PROTECTED_PREFIXES = ('/commands/',)
@@ -197,6 +205,137 @@ class Deadman:
             return False
         limit = self.repeat_s if self.count >= 2 else self.first_s
         return now - self.last < limit
+
+
+class Ps4Pad:
+    """PS4 controller input from /ps4/joy (joy_node on the Jetson). Thread-safe; time is injected (testable).
+    held(): deadman button pressed in a message younger than msg_ttl_s. Keys come from rising edges only (a button
+    already down in the first message never arms or kills): arm -> 'n', placement -> 'm', kill -> 'PS4_KILL'.
+    Steering: the stick axis learned by the controller check, sign so that LEFT = +1, deadzone, clipped to +/-1."""
+
+    def __init__(self, cfg):
+        self.dead = int(cfg['deadman_button'])
+        self.keymap = {int(cfg['arm_button']): 'n', int(cfg['placement_button']): 'm'}
+        self.keymap.update({int(b): 'PS4_KILL' for b in cfg['kill_buttons']})
+        self.ttl, self.dz = float(cfg['msg_ttl_s']), float(cfg['steer_deadzone'])
+        self.need = max([self.dead] + list(self.keymap)) + 1
+        self.axis, self.sign = None, 1.0
+        self.buttons = self.axes = self.at = None
+        self.pending, self.log, self.gaps = [], [], []
+        self.lock = threading.Lock()
+
+    def update(self, now, buttons, axes, wall=None):
+        b, a = [int(x) for x in buttons], [float(x) for x in axes]
+        with self.lock:
+            if self.at is not None:
+                self.gaps.append(now - self.at)
+            prev, self.buttons, self.axes, self.at = self.buttons, b, a, now
+            if prev is None:
+                return
+            for i, (was, isnow) in enumerate(zip(prev, b)):
+                if isnow and not was:
+                    if i in self.keymap:
+                        self.pending.append(self.keymap[i])
+                    self.log.append((wall or time.time(), now, 'press %d' % i))
+                elif was and not isnow:
+                    self.log.append((wall or time.time(), now, 'release %d' % i))
+
+    def problem(self, now):
+        with self.lock:
+            if self.at is None or now - self.at >= self.ttl:
+                return 'PS4_STALE(%s)' % ('no /ps4/joy' if self.at is None else '%.2f s' % (now - self.at))
+            if len(self.buttons) < self.need:
+                return 'PS4_TOO_FEW_BUTTONS(%d < %d)' % (len(self.buttons), self.need)
+        return None
+
+    def held(self, now):
+        if self.problem(now):
+            return False
+        with self.lock:
+            return self.buttons[self.dead] == 1
+
+    def steer_frac(self):
+        with self.lock:
+            if self.axis is None or self.axes is None or self.axis >= len(self.axes):
+                return 0.0
+            x = self.sign * self.axes[self.axis]
+        if abs(x) < self.dz:
+            return 0.0
+        return max(-1.0, min(1.0, math.copysign((abs(x) - self.dz) / (1.0 - self.dz), x)))
+
+    def get_key(self):
+        with self.lock:
+            return self.pending.pop(0) if self.pending else None
+
+    def snapshot(self):
+        with self.lock:
+            return (None if self.buttons is None else list(self.buttons),
+                    None if self.axes is None else list(self.axes), self.at)
+
+
+def ps4_controller_check(pad, cfg, clock, sleep, say):
+    """Before anything can arm (23 Nov eve): (1) /ps4/joy arrives often enough (max gap over 1 s <= check_max_gap_s);
+    (2) sticks centred, then the LEFT stick pushed fully LEFT: the axis that moves >= 0.8 from rest (triggers, which
+    rest at +/-1, are ignored) becomes the steering axis, sign so that left = +; (3) the deadman button pressed and
+    released (confirms its index). SystemExit with the fix on any failure. -> dict for run_info.json."""
+    timeout, max_gap = float(cfg['check_timeout_s']), float(cfg['check_max_gap_s'])
+
+    def wait(pred, what):
+        t_end = clock() + timeout
+        while clock() < t_end:
+            r = pred()
+            if r:
+                return r
+            sleep(0.02)
+        raise SystemExit('PS4 check: %s not seen within %.0f s' % (what, timeout))
+    say('PS4 check 1/3: hands off the controller (sticks centred, no button) for 1.5 s ...')
+    wait(lambda: pad.snapshot()[2] is not None, '/ps4/joy (start joy_node: see SESSION_HANDOFF)')
+    sleep(1.5)
+    with pad.lock:
+        recent = pad.gaps[-60:]
+    gap = max(recent) if recent else float('inf')
+    if not recent or gap > max_gap:
+        raise SystemExit('PS4 check: /ps4/joy max gap %.3f s > %.2f s: start joy_node with -p autorepeat_rate:=50.0'
+                         % (gap, max_gap))
+    prob = pad.problem(clock())
+    if prob:
+        raise SystemExit('PS4 check: %s' % prob)
+    buttons, rest, _ = pad.snapshot()
+    if any(buttons):
+        raise SystemExit('PS4 check: button(s) %s pressed at rest: release everything and start again'
+                         % [i for i, x in enumerate(buttons) if x])
+    say('PS4 check 2/3: push the LEFT stick fully to the LEFT and hold it ...')
+
+    def moved():
+        axes = pad.snapshot()[1]
+        cand = [(abs(a - r), i, a - r) for i, (a, r) in enumerate(zip(axes, rest)) if abs(r) < 0.5]
+        best = max(cand) if cand else (0.0, None, 0.0)
+        return best if best[0] >= 0.8 else None
+    _, axis, delta = wait(moved, 'a stick axis moving >= 0.8')
+    pad.axis, pad.sign = axis, (1.0 if delta > 0 else -1.0)
+    say('PS4: steering = axis %d (%s); now let the stick go back to the centre.' % (
+        axis, 'left = +' if delta > 0 else 'inverted: left = -, sign flipped'))
+    wait(lambda: abs(pad.snapshot()[1][axis] - rest[axis]) < 0.2, 'the stick back at the centre')
+    say('PS4 check 3/3: press and release the DEADMAN (R1, button %d) once ...' % pad.dead)
+    seen = set()
+
+    def pressed():
+        b = pad.snapshot()[0]
+        seen.update(i for i, x in enumerate(b) if x and i != pad.dead)
+        return b[pad.dead] == 1
+    try:
+        wait(pressed, 'button %d' % pad.dead)
+    except SystemExit:
+        raise SystemExit('PS4 check: deadman button %d never pressed (buttons seen: %s): set ps4.deadman_button in '
+                         'vehicle_params.yaml to the R1 index from `ros2 topic echo /ps4/joy`'
+                         % (pad.dead, sorted(seen)))
+    wait(lambda: pad.snapshot()[0][pad.dead] == 0, 'the deadman released')
+    with pad.lock:
+        pad.pending.clear()                    # nothing pressed during the check arms or kills later
+    say('PS4 check PASSED: deadman button %d, steering axis %d sign %+d, max gap %.3f s.' % (
+        pad.dead, axis, int(pad.sign), gap))
+    return dict(deadman_button=pad.dead, steer_axis=axis, steer_sign=pad.sign, max_gap_s=gap,
+                n_buttons=len(buttons), n_axes=len(rest), other_buttons_seen=sorted(seen))
 
 
 def ramp_speed(target, elapsed, accel):
@@ -481,7 +620,7 @@ def lowvis_gate(test, status, timeout_ok, speed=None, t3_min=0.35):
     if not st.get('manual_low_visibility_enabled'):
         return False, None
     frac = float(st.get('manual_min_front_valid_fraction') or 0.0)
-    if test == 'teleop':
+    if test in ('teleop', 'teleop_ps4'):
         if speed is None or speed > TELEOP_LOWVIS_MAX_SPEED + 1e-9:
             return True, ('mux low-visibility mode (MANUAL front >= %.2f): teleop only at --speed <= %.1f'
                           % (frac, TELEOP_LOWVIS_MAX_SPEED))
@@ -600,6 +739,7 @@ class Machine:
         # Kept: SPACE-release brake, converter brake, caps, IMU freeze refusal, VESC status, geofence.
         self.fast = bool(prof.get('fast'))
         self.teleop = bool(prof.get('teleop'))
+        self.ps4 = bool(prof.get('ps4'))           # teleop_ps4: the deadman is R1 on the controller, arm = options
         self.steer_now, self.steer_t = 0.0, None
         self.hands_off_s = float(prof.get('hands_off_s', HANDS_OFF_S))
         # brake_at_range (T4): drive until the brake point; the time limit is set per repeat.
@@ -644,6 +784,8 @@ class Machine:
             return w['graph_fault']
         if w.get('keyboard_lost'):
             return 'KEYBOARD_LOST'
+        if w.get('ps4_problem'):
+            return w['ps4_problem']        # teleop_ps4: controller stale / disconnected -> zero, arm refused
         if self.live and w.get('telemetry_age', 1e9) > 0.5:
             return 'VESC_TELEMETRY_STALE'
         if w.get('vesc_fault'):
@@ -815,6 +957,8 @@ class Machine:
             out = (0.0, 0.0, 0, 'STOP')
         self.log(now, 'KILL', 'key %r in %s' % (key, was))
         self.message = KILL_BANNER
+        if self.ps4:
+            self.message = KILL_BANNER.replace('release SPACE and press n', 'release R1 and press options (or n)')
         return out or (0.0, 0.0, 0, None)
 
     def step(self, now, key, held, w):
@@ -843,7 +987,7 @@ class Machine:
             elif key == 'n':
                 reason = self.fault(w)
                 if reason is None and held:
-                    reason = 'RELEASE_SPACE_FIRST'
+                    reason = 'RELEASE_DEADMAN_FIRST(R1)' if self.ps4 else 'RELEASE_SPACE_FIRST'
                 if reason is None and w.get('imu_problem'):
                     reason = w['imu_problem']   # arm only; a freeze while driving is logged, not a stop
                 if reason is None and self.ground:
@@ -883,7 +1027,7 @@ class Machine:
                 return 0.0, 0.0, 0, 'STOP'
             if mode == 'MANUAL_READY' and st.get('last_mode_request') == 'MANUAL':
                 self.state = 'READY'
-                self.log(now, 'MANUAL_READY', 'hold SPACE to drive')
+                self.log(now, 'MANUAL_READY', 'hold %s to drive' % ('R1' if self.ps4 else 'SPACE'))
             elif now - self.t_arm > self.arm_timeout:
                 self.state = 'IDLE'
                 self.log(now, 'ARM_REFUSED', 'MANUAL_READY_TIMEOUT(mode=%s,result=%s)' % (
@@ -1013,7 +1157,9 @@ class Machine:
                 self.message = '%s | Repeat %d/%d: release SPACE, press n to arm.' % (
                     detail, self.repeat + 1, self.prof['repeats'])
             if self.killed:
-                self.message = '%s | %s' % (KILL_BANNER, self.message)
+                self.message = '%s | %s' % (KILL_BANNER.replace('release SPACE and press n', 'release R1 and press '
+                                                                'options (or n)') if self.ps4 else KILL_BANNER,
+                                            self.message)
             return 0.0, 0.0, 0, 'STOP'
         return 0.0, 0.0, 0, None
 
@@ -1149,6 +1295,117 @@ def self_test_23nov(p, world):
     print('      checked; unreachable / missing named), auto-live, zstd bag command, --fast (no disk / visibility')
     print('      refusal, IMU / VESC / SPACE kept, hands-off 0.5 s), drive keys, teleop (no brake point, smooth')
     print('      steering 0.7 rad/s to +/-0.28, release = zero, KILL, segments until q, table / cap / clip pre-check).')
+
+
+def self_test_23nov_eve(p, world):
+    """23 Nov eve: PS4 teleop (Ps4Pad, controller check, teleop_ps4 Machine, low-visibility rule, keyboard KILL)."""
+    cfg = vp.get(p, 'ps4')
+    assert cfg['deadman_button'] == 5 and cfg['arm_button'] == 9 and 1 in cfg['kill_buttons']
+    B = 13                                         # DS4 under joy_node: 13 buttons (8 axes in rest)
+
+    def btn(*idx):
+        return [1 if i in idx else 0 for i in range(B)]
+    rest = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]   # triggers L2 / R2 rest at +1
+    pad = Ps4Pad(cfg)
+    assert pad.problem(0.0).startswith('PS4_STALE') and not pad.held(0.0)
+    pad.update(0.00, btn(5, 9), rest)              # first message with R1 + options down: no key from it
+    assert pad.get_key() is None and pad.held(0.05) and not pad.held(0.21)   # TTL 0.2 s
+    assert pad.problem(0.25).startswith('PS4_STALE')
+    pad.update(0.02, btn(), rest)
+    pad.update(0.04, btn(9), rest)                 # options rising edge = n
+    pad.update(0.06, btn(9, 1), rest)              # circle = KILL
+    pad.update(0.08, btn(2), rest)                 # triangle = m
+    assert [pad.get_key() for _ in range(4)] == ['n', 'PS4_KILL', 'm', None]
+    pad.update(0.10, [0] * 4, rest)
+    assert pad.problem(0.11).startswith('PS4_TOO_FEW_BUTTONS') and not pad.held(0.11)
+    pad.axis, pad.sign = 0, 1.0
+    for x, want in ((0.05, 0.0), (-0.05, 0.0), (1.0, 1.0), (-1.0, -1.0), (0.55, 0.5), (1.3, 1.0)):
+        pad.update(0.12, btn(5), [x] + rest[1:])
+        assert abs(pad.steer_frac() - want) < 1e-9, (x, pad.steer_frac())
+    pad.sign = -1.0
+    assert abs(pad.steer_frac() + 1.0) < 1e-9
+    # controller check on a scripted controller (fake clock): rest 2 s, stick LEFT on axis 0 reads -1 (inverted
+    # driver) from 3 s, centre at 4 s, R1 5..5.3 s
+    clk = [0.0]
+
+    def script(t):
+        ax = list(rest)
+        if 3.0 <= t < 4.0:
+            ax[0] = -1.0
+        return (btn(5) if 5.0 <= t < 5.3 else btn()), ax
+
+    def make(gap=0.02, script_=script):
+        pad_ = Ps4Pad(cfg)
+        nxt = [0.0]
+
+        def sleep(dt):
+            t_end = clk[0] + dt
+            while nxt[0] <= t_end:
+                clk[0] = nxt[0]
+                pad_.update(clk[0], *script_(clk[0]))
+                nxt[0] += gap
+            clk[0] = t_end
+        return pad_, sleep
+    clk[0] = 0.0
+    pad2, sl = make()
+    info = ps4_controller_check(pad2, cfg, lambda: clk[0], sl, lambda s_: None)
+    assert info['steer_axis'] == 0 and info['steer_sign'] == -1.0 and info['deadman_button'] == 5, info
+    assert pad2.get_key() is None
+    for gap, script_, why in ((0.15, script, 'max gap'),
+                              (0.02, lambda t: (btn(5), rest), 'pressed at rest'),
+                              (0.02, lambda t: (btn(4) if t > 5 else btn(), [-1.0 if 3 <= t < 4 else 0.0] + rest[1:]),
+                               'deadman button 5 never pressed (buttons seen: [4])')):
+        clk[0] = 0.0
+        pad3, sl3 = make(gap, script_)
+        try:
+            ps4_controller_check(pad3, dict(cfg, check_timeout_s=8.0), lambda: clk[0], sl3, lambda s_: None)
+            raise AssertionError(why)
+        except SystemExit as exc:
+            assert why in str(exc), (why, exc)
+    # teleop_ps4 Machine: arm from the pad, proportional steering, stale controller = zero, PS4 KILL
+    tp = resolve_profile('teleop_ps4', 0.3, None, p)
+    assert tp['ps4'] and tp['teleop'] and tp['converter'] == 't1b_stop_converter'
+    tm = Machine(tp, p, live=False, ground_ok=True)
+    gst = dict(mode='STOP', last_mode_request='MANUAL')
+
+    def tg(mode='STOP', frac=0.0, prob=None):
+        return world(front_m=2.0, sector_min_m=1.2, scan_age=0.05, left_m=1.0, right_m=1.0,
+                     st=dict(gst, mode=mode), drive_dir=frac, ps4_problem=prob)
+    tm.step(0.0, 'n', False, tg(prob='PS4_STALE(0.30 s)'))
+    assert tm.state == 'IDLE' and tm.events[-1]['detail'].startswith('PS4_STALE'), tm.events[-1]
+    tm.step(0.05, 'n', True, tg())
+    assert tm.events[-1]['detail'] == 'RELEASE_DEADMAN_FIRST(R1)'   # R1 held at arm: refused
+    assert tm.step(0.1, 'n', False, tg())[3] == 'MANUAL'
+    tm.step(0.15, None, False, tg('MANUAL_READY'))
+    tm.step(0.2, None, True, tg('MANUAL_READY'))
+    assert tm.state == 'DRIVING'
+    t_ = 0.2
+    for _ in range(50):
+        t_ += 0.02
+        out = tm.step(t_, None, True, tg('MANUAL_ACTIVE', frac=0.5))
+    assert abs(out[1] - 0.14) < 1e-9 and abs(out[0] - 0.3) < 1e-9, out   # half stick = 0.14 rad, speed cap 0.3
+    out = tm.step(t_ + 0.02, None, True, tg('MANUAL_ACTIVE', prob='PS4_STALE(0.21 s)'))
+    assert out[:3] == (0.0, 0.0, 0) and tm.events[-1]['detail'].startswith('PS4_STALE'), tm.events[-1]
+    tk = Machine(tp, p, live=False, ground_ok=True)
+    tk.step(0.0, 'n', False, tg())
+    tk.step(0.05, None, False, tg('MANUAL_READY'))
+    tk.step(0.1, None, True, tg('MANUAL_READY'))
+    out = tk.step(0.12, 'PS4_KILL', True, tg('MANUAL_ACTIVE'))
+    assert out[:3] == (0.0, 0.0, 0) and tk.killed and 'PS4_KILL' in tk.events[-2]['detail'], tk.events[-2:]
+    assert 'release R1 and press options' in tk.message and 'hold R1' in tk.events[1]['detail'], tk.message
+    # keyboard in teleop_ps4: no drive key (SPACE is a pending key = KILL while armed)
+
+    class KS:
+        drive_keys, drive_key = {}, None
+    assert not drive_key_event(Deadman(0.7, 0.25), KS(), 'space', 0.0)
+    lv10 = dict(manual_low_visibility_enabled=True, manual_min_front_valid_fraction=0.10)
+    assert lowvis_gate('teleop_ps4', lv10, True, 0.3) == (True, None)
+    assert '<= 0.3' in lowvis_gate('teleop_ps4', lv10, True, 0.5)[1]
+    assert '/ps4/joy' in BAG_TOPICS and not is_protected('/ps4/joy')
+    print('PASS: 23 Nov eve: PS4 pad (rising edges only, first message never arms, TTL 0.2 s, too few buttons,')
+    print('      deadzone / sign / clip), controller check (axis + sign learned, triggers ignored; slow joy_node,')
+    print('      button at rest, wrong deadman index refused), teleop_ps4 (stale pad refuses arm / zeroes, R1 held')
+    print('      at arm refused, half stick = 0.14 rad, PS4 KILL), keyboard SPACE = KILL, low-visibility <= 0.3 m/s.')
 
 
 def self_test():
@@ -1867,6 +2124,7 @@ def self_test():
     assert mi.step(0.1, 'n', False, world())[3] == 'MANUAL' and mi.state == 'ARMING'   # healthy -> arms
     print('PASS: IMU watch: healthy / frozen / stale / too few samples / node not running; arm refused on IMU_FROZEN.')
     self_test_23nov(p, world)
+    self_test_23nov_eve(p, world)
     print('PASS: deadman timing, ramp, speed-fit length, front range, config = vehicle_params,')
     print('      arm handshake, zero on stale status / deadman release / mux leaving MANUAL,')
     print('      refusals (real flag, extra publisher, SPACE held, ground gates), wall stop,')
@@ -2098,7 +2356,8 @@ class Keyboard:
         self.old = termios.tcgetattr(self.fd)
         tty.setcbreak(self.fd)
         self.deadman = deadman
-        self.drive_keys = drive_keys or {'space': 0}
+        # None: SPACE is the deadman; {} (teleop_ps4): no drive key, the controller is the deadman and SPACE kills.
+        self.drive_keys = {'space': 0} if drive_keys is None else drive_keys
         self.drive_key = None
         self.lock = threading.Lock()
         self.pending = []
@@ -2243,6 +2502,10 @@ def run(args):
             self.conv = self.conv_at = None
             if prof.get('converter') == 't1b_stop_converter':
                 self.create_subscription(String, '/t1b_stop_converter/status', self.on_conv, 10)
+            self.pad = None
+            if prof.get('ps4'):
+                self.pad = Ps4Pad(vp.get(p, 'ps4'))
+                self.create_subscription(Joy, vp.get(p, 'ps4.topic'), self.on_ps4, qos_profile_sensor_data)
             self.create_subscription(Imu, '/imu/data_raw', self.on_imu, qos_profile_sensor_data)
             if prof.get('circle'):
                 self.create_subscription(Odometry, '/odom_rf2o', self.on_rf2o, qos_profile_sensor_data)
@@ -2287,6 +2550,9 @@ def run(args):
                 self.rf2o = (msg.pose.pose.position.x, msg.pose.pose.position.y, yaw)
                 self.rf2o_at = time.monotonic()
 
+        def on_ps4(self, msg):
+            self.pad.update(time.monotonic(), msg.buttons, msg.axes)
+
         def on_core(self, msg):
             with self.lock:
                 self.tele = dict(erpm=msg.state.speed, current=msg.state.current_motor,
@@ -2313,6 +2579,10 @@ def run(args):
                 n = len(self.get_publishers_info_by_topic(t))
                 if n != 1:
                     return 'EXTRA_PUBLISHER(%s=%d)' % (t, n)
+            if self.pad is not None:
+                n = len(self.get_publishers_info_by_topic(vp.get(p, 'ps4.topic')))
+                if n != 1:
+                    return 'PS4_JOY_PUBLISHERS(%s=%d, need exactly 1 joy_node)' % (vp.get(p, 'ps4.topic'), n)
             for t in FORBIDDEN_PUBLISHED:
                 pubs = [i.node_name for i in self.get_publishers_info_by_topic(t)]
                 # T1b only: the t1b converter, alone, may publish brake and current.
@@ -2365,6 +2635,30 @@ def run(args):
     # which stops the spin thread before rclpy shuts down.
     with RosSession(RunnerNode) as node:
         drive_session(args, p, prof, r, node)
+
+
+def ps4_precheck(node, cfg):
+    """teleop_ps4 refusals before the run folder exists: exactly one /ps4/joy publisher (joy_node, remapped), the
+    runner alone on /joy (graph_fault), joy_node sticky_buttons false (a toggling deadman would never release),
+    then the interactive controller check (ps4_controller_check). -> dict for run_info.json."""
+    topic = cfg['topic']
+    pubs = node.get_publishers_info_by_topic(topic)
+    if len(pubs) != 1:
+        raise SystemExit('teleop_ps4: %d publishers on %s (need exactly 1): on the Jetson run `ros2 run joy joy_node '
+                         '--ros-args -r joy:=%s -p autorepeat_rate:=50.0 -p sticky_buttons:=false`'
+                         % (len(pubs), topic, topic))
+    jn = (pubs[0].node_namespace.rstrip('/') + '/' + pubs[0].node_name).lstrip('/')
+    jp = node.get_params(jn, ['sticky_buttons', 'autorepeat_rate', 'deadzone'])
+    if jp.get('sticky_buttons') is not False:
+        raise SystemExit('teleop_ps4: %s sticky_buttons = %s (must be false: a sticky deadman never releases)'
+                         % (jn, jp.get('sticky_buttons')))
+    joy_pubs = [i.node_name for i in node.get_publishers_info_by_topic('/joy')]
+    if joy_pubs != ['real_car_test_runner']:
+        raise SystemExit('teleop_ps4: /joy publishers %s: only this runner may publish /joy (joy_node must be '
+                         'remapped to %s)' % (joy_pubs, topic))
+    info = ps4_controller_check(node.pad, cfg, time.monotonic, time.sleep, say)
+    info.update(joy_node=jn, joy_params=jp, topic=topic)
+    return info
 
 
 def converter_steering(converter_params, base_off):
@@ -2549,6 +2843,9 @@ def drive_session(args, p, prof, r, node):
         say('TELEOP: steer +/-%.2f rad -> servo %.3f (left) / %.3f (right), table mode, vesc clip %s'
             % (teleop_info['steer_max_rad'], teleop_info['servo_left'], teleop_info['servo_right'],
                teleop_info['vesc_servo_clip']))
+    ps4_info = None
+    if prof.get('ps4'):
+        ps4_info = ps4_precheck(node, vp.get(p, 'ps4'))
     if prof.get('stop_method') and method != prof['stop_method']:
         raise SystemExit('%s needs stop method %s, the converter runs %s (launch converter:=t1b '
                          'stop_method:=brake brake_current_a:=5.0)' % (args.test, prof['stop_method'], method))
@@ -2601,7 +2898,7 @@ def drive_session(args, p, prof, r, node):
                             capture_output=True, text=True).stdout.strip()
     info = dict(test=args.test, profile=prof, live=args.live, fast=bool(args.fast), started=stamp, git_commit=commit,
                 stop_method=method, converter=prof['converter'], converter_params=converter_params,
-                step_gate=gate, teleop=teleop_info,
+                step_gate=gate, teleop=teleop_info, ps4=ps4_info,
                 mux_status_at_start=st, mux_max_speed_mps=cap, mux_max_steer_rad=steer_cap,
                 vesc_speed_max_erpm=speed_max, publish_hz=r['publish_hz'], circle=circle_info,
                 ramp_accel_mps2=r['ramp_accel_mps2'], vehicle_params=p, bag_topics=BAG_TOPICS)
@@ -2617,8 +2914,9 @@ def drive_session(args, p, prof, r, node):
             float(r['publish_hz']), float(r['ramp_accel_mps2']), commit))
 
     machine = Machine(prof, p, live=args.live, ground_ok=args.t1_passed_confirmed or args.fast)
+    pad = node.pad
     kb = Keyboard(Deadman(float(r['deadman_first_press_s']), float(r['deadman_repeat_s'])),
-                  TELEOP_KEYS if prof.get('teleop') else None)
+                  {} if pad else TELEOP_KEYS if prof.get('teleop') else None)
     # Audit log only from the vesc_driver of THIS ROS graph (a process on another domain is not ours).
     in_graph = 'vesc_driver' in node.get_node_names()
     audit_pid, t_run0 = (vesc_driver_pid() if in_graph else None), time.time()
@@ -2649,12 +2947,18 @@ def drive_session(args, p, prof, r, node):
             say('Ground: arm only with %.2f..%.2f m free ahead (LiDAR); runner brakes at %.2f m '
                 '(mux gate %.2f m = backstop). m = placement readout.' % (
                     need, top, machine.brake_range(prof['speed']), machine.gate))
-        if machine.teleop:
+        if pad:
+            say('PS4 TELEOP: options = arm (R1 released); HOLD R1 = drive %.2f m/s; left stick = steer (+/-%.2f rad, '
+                '%.1f rad/s); release R1 = brake 5 A; cross / circle / square = KILL (latched until options). '
+                'Laptop keys: n = arm, m = placement, q = finish (idle); while armed EVERY key (SPACE too) = KILL.'
+                % (prof['speed'], abs(prof['steer']), TELEOP_STEER_RATE))
+        elif machine.teleop:
             say('TELEOP keys: n = arm; HOLD w or SPACE = straight, a = left, d = right (%.2f m/s, steer +/-%.2f rad); '
                 'change key by pressing the new one BEFORE releasing the old; release all = brake 5 A; q = finish '
                 '(idle). While armed/driving any other key = KILL.' % (prof['speed'], abs(prof['steer'])))
-        say('Keys: n = arm, hold SPACE = drive, s = skip, q = quit (idle). While armed/driving ANY other '
-            'key = KILL (brake, latched until n). ' + machine.message)
+        if not pad:
+            say('Keys: n = arm, hold SPACE = drive, s = skip, q = quit (idle). While armed/driving ANY other '
+                'key = KILL (brake, latched until n). ' + machine.message)
         last_msg = None
         graph, imu_pubs = None, None
         last_imu = 'unknown'
@@ -2675,12 +2979,16 @@ def drive_session(args, p, prof, r, node):
             w = node.world(now, half_width, imu_pubs)
             w['graph_fault'] = graph
             w['keyboard_lost'] = kb.eof
-            w['drive_dir'] = kb.direction()
+            w['drive_dir'] = pad.steer_frac() if pad else kb.direction()
+            w['ps4_problem'] = pad.problem(now) if pad else None
             if w.get('imu_problem') != last_imu:
                 last_imu = w.get('imu_problem')
                 machine.log(now, 'IMU_STATUS', last_imu or 'OK')
                 say('IMU: %s' % (last_imu or 'OK'))
-            speed, steer, dead, req = machine.step(now, kb.get_key(), kb.held(now), w)
+            key = kb.get_key()
+            if key is None and pad:
+                key = pad.get_key()
+            speed, steer, dead, req = machine.step(now, key, pad.held(now) if pad else kb.held(now), w)
             node.emit(speed, steer, dead)
             intervals.append((time.time(), now - last_pub, speed, dead))
             last_pub = now
@@ -2691,7 +2999,7 @@ def drive_session(args, p, prof, r, node):
                 machine.reset_deadman = False
             if machine.message != last_msg:
                 last_msg = machine.message
-                if machine.message.startswith(KILL_BANNER):
+                if machine.message.startswith('*** KILL ***'):
                     say('\a\n' + '!' * 72)
                 say('[%s] %s | mux %s %s | ERPM %s' % (
                     machine.state, machine.message, (w['status'] or {}).get('mode'),
@@ -2723,7 +3031,7 @@ def drive_session(args, p, prof, r, node):
             audit = 'audit copy failed: %s' % exc
         try:
             write_outputs(out, machine, intervals, kb.log, node.status_log,
-                          dict(vesc_speed_audit=audit, bag_returncode=rc))
+                          dict(vesc_speed_audit=audit, bag_returncode=rc), pad)
         except Exception as exc:  # noqa: BLE001
             say('Writing runner outputs failed: %s' % exc)
         say('VESC audit: %s' % audit)
@@ -2731,7 +3039,7 @@ def drive_session(args, p, prof, r, node):
         say('Results: %s\nNext: python3 %s %s' % (out, Path(__file__).with_name(nxt), out))
 
 
-def write_outputs(out, machine, intervals, keys, status_log, extra):
+def write_outputs(out, machine, intervals, keys, status_log, extra, pad=None):
     with open(out / 'runner_events.csv', 'w', newline='') as fp:
         wr = csv.DictWriter(fp, ['wall', 'mono', 'repeat', 'state', 'event', 'detail'])
         wr.writeheader()
@@ -2752,6 +3060,12 @@ def write_outputs(out, machine, intervals, keys, status_log, extra):
     summary = dict(repeats=machine.repeats,
                    publish_intervals=interval_stats([i[1] for i in intervals[1:]]),
                    space_key_gaps=interval_stats(gaps), **extra)
+    if pad is not None:
+        with open(out / 'ps4_events.csv', 'w', newline='') as fp:
+            wr = csv.writer(fp)
+            wr.writerow(['wall', 'mono', 'event'])
+            wr.writerows(pad.log)
+        summary['ps4_msg_gaps'] = interval_stats(pad.gaps)
     (out / 'runner_summary.json').write_text(json.dumps(summary, indent=2))
 
 

@@ -8,12 +8,13 @@ Test tools for the physical car. Owner: Moatasem. Standard values:
 | File | What it does |
 |---|---|
 | `real_car_test.launch.py` | The one test stack: observe_only (LiDAR, RF2O, SLAM), BMI160 + `base_link -> imu_link`, `vesc_driver` (test yaml), `vesc_to_odom`, one `ackermann_to_vesc` (0.320 / -0.50), mux. **Real VESC: the servo centres as soon as it starts.** |
-| `run_test.py` | Keyboard runner over SSH. Drives only through the mux inputs (`/manual/drive`, `/joy` button 5, `/control/request_mode`) at 50 Hz; records the bag; zero for >= 1 s after every stop. |
+| `run_test.py` | Keyboard runner over SSH (`teleop_ps4`: PS4 controller on the Jetson as the deadman, 23 Nov eve). Drives only through the mux inputs (`/manual/drive`, `/joy` button 5, `/control/request_mode`) at 50 Hz; records the bag; zero for >= 1 s after every stop. |
 | `analyze.py` | Bag -> `summary.json`, CSVs, plots, `## Analysis` in the folder README. |
 | `preflight.sh` | Read-only checks: `clean` before launching, `stack` before the runner. |
 | `params.py` | Loads `vehicle_params.yaml`; checks `config/real_car/*.yaml` agree with it. |
 | `hall_loop_record.sh` | Hand-push hall loop (23 Nov): checks `/scan` / `/imu/data_raw` / `/odom_rf2o` rates (refuses with the fix), records them + `/tf*` + the VESC / converter topics that exist (zstd) to `~/f1tenth_hw_evidence/hall_loop_<stamp>/`. |
 | `hall_loop_map.py` | Offline (laptop): slam_toolbox map from a hall-loop or teleop bag, loop closing off and on, both maps + lap-closure error at the start tape mark. |
+| `ekf_r_nis.py` | Offline (23 Nov eve): measurement R from steady cruise (VESC / RF2O vx) and the NIS of the C1 shadow EKF replay. |
 
 ## Rules
 
@@ -80,6 +81,30 @@ python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py <results folder printed by 
   the obstacle backstop. The runner bag is the hall-loop recording (`hall_loop_map.py <run folder>`).
 - **Hall loop by hand** (fallback): `observe_only.launch.py enable_vesc:=true` + `f1tenth_imu imu.launch.py`
   (observe_only does not start the IMU), then `hall_loop_record.sh`.
+
+## 23 Nov eve: PS4 teleop, IMU tilt, EKF noise check
+
+- **`teleop_ps4`** (`run_test.py --test teleop_ps4 --speed 0.3 --fast`): same stack, limits and checks as `teleop`,
+  but the deadman is **R1 on a PS4 controller connected to the JETSON** (`joy_node` remapped to `/ps4/joy`; no
+  network in the deadman loop). The runner stays the only `/joy` + `/manual/drive` publisher to the mux (a joy_node
+  left on `/joy` is refused: `/joy publishers [...]`). Refusals before the run folder: not exactly one `/ps4/joy`
+  publisher, `sticky_buttons` not false, controller check failed. **Controller check** (each run, 3 steps, 30 s
+  each): hands off 1.5 s (`/ps4/joy` max gap <= 0.10 s: `autorepeat_rate:=50.0`), push the LEFT stick fully left
+  (the axis that moves >= 0.8 from rest becomes the steering axis, sign so that left = +; triggers ignored), press
+  and release R1 (confirms `ps4.deadman_button`). Buttons (`vehicle_params.yaml ps4`): **options = arm**, **hold
+  R1 = drive** at `--speed`, **left stick = steering** (proportional, deadzone 0.10, 0.7 rad/s, +/-0.28 rad table),
+  **release R1 = zero -> mux STOP -> brake 5 A**, **cross / circle / square = KILL** (latched until options),
+  triangle = `m` (idle). Laptop keys: `n` / `m` / `q`; while armed EVERY key (SPACE too) is a KILL. `/ps4/joy`
+  older than 0.20 s (Bluetooth drop) = `PS4_STALE` -> zero, and arming is refused. Bag + `ps4_events.csv` +
+  `ps4_msg_gaps` in `runner_summary.json`. Laptop test 23 Nov eve (real mux + t1b converter, stub VESC, synthetic
+  `/ps4/joy`): release / circle KILL / joy silent 0.21 s / laptop SPACE -> brake 5 A at the stub 30-70 ms later,
+  R1 held at arm refused, joy_node on `/joy` refused.
+- **IMU yaw rate** (`ekf_shadow_inputs.YAW_MODE 'tilt'`): gyro (3-axis bias removed) projected on the still gravity
+  direction; `-gz` alone reads 0.987 x the yaw rate on the 9.2 deg tilted mount. `ekf_shadow_replay.py --yaw gz`
+  replays the old input. `R_IMU_WZ` 1.2e-3 (applied). Test-launch TF `base_link -> imu_link` from
+  `vehicle_params.yaml`: roll 0.0497, pitch 3.2935 (pi + 8.7 deg), yaw 0.
+- **`ekf_r_nis.py`**: `--r <run folders>` measurement noise from steady cruise (VESC vx, RF2O vx, their
+  difference); `--nis <run folders>` C1 replay with the filter covariance -> NIS per input channel.
 
 ## T1: stop behaviour on the stand (F-01)
 

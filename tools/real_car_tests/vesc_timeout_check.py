@@ -91,9 +91,9 @@ def self_test():
             core.append((t + 0.001, e, c))
             t += 0.02
         return status, core
-    r = timeout_metrics(*synth(0.25, True), cfg)
+    r = timeout_metrics(*synth(0.25, True), cfg)                       # the real setting (read 23 Nov): 250 ms
     assert r['pass_'] and 0.24 <= r['onset_delay_s'] <= 0.30 and r['verdict'].startswith('PASS'), r
-    r = timeout_metrics(*synth(0.30, True), cfg)                       # configured 22 Nov: 300 ms + 5 A
+    r = timeout_metrics(*synth(0.30, True), cfg)                       # 300 ms (reported 22 Nov, VESC Tool shows 250)
     assert r['pass_'] and 0.29 <= r['onset_delay_s'] <= 0.34, r
     r = timeout_metrics(*synth(1.0, False), cfg)                       # 24 Oct behaviour: ~1 s, coasting
     assert not r['pass_'] and 0.99 <= r['onset_delay_s'] <= 1.05 and 'coasting' in r['verdict'], r

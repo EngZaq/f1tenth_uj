@@ -9,14 +9,16 @@
 # ~51 ms late -> smooth_lagged_data.
 #   /ekf_shadow/in/vesc     vx = ERPM / speed_to_erpm_gain (vehicle_params: 8414; 8700 withdrawn 21 Nov), vy = 0
 #   /ekf_shadow/in/vesc_dw  same, vx variance x100 while braking (converter STOP_BRAKE) or 0 < |ERPM| < 2000
-#   /ekf_shadow/in/imu      yaw rate -(gz - bias); forward accel = specific force on the IMU -x axis made
+#   /ekf_shadow/in/imu      yaw rate = gyro . still gravity direction (23 Nov eve; tilt 9.2 deg; was -(gz - bias));
+#                           forward accel = specific force on the IMU -x axis made
 #                           perpendicular to the still gravity (IMU x points backward, mount tilted ~9-10 deg)
 #   /ekf_shadow/in/rf2o     /odom_rf2o twist
 # R (inside the messages) = (2 x robust std of sensor - reference)^2, T4 cruise, carpet + tile pooled (sim rule
 # k = 2). Same bags as the evaluation; the LiDAR-slope reference adds ~0.03 m/s, so vx values are upper bounds.
-#   VESC vx 5.0e-3   vy = 0 constraint 4.0e-4 (model: no slip at the rear axle)   IMU vyaw 8.0e-3
+#   VESC vx 5.0e-3   vy = 0 constraint 4.0e-4 (model: no slip at the rear axle)   IMU vyaw 1.2e-3 (23 Nov eve; was 8.0e-3)
 #   IMU forward accel 0.32 (sigma 0.57 m/s^2, motor vibration)   RF2O vx 1.0e-2   RF2O vyaw 1.2e-2
-# Q: template defaults except vx (index 6) = 0.05 and vyaw (index 11) = 0.02. No gates.
+# Q: template defaults except vx (index 6) = 0.05 (template 0.025); vyaw (index 11) 0.02 = template. No gates.
+# Every R / Q with its source and the 23 Nov NIS check: docs/real_car/EKF_R_Q_SOURCES.md.
 #
 # State order for every *_config vector (15 values):
 #   x  y  z | roll pitch yaw | vx vy vz | vroll vpitch vyaw | ax ay az

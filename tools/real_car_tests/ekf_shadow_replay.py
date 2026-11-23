@@ -27,6 +27,7 @@ Writes ekf_shadow_replay.json into each run folder; prints a per-variant summary
                         (23 Nov) T3 circles: EKF vs RF2O in turns, each in its own start frame (pose at the
                         command): heading change, path length and end-position error over drive + brake hold.
                         --r-imu-wz overrides ekf_shadow_inputs.R_IMU_WZ (gyro yaw-rate variance) for this replay.
+                        --yaw gz|tilt: IMU yaw-rate input (23 Nov eve default tilt; gz = the 21-23 Nov -gz).
   ekf_shadow_replay.py --self-test
 """
 import argparse
@@ -166,6 +167,11 @@ def self_test():
 
 # ---------------------------------------------------------------- bag -> inputs -> EKF
 
+def gyro_of(m):
+    g = m.angular_velocity
+    return (g.x, g.y, g.z)
+
+
 def stamp(m):
     return m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
 
@@ -210,7 +216,7 @@ def build_inputs(data, w0, w1, cal, gain, out_dir):
     for t, m in data['/imu/data_raw']:
         if w0 <= t <= w1:
             a = m.linear_acceleration
-            msgs.append((t, inp.TOPICS['imu'], inp.imu_msg(m.header.stamp, m.angular_velocity.z, (a.x, a.y, a.z), cal)))
+            msgs.append((t, inp.TOPICS['imu'], inp.imu_msg(m.header.stamp, gyro_of(m), (a.x, a.y, a.z), cal)))
     for t, m in data['/odom_rf2o']:
         if w0 <= t <= w1:
             msgs.append((t, inp.TOPICS['rf2o'], inp.rf2o_msg(m)))
@@ -432,7 +438,7 @@ def live_check(folder, work, env, gain):
         ref[('vesc_dw', stamp(m))] = inp.vesc_msg(m.header.stamp, m.state.speed, br, gain, True)
     for t, m in data['/imu/data_raw']:
         a = m.linear_acceleration
-        ref[('imu', stamp(m))] = inp.imu_msg(m.header.stamp, m.angular_velocity.z, (a.x, a.y, a.z), cal)
+        ref[('imu', stamp(m))] = inp.imu_msg(m.header.stamp, gyro_of(m), (a.x, a.y, a.z), cal)
     for t, m in data['/odom_rf2o']:
         ref[('rf2o', stamp(m))] = inp.rf2o_msg(m)
     names = {v: k for k, v in inp.TOPICS.items()}
@@ -542,6 +548,8 @@ def main():
                          'LiDAR of a T4 folder (positional; default: latest t4_straight armed folder)')
     ap.add_argument('--circles', action='store_true', help='T3 circle folders: EKF vs RF2O in turns')
     ap.add_argument('--r-imu-wz', type=float, default=None, help='override R_IMU_WZ for this replay')
+    ap.add_argument('--yaw', choices=['tilt', 'gz'], default=None,
+                    help='IMU yaw-rate input: tilt (default, gyro . still gravity) or gz (old -(gz - bias))')
     ap.add_argument('--domain', type=int, default=DOMAIN, help='isolated ROS domain (default %d)' % DOMAIN)
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
@@ -572,6 +580,8 @@ def main():
         return 0
     if args.r_imu_wz is not None:
         inp.R_IMU_WZ = float(args.r_imu_wz)
+    if args.yaw:
+        inp.YAW_MODE = args.yaw
     if args.circles:
         return circles_replay(folders, work, env, gain, args.variants if len(args.variants) < len(VARIANTS)
                               else ['C1'], args.domain)
@@ -685,7 +695,8 @@ def circles_replay(folders, work, env, gain, variants, domain):
     """--circles: T3 repeats through the shadow EKF variants, compared with RF2O (see the module doc)."""
     import csv as _csv
     import analyze as A
-    print('domain %d, gain %.0f, R_IMU_WZ %.2e, variants %s, work %s' % (domain, gain, inp.R_IMU_WZ, variants, work))
+    print('domain %d, gain %.0f, R_IMU_WZ %.2e, yaw %s, variants %s, work %s'
+          % (domain, gain, inp.R_IMU_WZ, inp.YAW_MODE, variants, work))
     rec, rows = Recorder(), []
     try:
         for folder in folders:
@@ -708,7 +719,7 @@ def circles_replay(folders, work, env, gain, variants, domain):
                 if not cal or cal['moving']:
                     print('  %s r%d: car not still before the command, skipped' % (folder.name[:15], i))
                     continue
-                name = '%s_r%d_circ_g%.0f_r%.1e' % (folder.name[:15], i, gain, inp.R_IMU_WZ)
+                name = '%s_r%d_circ_g%.0f_r%.1e_%s' % (folder.name[:15], i, gain, inp.R_IMU_WZ, inp.YAW_MODE)
                 in_bag = work / (name + '_in')
                 if not in_bag.exists():
                     build_inputs(data, tc - BIAS_S - 0.2, tz + hold + 0.3, cal, gain, in_bag)
@@ -727,7 +738,7 @@ def circles_replay(folders, work, env, gain, variants, domain):
                 rows.append(res)
     finally:
         rec.close()
-    tag = 'r%.1e' % inp.R_IMU_WZ
+    tag = 'r%.1e_%s' % (inp.R_IMU_WZ, inp.YAW_MODE)
     if rows:
         (folders[0] / ('ekf_shadow_circles_%s.json' % tag)).write_text(json.dumps(dict(
             gain=gain, yaml=str(YAML), domain=domain, r_imu_wz=inp.R_IMU_WZ, variants=variants, repeats=rows),

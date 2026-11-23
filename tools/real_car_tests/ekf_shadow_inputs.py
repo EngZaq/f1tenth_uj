@@ -12,10 +12,14 @@ Inputs (all already in base_link, so the EKF needs no TF; header stamp = sensor 
            0 < |ERPM| < SENSORLESS_ERPM (T4 bags: below ~2000 ERPM the VESC reads +0.08..+0.12 m/s ahead
            in the start ramp; in braking it drops to 0 while the car still moves 0.2-0.4 m/s).
            Exactly 0 ERPM outside braking stays trusted: it is the standstill (zero-velocity) cue.
-- imu      yaw rate = -(gz - bias) (z axis down); forward accel = specific force projected on the
+- imu      yaw rate = gyro (bias removed) projected on the still gravity direction (= base +z in the IMU frame;
+           23 Nov eve, YAW_MODE 'tilt'): the mount is tilted ~9 deg, so -gz alone reads cos(9.2 deg) = 0.987 of
+           the yaw rate
+           (the 1.2 % C1-vs-RF2O turn deficit in the T3 circles). YAW_MODE 'gz' = the old -(gz - bias).
+           Forward accel = specific force projected on the
            IMU -x axis made perpendicular to the still gravity vector, scaled by 9.80665 / |g_still|
            (21 Nov: IMU x points BACKWARD - forward accel reads negative on +x - and the mount is
-           tilted ~9-10 deg; the static TF says roll pi only). Gravity is removed by the projection.
+           tilted ~9-10 deg; 23 Nov eve TF in vehicle_params: pitch pi + tilt). Gravity is removed by the projection.
 - rf2o     /odom_rf2o twist vx, vyaw (its covariance fields are 0).
 Still calibration (gyro bias + gravity): replay = the 1 s before each drive command; live = at start-up,
 StillCalib.SECONDS of samples with gyro std <= GYRO_STILL_STD; retried with a log line until the car is
@@ -39,7 +43,10 @@ BRAKE_PHASES = ('STOP_BRAKE',)
 G0 = 9.80665
 IMU_FORWARD = (-1.0, 0.0, 0.0)   # IMU axis that points forward (measured 21 Nov, T4 ramps and brakes)
 # Variances inside the messages; source and method: config/real_car/ekf_real_shadow.yaml header.
-R_VESC_VX, R_VY, R_IMU_WZ, R_RF_VX, R_RF_WZ, R_AX = 5.0e-3, 4.0e-4, 8.0e-3, 1.0e-2, 1.2e-2, 0.32
+# R_IMU_WZ 1.2e-3 (23 Nov eve, applied; was 8.0e-3): T3 steady-turn gyro white noise var 4.2e-5 x ~30 for the 100 Hz
+# samples' correlated vibration and the residual scale / bias (results doc "T3 gyro noise in turns").
+R_VESC_VX, R_VY, R_IMU_WZ, R_RF_VX, R_RF_WZ, R_AX = 5.0e-3, 4.0e-4, 1.2e-3, 1.0e-2, 1.2e-2, 0.32
+YAW_MODE = 'tilt'          # 'tilt' (23 Nov eve): gyro . gravity direction; 'gz': -(gz - bias) (21 Nov .. 23 Nov day)
 BIG = 1.0e6
 GYRO_STILL_STD = math.radians(0.5)    # rad/s, same limit as the bmi160 driver's own calibration
 RF2O_STALE_S = 0.2         # = EKF sensor_timeout: older than this, the EKF stops fusing RF2O (C1 -> C0)
@@ -74,7 +81,15 @@ def vesc_vx_variance(erpm, braking, deweight):
 
 
 def yaw_rate(gz, bias):
-    return -(gz - bias)      # IMU z points down
+    return -(gz - bias)      # IMU z points down (YAW_MODE 'gz')
+
+
+def yaw_rate_vec(gyro, cal, mode=None):
+    """Base yaw rate from the 3-axis gyro: (gyro - bias) . up, up = unit still specific force (= base +z in the IMU
+    frame, tilt included). mode 'gz' (or a calibration without 'up'): the old -(gz - bias_gz)."""
+    if (mode or YAW_MODE) == 'gz' or 'up' not in cal:
+        return yaw_rate(gyro[2], cal['bias_gz'])
+    return sum(u * (g - b) for u, g, b in zip(cal['up'], gyro, cal['bias']))
 
 
 class StillCalib:
@@ -103,7 +118,8 @@ class StillCalib:
         dot = sum(f * g for f, g in zip(IMU_FORWARD, gh))
         fwd = [f - dot * g for f, g in zip(IMU_FORWARD, gh)]
         fn = math.sqrt(sum(x * x for x in fwd))
-        return dict(moving=False, bias_gz=statistics.mean(v[2] for v in self.g), gravity=grav, g_norm=n,
+        bias = [statistics.mean(v[i] for v in self.g) for i in range(3)]
+        return dict(moving=False, bias_gz=bias[2], bias=bias, up=gh, gravity=grav, g_norm=n,
                     forward=[x / fn for x in fwd], gyro_std=gstd,
                     tilt_deg=math.degrees(math.asin(min(1.0, abs(dot)))))
 
@@ -172,11 +188,11 @@ def vesc_msg(header_stamp, erpm, braking, gain, deweight):
     return o
 
 
-def imu_msg(header_stamp, gz, accel, cal):
+def imu_msg(header_stamp, gyro, accel, cal):
     from sensor_msgs.msg import Imu
     o = Imu()
     o.header.stamp, o.header.frame_id = header_stamp, 'base_link'
-    o.angular_velocity.z = yaw_rate(gz, cal['bias_gz'])
+    o.angular_velocity.z = yaw_rate_vec(gyro, cal)
     o.angular_velocity_covariance = [BIG, 0.0, 0.0, 0.0, BIG, 0.0, 0.0, 0.0, R_IMU_WZ]
     o.linear_acceleration.x = forward_accel(accel, cal)
     o.linear_acceleration_covariance = [R_AX, 0.0, 0.0, 0.0, BIG, 0.0, 0.0, 0.0, BIG]
@@ -219,6 +235,21 @@ def self_test():
     a = [g + 0.3 * gi / cal['g_norm'] for g, gi in zip((1.8, -0.55, -10.02), (1.8, -0.55, -10.02))]
     assert abs(forward_accel(a, cal)) < 1e-9                                       # vertical bump: no leak
     assert 9.0 < cal['tilt_deg'] < 11.0, cal['tilt_deg']
+    # 23 Nov eve: yaw rate on the tilted mount. Still specific force of 23 Nov (1.54, -0.50, -10.05): a base yaw
+    # rate w seen by the IMU is w * up; -gz alone gives w * 0.987 (the C1 T3 turn deficit), the projection gives w back.
+    c2 = StillCalib()
+    for i in range(200):
+        c2.add((0.001, -0.002, 0.003 + 1e-4 * (i % 2)), (1.54, -0.50, -10.05))
+    cal2 = c2.result()
+    up = cal2['up']
+    w = 0.5
+    gyro = [w * u + b for u, b in zip(up, cal2['bias'])]
+    assert abs(yaw_rate_vec(gyro, cal2) - w) < 1e-9
+    assert abs(yaw_rate_vec(gyro, cal2, 'gz') / w - 0.9871) < 2e-3, yaw_rate_vec(gyro, cal2, 'gz') / w
+    assert abs(yaw_rate_vec(cal2['bias'], cal2)) < 1e-12                         # still: zero
+    gy = [b for b in cal2['bias']]
+    gy[1] += 0.3                                                                   # pure pitch-axis rate leaks
+    assert abs(yaw_rate_vec(gy, cal2)) < 0.3 * 0.05      # only through the 2.8 deg roll
     m = StillCalib()
     for i in range(200):
         m.add((0.0, 0.0, 0.05 * (-1) ** i), (1.8, -0.55, -10.02))                  # 2.9 deg/s: moving
@@ -237,6 +268,8 @@ def self_test():
     print('PASS: RF2O freshness: stale after %.1f s (once per gap), max gap, latency, rate.' % RF2O_STALE_S)
     print('PASS: VESC vx/gain, brake phase parse, de-weight rule (brake, 0 < |ERPM| < %.0f, 0 trusted),'
           % SENSORLESS_ERPM)
+    print('      yaw from the gyro projected on the still gravity (tilt 9.2 deg: -gz alone 0.987 x), R_IMU_WZ %.1e,'
+          % R_IMU_WZ)
     print('      yaw sign/bias, still calibration (moving -> retry), forward accel: gravity and vertical')
     print('      removed on a tilted, x-backward IMU.')
 
@@ -308,7 +341,7 @@ def main():
                                                   'the car still; retrying.' % math.degrees((r or {}).get('gyro_std', 0.0)))
                         self.calib = StillCalib()
                 return
-            self.pub['imu'].publish(imu_msg(m.header.stamp, g.z, (a.x, a.y, a.z), self.cal))
+            self.pub['imu'].publish(imu_msg(m.header.stamp, (g.x, g.y, g.z), (a.x, a.y, a.z), self.cal))
 
         def on_rf2o(self, m):
             self.fresh.add(self.now_s(), m.header.stamp.sec + m.header.stamp.nanosec * 1e-9)

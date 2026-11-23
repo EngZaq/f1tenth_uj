@@ -1,9 +1,103 @@
-# Real-car tests: session handoff (updated 2026-11-23, laptop session, no car)
+# Real-car tests: session handoff (updated 2026-11-23 evening, laptop session after the car session, no car)
 
 For Moatasem and for the next Claude Code session. Read this, then
 [REAL_CAR_BASELINE_2026-11-14.md](REAL_CAR_BASELINE_2026-11-14.md) (standard values) and
 [REAL_CAR_TEST_RESULTS.md](REAL_CAR_TEST_RESULTS.md) (every measured result). Code:
-`tools/real_car_tests/` (README there, section "23 Nov"). Numbers: `config/real_car/vehicle_params.yaml` only.
+`tools/real_car_tests/` (README there, sections "23 Nov" and "23 Nov eve"). Numbers: `config/real_car/vehicle_params.yaml` only.
+
+**Status 23 Nov evening (laptop, no car; nothing actuated; ROS domain 43, localhost only, CYCLONEDDS_URI unset):**
+- **Deadman stops of the 23 Nov corridor teleop = Wi-Fi SSH, not the code** (results doc row "Teleop deadman stops"):
+  only run `174200` (low visibility 0.10) drove; its 2 segments ended with DEADMAN_RELEASED after 0.79 m and 0.11 m
+  (VESC). Segment 2: no key for 0.327 s, then 10 `w` keys with the SAME receive time = a stalled SSH stream
+  delivered in one burst (twice more later: 0.325 s + 10 keys); the runner allows 0.25 s between repeats. Segment 1:
+  `a` stream ended, next key `d` 0.48 s later, alone (released `a` before pressing `d`); a 6 ms near miss earlier
+  (`d` held 0.50 s then `a` 0.256 s later vs the 0.25 s window). Runs `170558`/`171342`/`171649` stopped 40-60 ms
+  after DRIVE_START by the mux `LATCH_STOP_FRONT_SCAN_NOT_CLEAR` (before the 0.10 visibility launch argument).
+  **Fix = PS4 controller on the Jetson** (no network in the deadman loop). The keyboard deadman stays as it is.
+- **PS4 teleop implemented** (`run_test.py --test teleop_ps4`, README "23 Nov eve"): joy_node on the Jetson remapped
+  to `/ps4/joy`; the runner reads it and stays the only `/joy` / `/manual/drive` publisher (the mux reads `/joy`
+  button 5 + TTL 0.20 s; a second `/joy` publisher is refused by the runner, and by `preflight.sh stack` (`/joy`
+  pub 0)). Laptop test with the real mux + t1b converter (table, brake 5 A) + stub VESC + synthetic `/ps4/joy`:
+  R1 release, circle KILL, joy silent (Bluetooth drop: `PS4_STALE` after 0.21 s) and laptop SPACE each -> brake 5 A
+  at the stub 30-70 ms later; options with R1 held refused; joy_node on `/joy` refused; steering servo 0.239-0.660.
+- **Corridor map** (`hall_loop_20261123_172534/maps/`, results doc "Corridor map"): 27.5 x 6.9 m grid, 44 m^2 known,
+  walls straight (rms 6-8 cm over 6-8 m, 1.3 deg from parallel), width 1.73 m between the wall fits (placement
+  readout 0.86 + 0.76 m + car agrees; not 2.5-3 m), right wall doubled in ~30 % of columns. **Along-corridor scale is
+  NOT observable by LiDAR here: RF2O 3.44 m, SLAM 4.21 m, VESC 9.93 m (tach = ERPM integral) for the "~7 m" push**
+  -> measure the push with a tape next time; corridor maps need the wheel odometry.
+- **VESC config:** no XML on the laptop (`real_car_evidence/vesc_config/` empty): `config/real_car/vesc_backup/README.md`
+  holds the reported before -> after table and the slots for the XMLs. **Timeout = 250 ms** (VESC Tool, 23 Nov)
+  fixed everywhere (vehicle_params, checklists, proposal, results doc, this file); 22 Nov onset 0.29 s fits 250 ms.
+- **IMU TF** (`vehicle_params.yaml imu`, used by the test launch): roll 0.0497, pitch 3.2935 (pi + 8.70 deg), yaw 0
+  from the 23 Nov still accel (1.54, -0.50, -10.05), tilt 9.15 deg; position unchanged (PROVISIONAL). **Shadow
+  EKF yaw rate now = gyro projected on the still gravity** (`ekf_shadow_inputs.YAW_MODE 'tilt'`; -gz alone =
+  0.987 x), **R_gz 1.2e-3 applied** (was 8.0e-3). C1 circle replay: tight turns EKF - RF2O **-1.21 % -> +0.02 %**, end
+  position 0.144 -> 0.114 m; the -0.18 run now +1.5..+2.8 % (RF2O / run dependent).
+- **EKF noise** (`ekf_r_nis.py`, results doc "EKF R / NIS"): steady cruise RF2O vx R 0.9-1.3e-2 (= the 1.0e-2 in
+  use), VESC vx self-noise R 1-2e-4 but its error is scale / slip, keep 5e-3; RF2O reads 0.01 m/s below VESC. C1
+  NIS on the T3 circles: VESC 0.006, gyro 0.18, RF2O 0.26 (all << 1: conservative, never overconfident); Q unchanged.
+- **Route planning** (`ROUTE_PLANNING_PROPOSAL.md`): sim pipeline = extract_robust_centerline (needs a CLOSED loop,
+  0.30 m clearance) -> orient -> body/steering optimizer (wheelbase 0.3302 and 24 deg hard-coded); for the car
+  wheelbase 0.26, steer 0.28 rad (R_min 0.90 m, plan R >= 1.15 m), cap 0.5, decel <= 0.8, min 0.2 m/s; smallest
+  way: sim step 2 as is + one new `real_route.py` (proposal, not written). The 23 Nov corridor has no loop.
+
+**Next car session (24 Nov): PS4 teleop, then the track decision.** Every terminal on the Jetson: ROS +
+`install/setup.bash` sourced, domain 42, `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh` (Wi-Fi SSH).
+1. **Update** (Python + yaml only, no colcon build): `cd ~/f1tenth_uj && git pull --ff-only origin
+   moatasem/real-car-tests`, then `for t in run_test analyze t1b_stop_converter hall_loop_map ekf_shadow_inputs
+   ekf_r_nis vesc_timeout_check; do python3 tools/real_car_tests/$t.py --self-test; done`.
+2. **Controller on the Jetson, once** (USB cable = no pairing; Bluetooth for walking with the car):
+   ```bash
+   bluetoothctl list                      # a controller must be listed; none -> use the USB cable
+   bluetoothctl                           # then inside:
+     power on
+     agent on
+     default-agent
+     scan on                              # controller: hold SHARE + PS until the light bar flashes fast
+     pair <MAC of "Wireless Controller">
+     trust <MAC>
+     connect <MAC>
+     scan off
+     quit
+   ls /dev/input/js*                      # /dev/input/js0 (USB or Bluetooth)
+   grep -A4 -i "wireless controller" /proc/bus/input/devices
+   groups | grep -w input || echo "NOT in group input: sudo usermod -aG input $USER, log out and in"
+   ros2 run joy joy_enumerate_devices     # joy (SDL) sees it: device 0
+   ```
+   Later sessions: press PS once (it reconnects to the trusted Jetson).
+3. **joy_node + mapping check** (terminal C, stays running; started AFTER `preflight.sh clean` + the launch: `clean`
+   refuses any ros2 process):
+   ```bash
+   ros2 run joy joy_node --ros-args -r joy:=/ps4/joy -p device_id:=0 -p autorepeat_rate:=50.0 -p sticky_buttons:=false -p deadzone:=0.05
+   ```
+   Terminal D, quick check, then Ctrl+C: `ros2 topic hz /ps4/joy` (~50 Hz) and `ros2 topic echo /ps4/joy`: R1 ->
+   `buttons[5]: 1`, options -> `buttons[9]`, circle -> `buttons[1]`, left stick left -> `axes[0]` about +1.0. A
+   different R1 index: change `ps4.deadman_button` in `vehicle_params.yaml` (the runner's check names what it saw).
+   **Buttons:** options = arm · HOLD R1 = drive (0.3 m/s) · left stick = steer (proportional, +/-0.28 rad) · release
+   R1 = brake 5 A · cross / circle / square = KILL (latched until options) · triangle = placement readout (idle).
+   Laptop: `q` ends (idle); while armed every key = KILL. Controller silent > 0.20 s = stop (`PS4_STALE`).
+   **Limit:** a Bluetooth link loss with R1 held is seen only when joy_node stops publishing (the kernel may keep
+   the last state until the link times out, seconds): stay within ~3 m of the car, hand on the disconnect.
+4. **Stand check of the PS4 path first** (wheels off the ground, box 1.5-2 m ahead for the standard 0.75 front gate):
+   ```bash
+   # A
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true max_speed_mps:=0.3 max_steer_rad:=0.28 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_t3_erpm2780.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_t3_table.yaml
+   # C: joy_node (step 3)
+   # B (tmux recommended: `tmux new -s run`; a Wi-Fi drop then does not end the run, the controller keeps control)
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test teleop_ps4 --speed 0.3 --fast
+   ```
+   Controller check (hands off; LEFT stick left; R1 press + release), then: options -> hold R1 2 s -> release
+   (brake) · options -> R1 -> circle (KILL) · options -> R1 -> switch the controller off (hold PS 10 s) or
+   `bluetoothctl disconnect <MAC>` in terminal D -> `PS4_STALE`. `q`. Check `ps4_events.csv` + `runner_events.csv`.
+5. **Corridor / hall teleop with the PS4** (as step 4, launch + `manual_min_front_valid:=0.10` for the corridor;
+   the runner then allows 0.3 m/s only). Car on the tape mark, still 10 s at start (IMU), back on the mark at the
+   end, **measure the driven distance with a tape** (scale check: RF2O/SLAM under-read the corridor). Map on the
+   laptop: `python3 tools/real_car_tests/hall_loop_map.py <run folder>`.
+6. **Track decision** (`ROUTE_PLANNING_PROPOSAL.md`): the route tools need a CLOSED loop (an island / furniture
+   block), lanes >= ~1.2 m, turns R >= 1.15 m; the corridor alone is out-and-back. Then T5b and the steering-table
+   ground check as in the 23 Nov list below (items 4-5).
 
 **Status 23 Nov (laptop night session 22-23 Nov, no car; nothing actuated; ROS domain 43/44, localhost only):**
 - **A. Fixed: `run_test.py` refused T5b with "t1b_stop_converter parameters unreadable: {}".** Cause (reproduced
@@ -38,7 +132,7 @@ below 0.75 it turns the reduced-visibility option on), runner: a lowered thresho
 return), release = brake 5 A, caps, IMU / VESC checks, VESC timeout verified. Jetson: `git pull` then
 `colcon build --packages-select f1tenth_bringup` (the launch runs the installed mux copy).
 
-**Next car session, in order (all Moatasem's runs; every terminal: ROS + `install/setup.bash` sourced, domain 42,
+**23 Nov list (done: 1-3 on 23 Nov; items 4-5 still open, after the 24 Nov PS4 steps above). Next car session, in order (all Moatasem's runs; every terminal: ROS + `install/setup.bash` sourced, domain 42,
 `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh` over Wi-Fi):**
 1. **Update:** `cd ~/f1tenth_uj && git pull --ff-only origin moatasem/real-car-tests` (Python tools only, no
    colcon build), then `for t in run_test analyze t1b_stop_converter hall_loop_map; do python3
@@ -104,9 +198,10 @@ return), release = brake 5 A, caps, IMU / VESC checks, VESC timeout verified. Je
 
 **Status 22 Nov (end of day; battery dead, no more driving):**
 - **Done 22 Nov:**
-  - **VESC firmware timeout 300 ms + timeout brake current 5 A** (was default / 0 A), verified on the stand
+  - **VESC firmware timeout 250 ms** (reported as 300 that day; VESC Tool reads 250 on 23 Nov) **+ timeout brake
+    current 5 A** (was default / 0 A), verified on the stand
     `20261122_150252`: brake onset 0.29 s, -2.44 A. A dead converter / frozen Jetson / lost USB now brakes
-    after ~0.3 s instead of coasting after ~1 s. Still not an emergency stop.
+    after ~0.25-0.3 s instead of coasting after ~1 s. Still not an emergency stop.
   - **T3 COMPLETE** (hall, 0.3 m/s, low-visibility mode T3 only; results doc "T3 ground circles"): minimum radius
     **~0.87 m right / ~0.90 m left**, maximum real angle **~0.28 rad** both sides, **right understeers ~20 % near
     the centre** vs T2, left stop reached at ~0.11, slip <= 2.3 deg (supports vy = 0), IMU +y = base +y.
@@ -168,8 +263,8 @@ fast-forward to `origin/moatasem/real-car-tests`, never force). Never `git add -
 
 ## 2. Branch and commit state
 
-- Branch `moatasem/real-car-tests` from `zaq/hardware-integration` @ `53dfa91`. **Not pushed** (no
-  upstream yet; Moatasem pushes, Claude never does).
+- Branch `moatasem/real-car-tests` from `zaq/hardware-integration` @ `53dfa91`; pushed to `origin` (fast-forward only,
+  when Moatasem asks in the session; 23 Nov evening: asked).
 - Commits (oldest first): `d1e0c70` runner/analysis/params · `fea48d3` **mux caps (Zaid's file, separate commit for his review)** · `8b7228c` dry-run fixes · `61dcf0e` T1/T1b · `82336a1` T2 + VESC checklist · `057995f` steady-stop gate · `ae9a36f` shared rebound definition, T1b 1.0/1.5, table · `58b2449` results · `03b2e67` steady repeats only · `6b52990` this file + current 0 · `066d104` T1 close-out ·
   `530fff8` stop-converter proposal · `36ccfa7` T2 `e` answer · `d8202be` T2 clip ceiling ·
   `7d70ed3` T2 range 0.10-0.60 · `dbf90f8` `--extend-right` · `782cc71` T2 clip 0.10-0.68 + max angles ·
@@ -282,7 +377,7 @@ distance (T4) before it can be considered.
    yamls, `t3_analyze.py`, hall checklist `T3_HALL_CHECKLIST.md`. Order: disarmed rehearsal, +/-0.18, then per-side
    ~90 % (left +0.26 / servo 0.108, right -0.31 / servo 0.664), then `--full-lock left|right` (servo exactly
    0.10 / 0.68: real minimum radius, own table in `t3_analyze.py`). Per-side limits 0.27 / 0.325 rad, mux cap
-   `max_steer_rad:=0.33`. **VESC timeout 300 ms + brake 5 A: configured AND VERIFIED 22 Nov (PASS 0.29 s, -2.44 A), T3 fallback lifted;** it was verified on the stand
+   `max_steer_rad:=0.33`. **VESC timeout 250 ms + brake 5 A: configured AND VERIFIED 22 Nov (PASS 0.29 s, -2.44 A), T3 fallback lifted;** it was verified on the stand
    with `vesc_timeout_check`** (checklist section 0). Until a PASS the runner enforces the fallback (disk +1 m,
    0.3 m/s first); in a 5 x 5 m hall that excludes +/-0.18 and +0.26.
    **22 Nov rehearsal:** refusals came from the own XT60 leads (now `lidar.self_mask`; tuck them in), real objects
@@ -338,14 +433,14 @@ distance (T4) before it can be considered.
 |---|---|
 | Live rebound display | **Fixed** (`ae9a36f`, shared `ReboundTracker`: rises count only after ERPM fell to half its value at the zero). Confirmed on the current0 run: live = analysis on all 5 stops. Live peak times are ~0.06 s later than the analysis (live clock starts at the runner's zero, analysis at the converter's). |
 | Brake 10 A vs `l_current_min` | Requesting 10 A did not raise the measured motor current above the 5 A runs (<= 4.2 vs <= 3.7 A). Either the ~0.1 s stop is missed by 50 Hz telemetry or the firmware brake current limit caps it: check `l_current_min` (checklist row 11). |
-| VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). **22 Nov CONFIGURED (Moatasem):** `timeout_msec` 300 (planned 250; previous unknown / default), `timeout_brake_current` 5 A (was 0); note for Zaid in the converter proposal section 9. **VERIFIED 22 Nov** (`20261122_150252_vesc_timeout_check_v0.50_brake5A_erpmmax4630_armed`): PASS, onset 0.29 s, -2.44 A, < 300 ERPM in 0.33 s; T3 fallback lifted. |
+| VESC Tool checklist | **Pending**: `docs/real_car/T1_VESC_TOOL_CHECKLIST.md` (export motor + app XML first). **22 Nov CONFIGURED (Moatasem):** `timeout_msec` 250 (reported as 300 on 22 Nov, read back 250 on 23 Nov; previous unknown / default), `timeout_brake_current` 5 A (was 0); note for Zaid in the converter proposal section 9. **VERIFIED 22 Nov** (`20261122_150252_vesc_timeout_check_v0.50_brake5A_erpmmax4630_armed`): PASS, onset 0.29 s, -2.44 A, < 300 ERPM in 0.33 s; T3 fallback lifted. |
 | Brake hold release | Every brake stop (also 16 Nov at 1.0 / 1.5 m/s: 88-101 ERPM at +2.09-2.15 s) shows a 77-100 ERPM rise at +2.1-2.2 s: the 2.0 s hold ending (switch to current 0). Tune the hold / release in the permanent fix. |
 | Servo horn off-centre (Zaid) | Straight = servo 0.320 = 1320 us, not 1500 us (VESC 0..1 = 1000-2000 us): left at most 0.32 of travel, right 0.68. Re-mount so straight is near 0.5 for symmetric travel; **redo T2 after that**. Zaid to decide. |
 | **F-18 BMI160 freeze (Zaid)** | **Also (21 Nov): the node exits at start-up if the car moves during the 5 s gyro calibration** (std > 0.5 deg/s, exit code 0, "finished cleanly"); runner/preflight print `IMU node not running: restart the stack and keep the car still for 10 s`. Proposal for both causes: [IMU_DRIVER_PROPOSAL_F18.md](IMU_DRIVER_PROPOSAL_F18.md). After one `I2C read failed: [Errno 110]` the stream repeats one sample at 100 Hz until the node restarts (2 of 4 T4 sessions, 20 Nov; results doc). Guard: runner refuses to arm on `IMU_FROZEN` / `IMU_STALE`, `preflight.sh stack` checks 2 s; recovery = restart the stack. **Proposed driver fix (imu_driver, Zaid's package):** after an `OSError`, redo the soft reset + configuration (keep the gyro bias), and a watchdog that resets on N identical samples. **Diagnostic at the next freeze** (stack stopped first, before relaunching; read-only): `i2cget -y 7 0x69 0x03` (PMU_STATUS), `0x02` (ERR_REG), and `0x18`-`0x1A` (SENSORTIME) twice, a second apart: SENSORTIME not advancing = the sensor stopped converting (register addresses from the BMI160 datasheet; verify). |
 | Battery | Charged: >= 12.3 V during both 16 Nov runs (11.1 V idle on 14 Nov after a power loss). |
 | Stand LiDAR | Front valid fraction ~0.83 vs the 0.75 MANUAL gate; an operator hand at 0.10-0.12 m (+10..+19 deg) latches `OBSTACLE_NEAR`. |
 | F-13 | Runner input gaps never exceeded 44 ms; the keyboard GUI's latch was not reproduced (GUI not re-tested). |
-| IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. **21 Nov (T4 bags): IMU x points BACKWARD** (forward accel reads on -x: pitch pi or roll pi + yaw pi) **and the mount is tilted 8-10 deg**; gz sign unaffected. Not changed (Zaid). **22 Nov T3: IMU +y = base +y confirmed** -> mount = pitch pi (not roll pi) + tilt (section 4a). The shadow inputs handle it themselves (no TF). |
+| IMU TF | `base_link -> imu_link` (0.091, 0.057, 0.046, roll pi) published by the test launch, PROVISIONAL; ask Zaid how it was published on 14 Nov. **21 Nov (T4 bags): IMU x points BACKWARD** (forward accel reads on -x: pitch pi or roll pi + yaw pi) **and the mount is tilted 8-10 deg**; gz sign unaffected. Not changed (Zaid). **22 Nov T3: IMU +y = base +y confirmed** -> mount = pitch pi (not roll pi) + tilt (section 4a). The shadow inputs handle it themselves (no TF). **23 Nov eve: TF changed to the real mount**: roll 0.0497, pitch 3.2935 (pi + 8.70 deg), yaw 0 (`vehicle_params.yaml`, from the 23 Nov still accel after the re-tape); position still PROVISIONAL (re-measure); tell Zaid. |
 | Team notes | Repo configs still at offset 0.361; do not use `vesc.launch.py` (`config/vesc.yaml` brake 200000 A); listed in the results doc. |
 | DDS over Wi-Fi SSH (22 Nov) | Launching the stack over a phone-hotspot SSH session froze all sessions. Over Wi-Fi: `source tools/real_car_tests/local_env.sh` in every terminal (ROS_LOCALHOST_ONLY=1, CYCLONEDDS_URI unset, lo multicast on); no laptop RViz then. USB SSH: not needed. |
 | T1b converter | Test-only (approved with conditions: one command per tick, brake/current only after a zero request, new nonzero request returns to speed at once, method logged per stop). |
