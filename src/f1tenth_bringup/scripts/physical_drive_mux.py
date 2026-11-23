@@ -31,6 +31,7 @@ SCAN_TTL = 0.22
 ODOM_TTL = 0.30
 MAP_TTL = 8.0
 AUTO_HOLD_TTL = 0.20  # supervised input, NOT a safety-rated physical switch
+MANUAL_LOW_VISIBILITY_FLOOR = 0.10  # manual_allow_reduced_visibility only (was 0.35); standard MANUAL stays 0.75
 
 
 def evaluate_request(mode, allow_real, allow_auto, deadman, deadman_fresh,
@@ -193,7 +194,11 @@ def run_ros():
             if (self.max_speed, self.max_steer) != (MAX_SPEED, MAX_STEER):
                 self.get_logger().warn('TEST CAPS: max_speed_mps=%.2f max_steer_rad=%.2f (defaults %.2f / %.2f)' % (
                     self.max_speed, self.max_steer, MAX_SPEED, MAX_STEER))
-            manual_floor = .35 if self.manual_low_visibility else .75
+            # Reduced-visibility floor 0.10 (was 0.35; approved by Moatasem 23 Nov for corridor teleop at <= 0.3 m/s,
+            # where the far end is out of range: front finite fraction 0.175). Only with
+            # manual_allow_reduced_visibility:=true; the parameter defaults (0.75, reduced mode off), the standard
+            # MANUAL floor 0.75, AUTO 0.90 and the 0.80 m obstacle stop (needs a finite return) are unchanged.
+            manual_floor = MANUAL_LOW_VISIBILITY_FLOOR if self.manual_low_visibility else .75
             if not manual_floor <= self.manual_fraction <= 1.0:
                 raise ValueError('manual_min_front_valid must be >=%.2f' % manual_floor)
             if self.manual_low_visibility:
