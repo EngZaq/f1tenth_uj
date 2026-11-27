@@ -32,6 +32,18 @@ ODOM_TTL = 0.30
 MAP_TTL = 8.0
 AUTO_HOLD_TTL = 0.20  # supervised input, NOT a safety-rated physical switch
 MANUAL_LOW_VISIBILITY_FLOOR = 0.10  # manual_allow_reduced_visibility only (was 0.35); standard MANUAL stays 0.75
+# safety_mode (start-up parameter; approved by Moatasem 28 Nov for PS4 manual driving by line of sight):
+#   'autonomy' (DEFAULT): every gate exactly as before.
+#   'teleop': the MANUAL front-visibility gate and the 0.80 m front-obstacle gate do NOT stop or latch; they are
+#     still computed and published as WARN fields (teleop_warn*). Kept: arming handshake, /drive and
+#     /commands/motor/speed ownership check, speed / steering caps, /joy deadman + JOY_TTL, plus a mux-side PS4
+#     check (stale-input stop): /ps4/joy arrival and header stamp younger than TELEOP_JOY_TTL, raw R1 held,
+#     exactly one /ps4/joy publisher. Arms only on the PS4 runner's TELEOP_MANUAL_REQUEST (a plain MANUAL, e.g.
+#     the keyboard runner, is refused); AUTO is refused; refuses to start with enable_autonomous_actuation.
+SAFETY_MODES = ('autonomy', 'teleop')
+DEFAULT_SAFETY_MODE = 'autonomy'
+TELEOP_MANUAL_REQUEST = 'MANUAL_PS4'
+TELEOP_JOY_TTL = 0.25
 
 
 def evaluate_request(mode, allow_real, allow_auto, deadman, deadman_fresh,
@@ -100,6 +112,138 @@ def front_evidence(scan, min_fraction=0.75, stop_m=0.80):
     return True, 'FRONT_MEASURED', fraction, nearest
 
 
+def validate_safety_mode(mode, allow_auto):
+    """Start-up only. 'autonomy' (default, every gate) or 'teleop' (PS4 manual, see SAFETY_MODES above)."""
+    m = str(mode).strip().lower()
+    if m not in SAFETY_MODES:
+        raise ValueError('safety_mode must be one of %s, got %r' % (SAFETY_MODES, mode))
+    if m == 'teleop' and allow_auto:
+        raise ValueError('safety_mode teleop refuses enable_autonomous_actuation=true')
+    return m
+
+
+def manual_scan_gate(safety_mode, scan_ok):
+    """MANUAL front gate fed to evaluate_request: autonomy = the LiDAR verdict (unchanged); teleop = never a stop
+    (the verdict is published as a warning by front_warnings instead)."""
+    return True if safety_mode == 'teleop' else scan_ok
+
+
+def front_warnings(scan_reason, fraction, nearest, min_fraction, stop_m=.80):
+    """teleop: both MANUAL front gates evaluated independently, as warnings only."""
+    unknown = (scan_reason in ('NO_SCAN', 'INVALID_SCAN_GEOMETRY', 'NO_FRONT_SECTOR')
+               or fraction < min_fraction)
+    near = nearest is not None and nearest < stop_m
+    warn = '+'.join(w for w, on in (('FRONT_UNKNOWN', unknown), ('OBSTACLE_NEAR', near)) if on)
+    return {'front_unknown': unknown, 'obstacle_near': near, 'warn': warn or None}
+
+
+def ps4_joy_problem(now, arrival, stamp_age, buttons, deadman_index, ttl=TELEOP_JOY_TTL):
+    """teleop stale-input check on /ps4/joy: None = fresh. stamp_age = ROS now - header.stamp (None = no stamp)."""
+    if arrival is None:
+        return 'PS4_JOY_MISSING'
+    if not 0 <= now - arrival < ttl:
+        return 'PS4_JOY_STALE(%.2f s)' % (now - arrival)
+    if stamp_age is None:
+        return 'PS4_JOY_NO_STAMP'
+    if not -ttl < stamp_age < ttl:
+        return 'PS4_JOY_STAMP_OLD(%.2f s)' % stamp_age
+    if buttons is None or len(buttons) <= deadman_index:
+        return 'PS4_JOY_TOO_FEW_BUTTONS'
+    return None
+
+
+def teleop_mode_request(m, safety_mode, ps4_problem, ps4_deadman_held, ps4_publishers):
+    """Mode request pre-check -> (mode to process, rejection or None). autonomy: no change at all
+    (TELEOP_MANUAL_REQUEST then falls through to REJECT_INVALID_MODE). teleop: only the PS4 runner's request arms."""
+    if safety_mode != 'teleop' or m == 'STOP':
+        return m, None
+    if m == 'AUTO':
+        return m, 'REJECT_AUTO_IN_TELEOP_SAFETY_MODE'
+    if m == 'MANUAL':
+        return m, 'REJECT_TELEOP_SAFETY_MODE_NEEDS_PS4_RUNNER'
+    if m != TELEOP_MANUAL_REQUEST:
+        return m, None
+    if ps4_publishers != 1:
+        return m, 'REJECT_PS4_JOY_PUBLISHERS(%s)' % ps4_publishers
+    if ps4_problem:
+        return m, 'REJECT_' + ps4_problem
+    if ps4_deadman_held:
+        return m, 'REJECT_PS4_DEADMAN_HELD'
+    return 'MANUAL', None
+
+
+def self_test_safety_mode():
+    assert DEFAULT_SAFETY_MODE == 'autonomy'
+    assert validate_safety_mode(DEFAULT_SAFETY_MODE, False) == 'autonomy'
+    assert validate_safety_mode(' Teleop ', False) == 'teleop'
+    for bad, auto in (('manual', False), ('', False), ('teleop', True)):
+        try:
+            validate_safety_mode(bad, auto)
+        except ValueError:
+            continue
+        raise AssertionError('safety_mode %r (auto %s) accepted' % (bad, auto))
+
+    class Scan:
+        angle_min = -math.pi
+        angle_increment = 2*math.pi/1440
+        range_min = 0.0
+        range_max = 100.0
+        ranges = [2.0]*1440
+    corridor, near = Scan(), Scan()
+    corridor.ranges = [float('inf')]*1440          # far end out of range: FRONT_UNKNOWN
+    near.ranges = [0.5]*1440                         # obstacle at 0.5 m: OBSTACLE_NEAR
+    for s, why in ((corridor, 'FRONT_UNKNOWN'), (near, 'OBSTACLE_NEAR')):
+        ok, reason, frac, nearest = front_evidence(s, .75, .80)
+        assert not ok and reason == why
+        # autonomy: unchanged gate -> FRONT_SCAN_NOT_CLEAR, which the tick latches (LATCH_STOP_...)
+        r = evaluate_request('MANUAL_ACTIVE', True, False, True, True, (.3, 0), True,
+                             manual_scan_gate('autonomy', ok), True, True, max_speed=.3, max_steer=.28)
+        assert r == (0.0, 0.0, 'FRONT_SCAN_NOT_CLEAR'), r
+        # teleop: no stop, the same verdict as a warning
+        r = evaluate_request('MANUAL_ACTIVE', True, False, True, True, (.3, .1), True,
+                             manual_scan_gate('teleop', ok), True, True, max_speed=.3, max_steer=.28)
+        assert r == (.3, .1, 'PASS'), r
+        w = front_warnings(reason, frac, nearest, .75)
+        assert w['warn'] == why and w['front_unknown'] == (why == 'FRONT_UNKNOWN'), w
+    w = front_warnings('FRONT_UNKNOWN', .17, .55, .75)         # both at once (front_evidence reports only one)
+    assert w == {'front_unknown': True, 'obstacle_near': True, 'warn': 'FRONT_UNKNOWN+OBSTACLE_NEAR'}, w
+    assert front_warnings('NO_SCAN', 0., None, .75)['front_unknown']
+    assert front_warnings('FRONT_MEASURED', .9, 2.0, .75)['warn'] is None
+    # teleop keeps the deadman, the command TTL and the caps
+    assert evaluate_request('MANUAL_ACTIVE', True, False, False, True, (.3, 0), True,
+                            manual_scan_gate('teleop', False), True, True)[2] == 'JOYSTICK_DEADMAN_RELEASED_OR_STALE'
+    assert evaluate_request('MANUAL_ACTIVE', True, False, True, True, (.3, 0), False,
+                            manual_scan_gate('teleop', False), True, True)[2] == 'DRIVE_REQUEST_STALE'
+    assert evaluate_request('MANUAL_ACTIVE', True, False, True, True, (2.0, .5), True,
+                            manual_scan_gate('teleop', False), True, True,
+                            max_speed=1.5, max_steer=.28) == (1.5, .28, 'PASS')
+    # stale-input stop on /ps4/joy: no new message, old stamp, no stamp
+    b = [0]*5 + [1] + [0]*7
+    assert ps4_joy_problem(10.0, 9.80, 0.01, b, 5) is None
+    assert ps4_joy_problem(10.0, None, None, None, 5) == 'PS4_JOY_MISSING'
+    assert ps4_joy_problem(10.0, 9.75, 0.01, b, 5).startswith('PS4_JOY_STALE')
+    assert ps4_joy_problem(10.0, 9.99, 0.25, b, 5).startswith('PS4_JOY_STAMP_OLD')
+    assert ps4_joy_problem(10.0, 9.99, -0.30, b, 5).startswith('PS4_JOY_STAMP_OLD')
+    assert ps4_joy_problem(10.0, 9.99, None, b, 5) == 'PS4_JOY_NO_STAMP'
+    assert ps4_joy_problem(10.0, 9.99, 0.01, [1]*4, 5) == 'PS4_JOY_TOO_FEW_BUTTONS'
+    # arming: keyboard runner (plain MANUAL) refused in teleop; autonomy unchanged
+    assert teleop_mode_request('MANUAL', 'teleop', None, False, 1) == (
+        'MANUAL', 'REJECT_TELEOP_SAFETY_MODE_NEEDS_PS4_RUNNER')
+    assert teleop_mode_request('MANUAL_PS4', 'teleop', None, False, 1) == ('MANUAL', None)
+    assert teleop_mode_request('MANUAL_PS4', 'teleop', 'PS4_JOY_STALE(0.30 s)', False, 1)[1].startswith(
+        'REJECT_PS4_JOY_STALE')
+    assert teleop_mode_request('MANUAL_PS4', 'teleop', None, True, 1)[1] == 'REJECT_PS4_DEADMAN_HELD'
+    assert teleop_mode_request('MANUAL_PS4', 'teleop', None, False, 2)[1] == 'REJECT_PS4_JOY_PUBLISHERS(2)'
+    assert teleop_mode_request('AUTO', 'teleop', None, False, 1)[1] == 'REJECT_AUTO_IN_TELEOP_SAFETY_MODE'
+    assert teleop_mode_request('STOP', 'teleop', 'PS4_JOY_MISSING', True, 0) == ('STOP', None)
+    for m in ('MANUAL', 'AUTO', 'STOP', 'MANUAL_PS4'):
+        assert teleop_mode_request(m, 'autonomy', 'PS4_JOY_MISSING', True, 0) == (m, None)
+    print('PASS: safety_mode default autonomy (bad value / teleop + AUTO refused); autonomy still stops on')
+    print('      FRONT_UNKNOWN and OBSTACLE_NEAR; teleop does not, publishes both as warnings; teleop keeps')
+    print('      deadman, command TTL, caps; /ps4/joy stale / old stamp / no stamp; keyboard MANUAL refused in')
+    print('      teleop, PS4 request accepted only fresh + R1 released + 1 publisher; AUTO refused in teleop.')
+
+
 def self_test():
     ok = evaluate_request('MANUAL_ACTIVE', True, False,
                           True, True, (.12, -.07), True, True, True, True)
@@ -158,6 +302,7 @@ def self_test():
     assert not front_evidence(s)[0]
     print('PASS: disarm, deadman, command TTL, LiDAR gate, auto lock,')
     print('      missing map/odom, reverse denial, bounded manual request.')
+    self_test_safety_mode()
     print('No ROS imported and no real actuator commands emitted.')
 
 
@@ -183,8 +328,18 @@ def run_ros():
             # Per-test caps, set only by the real-car test launch; defaults unchanged.
             self.declare_parameter('max_speed_mps', MAX_SPEED)
             self.declare_parameter('max_steer_rad', MAX_STEER)
+            # Start-up only (no parameter callback): which safety set is active. See SAFETY_MODES.
+            self.declare_parameter('safety_mode', DEFAULT_SAFETY_MODE)
+            self.declare_parameter('teleop_ps4_topic', '/ps4/joy')
+            self.declare_parameter('teleop_ps4_deadman_button', 5)
             self.allow_real = bool(self.get_parameter('enable_real_actuation').value)
             self.allow_auto = bool(self.get_parameter('enable_autonomous_actuation').value)
+            self.safety_mode = validate_safety_mode(
+                self.get_parameter('safety_mode').value, self.allow_auto)
+            self.ps4_topic = str(self.get_parameter('teleop_ps4_topic').value)
+            self.ps4_deadman = int(self.get_parameter('teleop_ps4_deadman_button').value)
+            if self.safety_mode == 'teleop' and (self.ps4_topic in ('/joy', '') or self.ps4_deadman < 0):
+                raise ValueError('safety_mode teleop needs teleop_ps4_topic != /joy and a deadman index >= 0')
             self.manual_fraction = float(self.get_parameter('manual_min_front_valid').value)
             self.manual_low_visibility = bool(self.get_parameter('manual_allow_reduced_visibility').value)
             self.auto_fraction = float(self.get_parameter('auto_min_front_valid').value)
@@ -227,6 +382,10 @@ def run_ros():
             self.last_mode_request = None
             self.last_mode_request_at = None
             self.mode_request_result = 'NO_MODE_REQUEST_RECEIVED'
+            self.ps4_at = None
+            self.ps4_stamp_ns = None
+            self.ps4_buttons = None
+            self.last_teleop_warn = None
             self.drive_pub = self.create_publisher(
                 AckermannDriveStamped, '/drive', 10)
             self.status_pub = self.create_publisher(
@@ -259,13 +418,23 @@ def run_ros():
                         durability=DurabilityPolicy.TRANSIENT_LOCAL,
                         reliability=ReliabilityPolicy.RELIABLE)),
             ]
+            if self.safety_mode == 'teleop':
+                # Only in teleop: the raw controller stream, for the mux-side stale-input check.
+                self.subs.append(self.create_subscription(
+                    Joy, self.ps4_topic, self.ps4_cb, qos_profile_sensor_data))
             self.create_timer(.05, self.tick)
             self.get_logger().warn(
                 'REAL /drive connected. Starts STOP. '
                 'This ROS mux is NOT a physical emergency stop. '
-                'enable_real_actuation=%s enable_autonomous_actuation=%s' %
-                (self.allow_real, self.allow_auto)
+                'enable_real_actuation=%s enable_autonomous_actuation=%s safety_mode=%s' %
+                (self.allow_real, self.allow_auto, self.safety_mode)
             )
+            if self.safety_mode == 'teleop':
+                self.get_logger().warn(
+                    'SAFETY_MODE TELEOP: MANUAL front-visibility and 0.80 m obstacle gates only WARN (no stop). '
+                    'Kept: arming, ownership check, caps, /joy deadman, %s fresh < %.2f s (arrival + stamp) with '
+                    'R1 (button %d) held and 1 publisher. Arms only on %s; AUTO refused.' % (
+                        self.ps4_topic, TELEOP_JOY_TTL, self.ps4_deadman, TELEOP_MANUAL_REQUEST))
 
         def manual_cb(self, msg):
             self.manual_cmd = (float(msg.drive.speed),
@@ -280,6 +449,25 @@ def run_ros():
         def joy_cb(self, msg):
             self.joy_at = time.monotonic()
             self.deadman = len(msg.buttons) > 5 and msg.buttons[5] == 1
+
+        def ps4_cb(self, msg):
+            self.ps4_at = time.monotonic()
+            stamp = msg.header.stamp
+            ns = int(stamp.sec) * 1000000000 + int(stamp.nanosec)
+            self.ps4_stamp_ns = ns if ns > 0 else None
+            self.ps4_buttons = list(msg.buttons)
+
+        def ps4_state(self, now):
+            """teleop only: (problem or None, raw R1 held, publisher count, arrival age, stamp age)."""
+            pubs = len(self.get_publishers_info_by_topic(self.ps4_topic))
+            stamp_age = (None if self.ps4_stamp_ns is None else
+                         (self.get_clock().now().nanoseconds - self.ps4_stamp_ns) / 1e9)
+            problem = ps4_joy_problem(now, self.ps4_at, stamp_age, self.ps4_buttons, self.ps4_deadman)
+            if problem is None and pubs != 1:
+                problem = 'PS4_JOY_PUBLISHERS(%d)' % pubs
+            held = problem is None and self.ps4_buttons[self.ps4_deadman] == 1
+            age = None if self.ps4_at is None else now - self.ps4_at
+            return problem, held, pubs, age, stamp_age
 
         def auto_hold_cb(self, msg):
             self.auto_hold = bool(msg.data)
@@ -309,6 +497,13 @@ def run_ros():
             m = msg.data.strip().upper()
             self.last_mode_request = m
             self.last_mode_request_at = time.monotonic()
+            if self.safety_mode == 'teleop':
+                problem, held, pubs, _, _ = self.ps4_state(time.monotonic())
+                m, reject = teleop_mode_request(m, self.safety_mode, problem, held, pubs)
+                if reject:
+                    self.mode_request_result = reject
+                    self.get_logger().warn('safety_mode teleop: %s' % reject)
+                    return
             if m == 'STOP':
                 if self.mode != 'STOP':
                     self.last_stop_reason = 'OPERATOR_STOP_REQUESTED'
@@ -359,6 +554,11 @@ def run_ros():
             mode_before_tick = self.mode
             joy_fresh = self.fresh(self.joy_at, JOY_TTL, now)
             joy_held = joy_fresh and self.deadman
+            ps4_problem = ps4_held = ps4_pubs = ps4_age = ps4_stamp_age = None
+            if self.safety_mode == 'teleop':
+                # Stale-input stop kept in teleop: the /joy deadman AND a fresh /ps4/joy with R1 held.
+                ps4_problem, ps4_held, ps4_pubs, ps4_age, ps4_stamp_age = self.ps4_state(now)
+                joy_held = joy_held and ps4_held
             auto_hold_fresh = self.fresh(self.auto_hold_at, AUTO_HOLD_TTL, now)
             auto_hold_held = auto_hold_fresh and self.auto_hold
             active_hold = (joy_held if self.mode.startswith('MANUAL')
@@ -370,6 +570,8 @@ def run_ros():
                 self.last_stop_reason = (
                     'AUTO_HOLD_RELEASED_OR_STALE' if self.mode == 'AUTO_ACTIVE'
                     else 'JOYSTICK_DEADMAN_RELEASED_OR_STALE')
+                if ps4_problem and self.mode == 'MANUAL_ACTIVE':
+                    self.last_stop_reason += '(TELEOP_%s)' % ps4_problem
                 self.last_stop_at = now
                 self.get_logger().warn('STOP LATCHED: %s' % self.last_stop_reason)
                 self.mode = 'STOP'
@@ -410,9 +612,18 @@ def run_ros():
             # MANUAL retains the original conservative front LiDAR gate.
             # AUTO uses the swept-vehicle geometry and bounded unknown-run
             # policy, NOT the blanket 90% of the +/-20deg sector rule.
+            # safety_mode teleop: the MANUAL front gates never stop; computed anyway, published as WARN fields.
             request_scan_ok = (
-                scan_ok if self.mode.startswith('MANUAL')
+                manual_scan_gate(self.safety_mode, scan_ok) if self.mode.startswith('MANUAL')
                 else bool(path['ready']))
+            teleop_warn = (front_warnings(scan_reason, fraction, nearest, self.manual_fraction)
+                           if self.safety_mode == 'teleop' else None)
+            if teleop_warn is not None and teleop_warn['warn'] != self.last_teleop_warn:
+                self.last_teleop_warn = teleop_warn['warn']
+                if teleop_warn['warn']:
+                    self.get_logger().warn('TELEOP WARN (no stop): %s; front valid %.2f (< %.2f warns), nearest %s'
+                                           % (teleop_warn['warn'], fraction, self.manual_fraction,
+                                              '%.2f m' % nearest if nearest is not None else 'none'))
             odom_fresh = self.fresh(self.odom_at, ODOM_TTL, now)
             map_fresh = self.fresh(self.map_at, MAP_TTL, now)
 
@@ -537,6 +748,15 @@ def run_ros():
                 'motor_publisher_count': motor_publishers,
                 'motor_subscriber_count': motor_subscribers,
                 'rf2o_publisher_count': rf2o_publishers,
+                'safety_mode': self.safety_mode,
+                'teleop_warn': teleop_warn['warn'] if teleop_warn else None,
+                'teleop_warn_front_unknown': teleop_warn['front_unknown'] if teleop_warn else None,
+                'teleop_warn_obstacle_near': teleop_warn['obstacle_near'] if teleop_warn else None,
+                'ps4_joy_problem': ps4_problem,
+                'ps4_deadman_held': ps4_held,
+                'ps4_joy_publisher_count': ps4_pubs,
+                'ps4_joy_age_s': round(ps4_age, 3) if ps4_age is not None else None,
+                'ps4_joy_stamp_age_s': round(ps4_stamp_age, 3) if ps4_stamp_age is not None else None,
             }
             self.status_pub.publish(String(data=json.dumps(status, separators=(',', ':'))))
             if reason != self.last_reason:
