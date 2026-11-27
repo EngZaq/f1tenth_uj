@@ -1,9 +1,111 @@
-# Real-car tests: session handoff (updated 2026-11-23 evening, laptop session after the car session, no car)
+# Real-car tests: session handoff (updated 2026-11-28, laptop session, no car)
 
 For Moatasem and for the next Claude Code session. Read this, then
 [REAL_CAR_BASELINE_2026-11-14.md](REAL_CAR_BASELINE_2026-11-14.md) (standard values) and
 [REAL_CAR_TEST_RESULTS.md](REAL_CAR_TEST_RESULTS.md) (every measured result). Code:
-`tools/real_car_tests/` (README there, sections "23 Nov" and "23 Nov eve"). Numbers: `config/real_car/vehicle_params.yaml` only.
+`tools/real_car_tests/` (README there, sections "23 Nov", "23 Nov eve" and "28 Nov"). Numbers:
+`config/real_car/vehicle_params.yaml`; PS4 layout: `config/real_car/ps4_teleop.yaml`.
+
+**Status 28 Nov (laptop, no car; nothing actuated; stub VESC on ROS domain 43, localhost only):**
+- **Mux `safety_mode`** (`physical_drive_mux.py`, Zaid's file, own commit for his review; approved by Moatasem 28 Nov
+  for PS4 teleop ONLY): `autonomy` (DEFAULT, every gate as before) | `teleop`. Start-up parameter, logged, and in
+  every `/control/status` (`safety_mode`, `teleop_warn*`, `ps4_*`). Teleop: the MANUAL front-visibility and 0.80 m
+  obstacle gates do not stop; they are published as WARN fields (runner `WARN` events). Kept: arming handshake,
+  `/drive` + `/commands/motor/speed` ownership, caps, `/joy` deadman, and a mux-side stale-input stop on `/ps4/joy`
+  (arrival and stamp < 0.25 s, raw R1 held, 1 publisher). Arms only on the PS4 runner's `MANUAL_PS4` request (keyboard
+  runner refused by the runner and by the mux); AUTO refused. **Replaces `manual_min_front_valid` / 0.10 for the PS4**
+  (launch refuses both together; the argument stays for the keyboard teleop). Jetson: `colcon build` needed (below).
+- **PS4 layout** (`ps4_teleop.yaml`, indices EXPECTED, to confirm with `ros2 topic echo`, step a): options = arm ·
+  **R1 held = deadman** (release = brake + segment end, options again) · **right stick Y = speed** (fixed: > 20 % =
+  exactly `--speed`; proportional: 0.10..1.0 -> 0..`--speed`, < 0.15 m/s = stop) · centre / down = brake (no reverse) ·
+  **left stick X = steer** +/-0.28 rad (t1b table) · **L1 held = brake 5 A, stays armed** · **no jump start**: after
+  arm, L1 and any non-centre stop the right stick must pass the centre · **circle = KILL** (latched; cross / square
+  too). Every stop = speed 0 -> converter brake 5 A 2 s -> current 0 (never a VESC speed 0).
+- **Controller loss on the Jetson:** `/ps4/joy` older than 0.20 s, stamp older than 0.25 s / missing, or the
+  **Bluetooth link heartbeat** lost (0.20 s) = deadman released. **joy_node autorepeat DOES hide a Bluetooth drop**
+  (it re-publishes the last state, R1 held, with a fresh stamp until the kernel removes the device after the link
+  supervision timeout, seconds), so the runner also reads the DS4 "Motion Sensors" input device, which reports with
+  every input report whatever the hands do. Bluetooth without that device = refused (use USB). joy_node:
+  `autorepeat_rate 50` (a still hand keeps the stream), `deadzone 0.0` (one deadzone: the yaml's 0.10). Pipeline
+  bound: runner 0.20-0.22 s + mux tick 0.05 + converter 0.02 < 0.3 s. VESC firmware timeout 250 ms / 5 A unchanged.
+- **Speed:** `--speed` = teleop_max_speed_mps (default 0.3, floor 0.15, hard ceiling 1.5 in code: 1.6 refused) = launch
+  `max_speed_mps`; `vesc_teleop_erpm12620.yaml` (1.5 x 8414, clip 0.10-0.68) for every teleop speed; steer cap 0.28
+  exactly. Start-up line (also `runner_events.csv` START): safety_mode, throttle_mode, speed, brake current, VESC
+  yaml (matched from vesc_driver), **stopping estimate v*0.25 + v^2/(2*0.9)**: 0.3 -> 0.13 m, 0.5 -> 0.26, 0.7 -> 0.45,
+  1.0 -> 0.81, 1.5 -> 1.63 m; **braking floor-verified only at 0.5 m/s**. `--speed` > 1.0 refused until the
+  1.0 m/s brake-distance check (step c) is analysed and within 1.25 x the estimate.
+- **Tests (laptop):** all self-tests PASS; `teleop_stub_test.py` (real mux + converter + runner under a pty, stub VESC,
+  fake joy_node / LiDAR / IMU) 41 / 41 PASS. Brake onset at the stub (5 A): L1 0.04-0.06 s, stick centre 0.09, stick
+  down 0.06, circle 0.03, R1 release 0.03, **joy silent 0.22-0.28 s** (3 runs; design bound 0.29 s), stamp 0.3 s old
+  0.06 s. Teleop: obstacle 0.5 m and no front return = WARN only, no brake; keyboard runner and a plain MANUAL
+  refused. Autonomy: the same two scenes latch `LATCH_STOP_FRONT_SCAN_NOT_CLEAR` (0.06 / 0.07 s). If the stand
+  CONTROLLER_LOST onset is >= 0.3 s with joy_node silent: `joy_ttl_s: 0.15` in `ps4_teleop.yaml` (margin) or USB.
+
+**Next car session: PS4 teleop on the stand, then the floor.** Every Jetson terminal: ROS + `install/setup.bash`,
+domain 42, `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh`.
+0. **Update** (the mux changed: the launch runs the INSTALLED copy, so build):
+   ```bash
+   cd ~/f1tenth_uj && git pull --ff-only origin moatasem/real-car-tests
+   colcon build --packages-select f1tenth_bringup && source install/setup.bash
+   for t in run_test analyze t1b_stop_converter hall_loop_map teleop_onset; do python3 tools/real_car_tests/$t.py --self-test; done
+   python3 src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
+   python3 tools/real_car_tests/real_car_test.launch.py --self-test
+   ```
+**a) PS4 pairing and joy_node** (USB cable = no pairing; Bluetooth for walking with the car):
+   ```bash
+   bluetoothctl                           # inside: power on / agent on / default-agent / scan on
+                                          # controller: hold SHARE + PS until the light bar flashes fast
+                                          # pair <MAC> / trust <MAC> / connect <MAC> / scan off / quit
+   grep -B1 -A5 "Wireless Controller" /proc/bus/input/devices
+                                          # need BOTH "Wireless Controller" and "Wireless Controller Motion Sensors"
+                                          # (Bus=0005 Bluetooth, 0003 USB); no Motion Sensors on Bluetooth = USB only
+   groups | grep -w input || echo "sudo usermod -aG input $USER, then log out and in"
+   ros2 run joy joy_enumerate_devices     # device 0
+   # terminal C, stays running (start it AFTER preflight.sh clean + the launch):
+   ros2 run joy joy_node --ros-args -r joy:=/ps4/joy -p device_id:=0 -p autorepeat_rate:=50.0 -p deadzone:=0.0 -p sticky_buttons:=false
+   ```
+   **Index check, once** (terminal D, `ros2 topic hz /ps4/joy` ~50 Hz, then `ros2 topic echo /ps4/joy`), expected:
+   R1 -> `buttons[5]`, L1 -> `buttons[4]`, circle -> `buttons[1]`, options -> `buttons[9]`, triangle -> `buttons[2]`,
+   left stick LEFT -> `axes[0]` about **+1.0**, right stick UP -> `axes[4]` about **+1.0** (if -1.0: `throttle_sign:
+   -1.0`; if it is `axes[3]` with buttons R1 = 10, SDL uses HIDAPI: the alternative row in the yaml header). Write what
+   you saw into `ps4_teleop.yaml` (and the date in its header). The runner's controller check refuses a mismatch and
+   names the index and sign it saw.
+**b) Stand test** (wheels in the air, car strapped, hand on the battery disconnect):
+   ```bash
+   # A
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
+   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true safety_mode:=teleop max_speed_mps:=0.3 max_steer_rad:=0.28 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_teleop_erpm12620.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_t3_table.yaml
+   # C: joy_node (step a)
+   # B (tmux new -s run)
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test teleop_ps4 --speed 0.3 --fast
+   ```
+   Controller check (4 prompts: hands off; LEFT stick left; RIGHT stick up; press R1, L1, circle). The START line
+   must read `safety_mode=teleop throttle_mode=fixed teleop_max_speed_mps=0.30 brake_current_a=5.0
+   vesc_yaml=vesc_teleop_erpm12620.yaml`. Then, each from options + R1 held + stick centred, then stick UP (wheels
+   at 0.3 m/s): (1) **L1** -> wheels brake, still ARMED; release L1 with the stick still up -> wheels stay still;
+   centre, up -> spin. (2) **stick to centre** -> brake; up -> spin. (3) **R1 release** -> brake, segment ends.
+   (4) options, R1, up, **circle** -> brake, latched: R1 + stick do nothing until options. (5) options, R1, up, then
+   **switch the controller off while the wheels spin** (hold PS 10 s, or `bluetoothctl disconnect <MAC>` in terminal
+   D) -> brake. `q`. Then (laptop or Jetson):
+   ```bash
+   python3 ~/f1tenth_uj/tools/real_car_tests/teleop_onset.py $(ls -td ~/f1tenth_hw_evidence/real_car_tests/*_teleop_ps4_* | head -1)
+   ```
+   Every row: brake onset after the event. **CONTROLLER_LOST row: PASS < 0.3 s; 0.3-0.5 MARGINAL (repeat); >= 0.5 s:
+   use the USB cable for all floor runs.** Its reference says which detector fired (last link report = heartbeat;
+   last /ps4/joy = joy_node silent).
+**c) Floor teleop steps** (hall / corridor, spotter, hand on the disconnect; in `safety_mode:=teleop` the 0.80 m gate
+   only warns: YOU are the obstacle stop). Car still 10 s at start (IMU). Per step: A as in b) with
+   `max_speed_mps:=<v>`, B `run_test.py --test teleop_ps4 --speed <v> --fast`, a few minutes of driving with one L1
+   stop and one R1 release, then `teleop_onset.py` on the run. Order **0.3 -> 0.5 -> 0.7** (estimates 0.13 / 0.26 /
+   0.45 m). Proportional later: `--throttle-mode proportional`.
+   **Brake-distance check at 1.0 m/s before anything >= 1.0** (runner refuses `--speed` > 1.0 until it is analysed):
+   launch **`safety_mode:=autonomy`** (default: the 0.80 m obstacle gate stays as the backstop) with
+   `max_speed_mps:=1.0`; a straight, free run toward a wall, tape mark **2.5 m before the wall**, start >= 3 m before
+   the mark. `--speed 1.0`, stick up (fixed = 1.0 m/s), **press L1 when the bumper passes the mark**, hold until
+   stopped. Measure mark -> bumper with a tape. 3 repeats. `teleop_onset.py <run>`: VESC / LiDAR stop distance vs the
+   estimate (0.56 m braking at 0.9 m/s^2, no deadman latency with L1). Pass: <= 1.25 x estimate + 0.05 m (0.74 m at
+   1.0 m/s); else put the measured decel (v^2 / 2d) into `ps4_teleop.yaml floor_decel_mps2` and stay <= 1.0.
 
 **Status 23 Nov evening (laptop, no car; nothing actuated; ROS domain 43, localhost only, CYCLONEDDS_URI unset):**
 - **Deadman stops of the 23 Nov corridor teleop = Wi-Fi SSH, not the code** (results doc row "Teleop deadman stops"):
@@ -41,7 +143,7 @@ For Moatasem and for the next Claude Code session. Read this, then
   wheelbase 0.26, steer 0.28 rad (R_min 0.90 m, plan R >= 1.15 m), cap 0.5, decel <= 0.8, min 0.2 m/s; smallest
   way: sim step 2 as is + one new `real_route.py` (proposal, not written). The 23 Nov corridor has no loop.
 
-**Next car session (24 Nov): PS4 teleop, then the track decision.** Every terminal on the Jetson: ROS +
+**Next car session (24 Nov plan; PS4 steps superseded by the 28 Nov block above): PS4 teleop, then the track decision.** Every terminal on the Jetson: ROS +
 `install/setup.bash` sourced, domain 42, `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh` (Wi-Fi SSH).
 1. **Update** (Python + yaml only, no colcon build): `cd ~/f1tenth_uj && git pull --ff-only origin
    moatasem/real-car-tests`, then `for t in run_test analyze t1b_stop_converter hall_loop_map ekf_shadow_inputs
@@ -252,7 +354,7 @@ return), release = brake 5 A, caps, IMU / VESC checks, VESC timeout verified. Je
 |---|---|
 | Who actuates | **Moatasem runs every launch and every runner that can power the motor or servo**, in his own SSH terminal, with a hand on the battery disconnect. Claude never starts them (not even disarmed: the test stack centres the servo) and never sets `enable_real_actuation:=true`. Claude gives exact commands, one terminal at a time. |
 | F-01 | **Mitigated on the stand (T1 passed, confirmed by Moatasem in writing 16 Nov): brake 5 A, never speed 0.** Any run that powers the motor uses the T1b converter with `stop_method:=brake brake_current_a:=5.0` until the permanent converter (section 5) replaces it; the standard `ackermann_to_vesc` (speed 0 stop) never drives the motor. Ground runs only as the T3/T4 steps below, each approved per step. Stand parts: car strapped, wheels off the ground, >= 0.8 m clear in front of the LiDAR (a box 1.5-2 m ahead keeps the front valid fraction >= 0.75), hands out of the front +/-20 deg sector. |
-| Mux | Never change mux gates, thresholds or interlocks. Caps change only through the per-test launch args (`max_speed_mps`, `max_steer_rad`) and the per-step `vesc_yaml`. No new publishers or subscribers on `/drive` or `/commands/*` (the bag never records them; the mux counts subscribers). |
+| Mux | Never change mux gates, thresholds or interlocks. Caps change only through the per-test launch args (`max_speed_mps`, `max_steer_rad`) and the per-step `vesc_yaml`. No new publishers or subscribers on `/drive` or `/commands/*` (the bag never records them; the mux counts subscribers). **Exception approved 28 Nov:** `safety_mode:=teleop` (PS4 `teleop_ps4` only) relaxes the MANUAL front-visibility and 0.80 m obstacle gates to warnings; `autonomy` (default) is unchanged. |
 | One stack | `preflight.sh clean` before every launch, `preflight.sh stack` (or `stack t1b`) before every runner. |
 | Speeds | 0.5 -> 1.0 -> 1.5 m/s, one step only after the previous passed (runner `step_gate`, unchanged). Ground runs: LiDAR range ahead must fit ramp + 1 m + stop + 0.5 m (runner checks). |
 | Git | Claude may commit **its own files by name** without asking, author `Moatasem <motasemfaousju04@gmail.com>` passed per commit with `git -c user.name=... -c user.email=...` (the Jetson's git config is Zaid's: never change it). **Push only when Moatasem asks in that session** (22 Nov:
@@ -526,7 +628,7 @@ sim time): live chain = replay within 1 mm (+0.026 / +0.016 / +0.000 m).
 
 Self-tests (Claude may run; the runner's shutdown probe uses isolated domain 77, no publishers):
 ```bash
-for t in run_test analyze t1b_stop_converter t2_servo_sweep ekf_shadow_inputs ekf_shadow_replay t3_analyze t4_yaw_plot; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
+for t in run_test analyze t1b_stop_converter t2_servo_sweep ekf_shadow_inputs ekf_shadow_replay t3_analyze t4_yaw_plot teleop_onset; do python3 ~/f1tenth_uj/tools/real_car_tests/$t.py --self-test; done
 python3 ~/f1tenth_uj/tools/real_car_tests/t2_servo_only.launch.py --self-test
 python3 ~/f1tenth_uj/src/f1tenth_bringup/scripts/physical_drive_mux.py --self-test
 ```

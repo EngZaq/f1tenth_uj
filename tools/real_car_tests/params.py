@@ -17,6 +17,15 @@ def load(path=None):
         return yaml.safe_load(fp)
 
 
+PS4_PATH = CONFIG / 'ps4_teleop.yaml'
+
+
+def load_ps4(path=None):
+    """PS4 teleop layout (config/real_car/ps4_teleop.yaml, 28 Nov) -> dict."""
+    with open(path or PS4_PATH) as fp:
+        return yaml.safe_load(fp)['ps4_teleop']
+
+
 def get(params, dotted):
     """get(p, 'steering.servo_offset'); raises KeyError on a missing key."""
     value = params

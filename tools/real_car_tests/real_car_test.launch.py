@@ -12,7 +12,8 @@ Contents (each actuator topic has exactly one publisher and one subscriber):
   vesc_to_odom       -> /odom_vesc_observe, publish_tf false
   ackermann_to_vesc  <- /drive, config/real_car/ackermann_to_vesc_real.yaml (offset 0.335 provisional, gain -0.50)
     OR (converter:=t1b, T1b only) t1b_stop_converter.py: same conversion, test stop method
-  physical_drive_mux -> /drive, starts STOP; caps from max_speed_mps / max_steer_rad
+  physical_drive_mux -> /drive, starts STOP; caps from max_speed_mps / max_steer_rad; safety_mode autonomy
+    (default) or teleop (28 Nov, PS4 only: config/real_car/ps4_teleop.yaml, perception gates warn only)
 No explorer, lap watcher, joystick or trial adapter. Exactly one converter: an unknown
 `converter` value starts none, and the mux then refuses (ownership check fails closed).
 
@@ -78,7 +79,66 @@ def mux_visibility_params(flag, p, manual='0.75'):
     return ['-p', 'manual_allow_reduced_visibility:=true', '-p', 'manual_min_front_valid:=%.2f' % frac]
 
 
+def mux_safety_params(mode, p, ps4, vis, max_speed, converter, stop_method):
+    """Mux safety set (28 Nov). safety_mode:=autonomy (default: every mux gate, unchanged) or teleop (PS4 manual
+    driving only, approved by Moatasem: the MANUAL front-visibility and 0.80 m obstacle gates only warn; the mux
+    checks /ps4/joy itself; run_test.py --test teleop_ps4 only). Teleop REPLACES manual_min_front_valid /
+    t3_low_visibility for the PS4 path (both refused with it; they stay for the keyboard runner), needs
+    converter:=t1b stop_method:=brake, and its max_speed_mps defaults to ps4_teleop.yaml speed_default_mps (0.3).
+    -> (mux '-p' list, max_speed_mps text, LogInfo text or None)."""
+    m = str(mode).strip().lower()
+    if m not in ('autonomy', 'teleop'):
+        raise RuntimeError('safety_mode must be autonomy or teleop, got %r' % mode)
+    ms = str(max_speed).strip()
+    if m == 'autonomy':
+        return ['-p', 'safety_mode:=autonomy'], ms or str(vp.get(p, 'caps.mux_default_max_speed_mps')), None
+    if 'manual_allow_reduced_visibility:=true' in vis:
+        raise RuntimeError('safety_mode:=teleop replaces manual_min_front_valid / t3_low_visibility for the PS4: '
+                           'relaunch without them')
+    if str(converter) != 't1b' or str(stop_method) != 'brake':
+        raise RuntimeError('safety_mode:=teleop needs converter:=t1b stop_method:=brake (brake_current_a:=%s)'
+                           % ps4['brake_current_a'])
+    ms = ms or str(ps4['speed_default_mps'])
+    try:
+        v = float(ms)
+    except ValueError:
+        raise RuntimeError('max_speed_mps must be a number, got %r' % ms)
+    ceil = min(1.5, float(ps4['speed_ceiling_mps']))
+    if not (math.isfinite(v) and 0.0 < v <= ceil + 1e-9):
+        raise RuntimeError('safety_mode:=teleop: max_speed_mps %r refused: hard ceiling %.2f m/s' % (ms, ceil))
+    lat, dec = float(ps4['deadman_latency_s']), float(ps4['floor_decel_mps2'])
+    d = v * lat + v * v / (2.0 * dec)
+    log = ('SAFETY_MODE TELEOP (PS4 only, run_test.py --test teleop_ps4 --speed %s): mux front-visibility and 0.80 m '
+           'obstacle gates only WARN; kept: arming, ownership, caps, deadman, stale /ps4/joy stop. Estimated stopping '
+           'distance at %.2f m/s: %.2f m (v*%.2f + v^2/(2*%.1f)); braking floor-verified only at %.1f m/s.'
+           % (ms, v, d, lat, dec, float(ps4['decel_verified_at_mps'])))
+    return (['-p', 'safety_mode:=teleop', '-p', 'teleop_ps4_topic:=%s' % ps4['topic'],
+             '-p', 'teleop_ps4_deadman_button:=%d' % int(ps4['deadman_button'])], ms, log)
+
+
 def self_test():
+    p0, ps4 = vp.load(), vp.load_ps4()
+    std = ['-p', 'manual_allow_reduced_visibility:=false', '-p', 'manual_min_front_valid:=0.75']
+    low = ['-p', 'manual_allow_reduced_visibility:=true', '-p', 'manual_min_front_valid:=0.10']
+    assert mux_safety_params('autonomy', p0, ps4, std, '', 'ackermann_to_vesc', 'speed0') == (
+        ['-p', 'safety_mode:=autonomy'], '0.35', None)                   # default: unchanged caps, every gate
+    assert mux_safety_params('autonomy', p0, ps4, low, '0.3', 't1b', 'brake')[1] == '0.3'
+    tp, tms, tlog = mux_safety_params('teleop', p0, ps4, std, '', 't1b', 'brake')
+    assert tp == ['-p', 'safety_mode:=teleop', '-p', 'teleop_ps4_topic:=/ps4/joy', '-p',
+                  'teleop_ps4_deadman_button:=5'] and tms == '0.3', (tp, tms)
+    assert '0.12 m' in tlog and 'floor-verified only at 0.5 m/s' in tlog, tlog
+    assert '1.62 m' in mux_safety_params('teleop', p0, ps4, std, '1.5', 't1b', 'brake')[2]
+    for args_, why in ((('fast', std, '', 't1b', 'brake'), 'autonomy or teleop'),
+                       (('teleop', low, '', 't1b', 'brake'), 'replaces manual_min_front_valid'),
+                       (('teleop', std, '', 'ackermann_to_vesc', 'speed0'), 'converter:=t1b'),
+                       (('teleop', std, '', 't1b', 'current0'), 'stop_method:=brake'),
+                       (('teleop', std, '1.6', 't1b', 'brake'), 'hard ceiling'),
+                       (('teleop', std, 'x', 't1b', 'brake'), 'number')):
+        try:
+            mux_safety_params(args_[0], p0, ps4, *args_[1:])
+            raise AssertionError(why)
+        except RuntimeError as exc:
+            assert why in str(exc), (why, exc)
     a = converter_cmd('c.py', 'brake', '5.0', '2.0')
     assert a == ['python3', '-u', 'c.py', '--ros-args', '-p', 'method:=brake', '-p', 'brake_current_a:=5.0',
                  '-p', 'brake_hold_s:=2.0'], a
@@ -113,6 +173,9 @@ def self_test():
     print('PASS: t1b converter command line, with and without the test params file; missing file refused.')
     print('      Mux visibility: standard 0.75, t3_low_visibility:=true -> reduced 0.35 (vehicle_params), bad flag refused;')
     print('      manual_min_front_valid:=0.10 -> reduced 0.10, outside 0.10..0.75 / with t3_low_visibility refused.')
+    print('      safety_mode: autonomy default (caps 0.35 default, every gate); teleop -> mux PS4 parameters, max speed')
+    print('      default 0.3, stopping estimate 0.12 / 1.62 m logged; teleop + low visibility / no t1b brake / 1.6 m/s /')
+    print('      bad value refused.')
     print('      No ROS node started; nothing published.')
 
 
@@ -201,14 +264,19 @@ def generate_launch_description():
     def mux_actions(context):
         vis = mux_visibility_params(LaunchConfiguration('t3_low_visibility').perform(context), p,
                                     LaunchConfiguration('manual_min_front_valid').perform(context))
+        safety, speed_txt, safety_log = mux_safety_params(
+            LaunchConfiguration('safety_mode').perform(context), p, vp.load_ps4(), vis, max_speed.perform(context),
+            converter.perform(context), LaunchConfiguration('stop_method').perform(context))
         acts = [ExecuteProcess(
             cmd=['python3', '-u', os.path.join(bringup, 'python_nodes', 'physical_drive_mux.py'),
                  '--ros-args',
                  '-p', 'enable_real_actuation:=%s' % enable_real.perform(context),
-                 '-p', 'enable_autonomous_actuation:=false'] + vis + [
-                 '-p', 'max_speed_mps:=%s' % max_speed.perform(context),
+                 '-p', 'enable_autonomous_actuation:=false'] + vis + safety + [
+                 '-p', 'max_speed_mps:=%s' % speed_txt,
                  '-p', 'max_steer_rad:=%s' % max_steer.perform(context)],
             output='screen')]
+        if safety_log:
+            acts.insert(0, LogInfo(msg=safety_log))
         if 'manual_allow_reduced_visibility:=true' in vis:
             acts.insert(0, LogInfo(msg='LOW-VISIBILITY MODE: mux MANUAL front threshold %s (AUTO and the 0.80 m '
                                        'obstacle gate unchanged). Runner: T3 (t3_low_visibility) or teleop <= 0.3 m/s '
@@ -219,8 +287,15 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('enable_real_actuation', default_value='false',
                               description='true only for an approved powered test step.'),
-        DeclareLaunchArgument('max_speed_mps', default_value=str(vp.get(p, 'caps.mux_default_max_speed_mps')),
-                              description='Mux speed cap for this test (ceiling 1.5).'),
+        DeclareLaunchArgument('max_speed_mps', default_value='',
+                              description='Mux speed cap for this test (ceiling 1.5). Empty = %s (autonomy) / '
+                                          'ps4_teleop.yaml speed_default_mps (safety_mode teleop).'
+                                          % vp.get(p, 'caps.mux_default_max_speed_mps')),
+        DeclareLaunchArgument('safety_mode', default_value='autonomy',
+                              description='Mux safety set: autonomy (default, every gate) or teleop (PS4 teleop_ps4 '
+                                          'only: front-visibility + 0.80 m obstacle gates only warn; replaces '
+                                          'manual_min_front_valid for the PS4; needs converter:=t1b '
+                                          'stop_method:=brake).'),
         DeclareLaunchArgument('max_steer_rad', default_value=str(vp.get(p, 'caps.mux_default_max_steer_rad')),
                               description='Mux steering cap for this test (ceiling 0.40).'),
         DeclareLaunchArgument('vesc_yaml', default_value=os.path.join(cfg, 'vesc_test_erpm3500.yaml'),
@@ -235,7 +310,8 @@ def generate_launch_description():
                               description='converter:=t1b, stop_method:=brake: seconds, (0, 5].'),
         DeclareLaunchArgument('manual_min_front_valid', default_value='0.75',
                               description='Mux MANUAL front valid fraction 0.10..0.75; below 0.75 = reduced-'
-                                          'visibility mode (runner: teleop <= 0.3 m/s only).'),
+                                          'visibility mode (runner: teleop <= 0.3 m/s only). Kept for the keyboard '
+                                          'teleop; the PS4 uses safety_mode:=teleop instead (both refused together).'),
         DeclareLaunchArgument('t3_low_visibility', default_value='false',
                               description='T3 ONLY (Moatasem 22 Nov): Zaid\'s manual-only reduced-visibility mux option '
                                           'with t3.low_visibility_manual_min_front_valid; AUTO and the obstacle gate '

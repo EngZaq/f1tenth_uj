@@ -76,7 +76,7 @@ echo "== mux status"
 timeout 3 ros2 topic echo --once --full-length /control/status 2>/dev/null \
     | python3 -c "import sys,json,yaml; doc=next(yaml.safe_load_all(sys.stdin.read())); \
 s=json.loads(doc['data']); \
-print({k: s.get(k) for k in ('mode','reason','real_actuation_enabled','max_speed_mps','max_steer_rad', \
+print({k: s.get(k) for k in ('mode','reason','safety_mode','real_actuation_enabled','max_speed_mps','max_steer_rad', \
 'front_valid_fraction','nearest_front_m','scan_reason','drive_subscriber_count','motor_subscriber_count')})" \
     || { echo "FAIL: no /control/status"; fail=1; }
 

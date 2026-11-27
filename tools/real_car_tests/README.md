@@ -8,11 +8,13 @@ Test tools for the physical car. Owner: Moatasem. Standard values:
 | File | What it does |
 |---|---|
 | `real_car_test.launch.py` | The one test stack: observe_only (LiDAR, RF2O, SLAM), BMI160 + `base_link -> imu_link`, `vesc_driver` (test yaml), `vesc_to_odom`, one `ackermann_to_vesc` (0.320 / -0.50), mux. **Real VESC: the servo centres as soon as it starts.** |
-| `run_test.py` | Keyboard runner over SSH (`teleop_ps4`: PS4 controller on the Jetson as the deadman, 23 Nov eve). Drives only through the mux inputs (`/manual/drive`, `/joy` button 5, `/control/request_mode`) at 50 Hz; records the bag; zero for >= 1 s after every stop. |
+| `run_test.py` | Keyboard runner over SSH (`teleop_ps4`: PS4 controller on the Jetson as the deadman, 23 Nov eve; stick layout + mux safety_mode teleop 28 Nov). Drives only through the mux inputs (`/manual/drive`, `/joy` button 5, `/control/request_mode`) at 50 Hz; records the bag; zero for >= 1 s after every stop. |
 | `analyze.py` | Bag -> `summary.json`, CSVs, plots, `## Analysis` in the folder README. |
 | `preflight.sh` | Read-only checks: `clean` before launching, `stack` before the runner. |
 | `params.py` | Loads `vehicle_params.yaml`; checks `config/real_car/*.yaml` agree with it. |
 | `hall_loop_record.sh` | Hand-push hall loop (23 Nov): checks `/scan` / `/imu/data_raw` / `/odom_rf2o` rates (refuses with the fix), records them + `/tf*` + the VESC / converter topics that exist (zstd) to `~/f1tenth_hw_evidence/hall_loop_<stamp>/`. |
+| `teleop_onset.py` | Offline: PS4 teleop brake onset per stop event and L1 stop distance from a `teleop_ps4` run (28 Nov). |
+| `teleop_stub_test.py` | LAPTOP ONLY: end-to-end PS4 teleop test with a stub VESC (real mux, converter, runner). |
 | `hall_loop_map.py` | Offline (laptop): slam_toolbox map from a hall-loop or teleop bag, loop closing off and on, both maps + lap-closure error at the start tape mark. |
 | `ekf_r_nis.py` | Offline (23 Nov eve): measurement R from steady cruise (VESC / RF2O vx) and the NIS of the C1 shadow EKF replay. |
 
@@ -105,6 +107,36 @@ python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py <results folder printed by 
   `vehicle_params.yaml`: roll 0.0497, pitch 3.2935 (pi + 8.7 deg), yaw 0.
 - **`ekf_r_nis.py`**: `--r <run folders>` measurement noise from steady cruise (VESC vx, RF2O vx, their
   difference); `--nis <run folders>` C1 replay with the filter covariance -> NIS per input channel.
+
+## 28 Nov: PS4 stick layout, mux safety_mode teleop, controller-loss protection
+
+- **Mux `safety_mode`** (launch `safety_mode:=autonomy|teleop`, default autonomy = unchanged). Teleop (PS4 only, approved
+  by Moatasem): MANUAL front-visibility and 0.80 m obstacle gates warn only (`/control/status` `teleop_warn`,
+  `teleop_warn_front_unknown`, `teleop_warn_obstacle_near`; runner `WARN` / `WARN_CLEAR` events); kept: arming,
+  ownership, caps, `/joy` deadman, mux-side `/ps4/joy` stale / stamp / R1 / 1-publisher check. Arms only on
+  `MANUAL_PS4` (runner sends it when the mux reports teleop); a plain `MANUAL` and AUTO are refused. The launch refuses
+  teleop together with `manual_min_front_valid` < 0.75 / `t3_low_visibility` (teleop replaces them for the PS4), and
+  without `converter:=t1b stop_method:=brake`; empty `max_speed_mps` = 0.3 in teleop.
+- **`teleop_ps4` layout** from `config/real_car/ps4_teleop.yaml` (no index in the code): R1 held = deadman, right stick Y
+  = speed (`--throttle-mode fixed|proportional`, default fixed: > 20 % = `--speed`; proportional: 0.10..1.0 ->
+  0..`--speed`, < 0.15 m/s = stop), centre / down = brake, left stick X = steer +/-0.28 rad, L1 held = brake (stays
+  armed), no jump start (stick through the centre after arm, L1, any non-centre stop; flicks between ticks counted
+  from every `/ps4/joy` message), circle = KILL. Controller check (4 steps) verifies the configured axes / signs and
+  R1 / L1 / circle, and names the index it saw on a mismatch. Ramp 0.5 m/s^2 on increases, stops immediate.
+- **Controller loss:** `/ps4/joy` > 0.20 s, header stamp > 0.25 s / zero / future, or the Bluetooth **link heartbeat**
+  (`LinkWatch`, DS4 "Motion Sensors" evdev device, > 0.20 s or removed) = deadman released (`CONTROLLER_LOST`). Needed
+  because joy_node's autorepeat re-publishes the last state (R1 held) with fresh stamps after a link drop. joy_node
+  must run `autorepeat_rate 50`, `deadzone 0.0`, `sticky_buttons false` (precheck).
+- **Speed:** `--speed` 0.15..1.5 (default 0.3; 1.6 refused), equal to the mux cap; vesc_driver `speed_max` must reach it
+  (`config/real_car/vesc_teleop_erpm12620.yaml`); > 1.0 only after an analysed 1.0 m/s L1 stop (`teleop_brake_gate`).
+  Start-up line: safety_mode, throttle_mode, speed, brake current, VESC yaml (matched by parameters), stopping
+  estimate v*0.25 + v^2/(2*0.9) ("braking floor-verified only at 0.5 m/s").
+- **Events** (`runner_events.csv`): START, ARMED, DEADMAN_RELEASED, BRAKE_BUTTON (pressed / released), STICK_STOP,
+  NO_JUMP_START, KILL, CONTROLLER_LOST (with `last_joy_wall` / `last_link_wall`), CONTROLLER_OK, WARN, WARN_CLEAR.
+- **`teleop_onset.py <run>`**: brake onset per stop event from the bag (converter STOP_BRAKE), CONTROLLER_LOST verdict
+  (< 0.3 s PASS, >= 0.5 s use USB), L1 stop distance (VESC, LiDAR, estimate).
+- **`teleop_stub_test.py --work <dir>`** (LAPTOP ONLY, refuses with a VESC device / domain 42 / no localhost-only):
+  real mux + converter + runner (pty), stub VESC, fake joy_node / LiDAR / IMU; phase A teleop, phase B autonomy.
 
 ## T1: stop behaviour on the stand (F-01)
 

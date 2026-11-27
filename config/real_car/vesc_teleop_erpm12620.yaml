@@ -1,0 +1,22 @@
+# vesc_driver for PS4 TELEOP (run_test.py --test teleop_ps4), every teleop speed up to the 1.5 m/s ceiling
+# (Moatasem, 28 Nov). speed_max 12620 = 1.5 m/s x 8414 ERPM per m/s (12621, rounded; the runner allows 5 ERPM of
+# rounding). The speed limit of a run is the MUX cap (launch max_speed_mps:=<v> = run_test.py --speed <v>), not
+# this file. Servo clip 0.10-0.68 = the T2 19 Nov driving clip (as vesc_t3_erpm*.yaml); steering through the t1b
+# per-side table (config/real_car/t1b_converter_t3_table.yaml, +/-0.28 rad). Use ONLY with converter:=t1b
+# stop_method:=brake brake_current_a:=5.0 (brake_max 10 below). VESC firmware timeout 250 ms / 5 A unchanged.
+# Other values as vesc_t3_erpm2780.yaml. NOT an emergency stop.
+vesc_driver:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00"
+    speed_min: -12620.0
+    speed_max: 12620.0
+    current_min: -2.0
+    current_max: 2.0
+    brake_min: 0.0
+    brake_max: 10.0
+    duty_cycle_min: 0.0
+    duty_cycle_max: 0.0
+    position_min: 0.0
+    position_max: 0.0
+    servo_min: 0.10
+    servo_max: 0.68

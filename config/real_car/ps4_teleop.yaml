@@ -1,0 +1,69 @@
+# PS4 (DualShock 4) teleop layout for tools/real_car_tests/run_test.py --test teleop_ps4 (Moatasem, 28 Nov).
+# Read by run_test.py (params.load_ps4) and by real_car_test.launch.py (mux teleop_ps4_* parameters). The single
+# place for every index, sign, deadzone and threshold of the PS4 path: nothing about the layout is hard-coded.
+#
+# Controller on the JETSON (Bluetooth or USB), joy_node remapped to /ps4/joy (SESSION_HANDOFF "PS4 teleop"):
+#   ros2 run joy joy_node --ros-args -r joy:=/ps4/joy -p device_id:=0 -p autorepeat_rate:=50.0 -p deadzone:=0.0 -p sticky_buttons:=false
+# The runner refuses to start with other joy_node values (joy_node section below).
+#
+# Indices: joy_node 3.x (SDL2, Linux evdev backend, hid-sony / hid-playstation kernel driver). EXPECTED values, NOT
+# yet read on the real controller: confirm once with `ros2 topic echo /ps4/joy` (SESSION_HANDOFF) and fix here.
+# The runner's controller check refuses to arm when a pressed button / moved stick does not match this file and
+# prints the index and sign it saw. joy_node negates the raw SDL axes: stick LEFT = +, stick UP = + (expected;
+# "up may be negative" -> throttle_sign -1.0). Triggers rest at +1.0 and are not used.
+#   buttons: 0 cross, 1 circle, 2 triangle, 3 square, 4 L1, 5 R1, 6 L2, 7 R2, 8 share, 9 options, 10 PS,
+#            11 L3, 12 R3 (13 buttons)
+#   axes:    0 left X, 1 left Y, 2 L2, 3 right X, 4 right Y, 5 R2, 6 d-pad X, 7 d-pad Y (8 axes)
+# If SDL opens the controller through HIDAPI (/dev/hidraw* readable by the user, e.g. a steam udev rule) the order
+# is SDL's game-controller order instead: buttons 0 cross, 1 circle, 2 square, 3 triangle, 4 share, 5 PS,
+# 6 options, 7 L3, 8 R3, 9 L1, 10 R1; axes 0 left X, 1 left Y, 2 right X, 3 right Y, 4 L2, 5 R2. The check then
+# names the indices it saw: change them here (deadman 10, brake 9, kill [1, 0, 2], arm 6, placement 3,
+# throttle_axis 3).
+ps4_teleop:
+  topic: /ps4/joy
+  # --- buttons --------------------------------------------------------------------------------------------------
+  deadman_button: 5                 # R1 HELD = deadman. Nothing moves without it; released = brake + segment end
+                                    # (re-arm with options: the mux latches STOP on a deadman release)
+  brake_button: 4                   # L1 HELD = brake (t1b brake brake_current_a), overrides the stick, stays ARMED
+  kill_buttons: [1, 0, 3]           # circle (cross, square too) = KILL: brake + latch, re-arm needed
+  arm_button: 9                     # options = arm (R1 released)
+  placement_button: 2               # triangle = placement readout (idle)
+  # --- sticks ---------------------------------------------------------------------------------------------------
+  steer_axis: 0                     # left stick X: steering +/- teleop steer max (0.28 rad, t1b table), + = left
+  steer_sign: 1.0                   # multiplies the axis so that stick LEFT reads +
+  throttle_axis: 4                  # right stick Y: speed. R2 is not used
+  throttle_sign: 1.0                # multiplies the axis so that stick UP reads +
+  stick_deadzone: 0.10              # both sticks: |value| below this = centre (steer 0; throttle = stop -> brake)
+  # --- speed ----------------------------------------------------------------------------------------------------
+  throttle_mode: fixed              # fixed (DEFAULT) | proportional; run_test.py --throttle-mode overrides
+  fixed_threshold: 0.20             # fixed: stick up past this = exactly teleop_max_speed_mps; below = stop (brake)
+  proportional_min_speed_mps: 0.15  # proportional: stick 0.10..1.0 -> 0..teleop_max_speed_mps; a command below
+                                    # this is a stop (brake), never sent as a low speed (sensorless VESC below
+                                    # ~2000 ERPM is unreliable; note 0.15 m/s = 1262 ERPM, 2000 ERPM = 0.24 m/s)
+  speed_default_mps: 0.3            # teleop_max_speed_mps when --speed is not given
+  speed_ceiling_mps: 1.5            # hard ceiling (= mux MAX_SPEED_CEILING); --speed above it is refused
+  brake_current_a: 5.0              # the t1b converter must run stop_method brake with this current
+  # --- controller-loss protection (on the Jetson) ----------------------------------------------------------------
+  joy_ttl_s: 0.20                   # no new /ps4/joy within this = deadman released (brake). Stricter than the
+                                    # 0.25 s requirement so that detection + runner + mux + converter ticks stay
+                                    # < 0.3 s; the mux checks /ps4/joy itself at 0.25 s (TELEOP_JOY_TTL)
+  stamp_max_age_s: 0.25             # /ps4/joy header.stamp older than this (ROS clock) = deadman released
+  link_ttl_s: 0.20                  # Bluetooth link heartbeat (motion-sensor device events) older than this = lost
+  link_device_match: Motion Sensors # /proc/bus/input/devices Name suffix of the DS4 motion-sensor device
+  link_vendor: '054c'               # Sony
+  link_required_on_bluetooth: true  # controller on Bluetooth (Bus=0005) without a heartbeat device: refused
+  check_max_gap_s: 0.10             # controller check: /ps4/joy max gap at rest (autorepeat 50 Hz -> 0.02 s)
+  check_timeout_s: 30.0             # each controller-check step
+  # --- what joy_node must run with (runner precheck reads its parameters) -------------------------------------
+  joy_node:
+    autorepeat_rate: 50.0           # keeps /ps4/joy at 50 Hz with a still hand, so a 0.20 s gap = joy_node or
+                                    # DDS dead. It ALSO re-publishes the last state with a fresh stamp when the
+                                    # Bluetooth link drops (the kernel keeps the last state until the link
+                                    # supervision timeout, seconds): only the link heartbeat above sees that drop
+    deadzone: 0.0                   # one deadzone only: stick_deadzone above (joy_node's own would rescale the
+                                    # axes and move the 20 % fixed threshold)
+    sticky_buttons: false           # a sticky deadman would never release
+  # --- stopping-distance estimate printed at start-up -----------------------------------------------------------
+  deadman_latency_s: 0.25           # d = v * latency + v^2 / (2 * decel)
+  floor_decel_mps2: 0.9             # 5 A brake on tile, measured at 0.5 m/s only (T4 20 Nov)
+  decel_verified_at_mps: 0.5
