@@ -1638,10 +1638,34 @@ def self_test_23nov(p, world):
             raise AssertionError(why)
         except SystemExit as exc:
             assert why in str(exc), (why, exc)
+    # 28 Nov: PROVISIONAL teleop table (centre 0.36, linear to the full clip 0.10 / 0.68) with its servo_offset override
+    import yaml as _yaml
+    tpv = _yaml.safe_load((vp.CONFIG / 't1b_converter_teleop_provisional.yaml').read_text())[
+        't1b_stop_converter']['ros__parameters']
+    assert tpv['servo_offset'] == 0.36 and t1b_params_problem(dict(gain, **tpv)) is None
+    smp = converter_steering(dict(gain, **tpv), 0.335)
+    assert smp['mode'] == 'table' and smp['offset'] == 0.36 and smp['limits'] == (-0.28, 0.28), smp
+    tip = teleop_precheck(tp, smp, 0.28, dict(servo_min=0.10, servo_max=0.68))      # vesc_teleop_erpm12620.yaml clip
+    assert abs(tip['servo_left'] - 0.10) < 1e-9 and abs(tip['servo_right'] - 0.68) < 1e-9, tip
+    assert abs(conv.servo_command(0.36, -0.5, -0.5, 0.0, smp['tables']) - 0.36) < 1e-12
+    assert abs(conv.servo_command(0.36, -0.5, -0.5, 0.14, smp['tables']) - 0.23) < 1e-9          # linear halfway
+    assert abs(conv.servo_command(0.36, -0.5, -0.5, -0.14, smp['tables']) - 0.52) < 1e-9
+    try:                                                     # table without its offset override -> refused
+        converter_steering(dict(gain, steer_table_left=tpv['steer_table_left'],
+                                steer_table_right=tpv['steer_table_right']), 0.335)
+        raise AssertionError('provisional table accepted with servo_offset 0.335')
+    except SystemExit as exc:
+        assert 'table invalid' in str(exc), exc
+    try:                                                     # a tighter VESC clip than 0.10-0.68 -> refused
+        teleop_precheck(tp, smp, 0.28, dict(servo_min=0.11, servo_max=0.66))
+        raise AssertionError('provisional table accepted with the T3 0.11 clip')
+    except SystemExit as exc:
+        assert 'clip' in str(exc), exc
     print('PASS: 23 Nov: converter parameter read (gain mode = empty Humble batch -> per name, tables None; table')
     print('      checked; unreachable / missing named), auto-live, zstd bag command, --fast (no disk / visibility')
     print('      refusal, IMU / VESC / SPACE kept, hands-off 0.5 s), drive keys, teleop (no brake point, smooth')
-    print('      steering 0.7 rad/s to +/-0.28, release = zero, KILL, segments until q, table / cap / clip pre-check).')
+    print('      steering 0.7 rad/s to +/-0.28, release = zero, KILL, segments until q, table / cap / clip pre-check);')
+    print('      28 Nov provisional teleop table (0.36 centre, 0.10 / 0.68 ends, offset override needed, clip 0.10-0.68).')
 
 
 PS4_REST = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]   # DS4 under joy_node (evdev): 8 axes, triggers rest at +1

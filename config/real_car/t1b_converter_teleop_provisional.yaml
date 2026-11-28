@@ -1,0 +1,17 @@
+# PROVISIONAL steering table for tools/real_car_tests/t1b_stop_converter.py (Moatasem, 28 Nov).
+# LINEAR, NOT GROUND-CHECKED. The steering linkage has play (~2 deg) that will be fixed on 29 Nov; T3 was NOT redone.
+# For PS4 teleop / mapping (teleop_ps4, safety_mode:=teleop) at <= 0.5 m/s ONLY. To be replaced by a new T3 table
+# after the linkage fix. Do not use it for T3 / T4 / autonomy measurements.
+#   centre (straight) servo 0.36 (TEST-ONLY servo_offset override; vehicle_params.yaml steering.servo_offset stays
+#   0.335 PROVISIONAL; the converter allows at most 0.05 from it and needs the table to start at (0, servo_offset))
+#   left : (0, 0.36) -> (+0.28, 0.10)   right: (0, 0.36) -> (-0.28, 0.68)   = the full T2 driving clip 0.10-0.68
+# The angle at each servo value is NOT measured: the real angle may differ from the command (expect the car to
+# under- or over-steer, and the straight line may drift with the play). Steering limit 0.28 rad (mux max_steer_rad).
+# vesc_teleop_erpm12620.yaml clips the servo at 0.10-0.68, so both ends pass unchanged.
+# Flat [delta_rad, servo, delta_rad, servo, ...]; floats only (written with a decimal point).
+# Use: real_car_test.launch.py converter:=t1b ... converter_params_file:=<this file>
+t1b_stop_converter:
+  ros__parameters:
+    servo_offset: 0.36
+    steer_table_left: [0.0, 0.36, 0.28, 0.10]
+    steer_table_right: [0.0, 0.36, -0.28, 0.68]

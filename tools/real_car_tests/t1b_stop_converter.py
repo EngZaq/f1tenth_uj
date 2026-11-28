@@ -223,10 +223,31 @@ def self_test():
             continue
         raise AssertionError('steer table %r (%s) accepted' % (bad, side))
     assert servo_command(0.335, -0.874, -1.062, 0.26, None) == servo_command(0.335, -0.874, -1.062, 0.26)  # no table
+    # 28 Nov PROVISIONAL teleop table: config/real_car/t1b_converter_teleop_provisional.yaml (linear, centre 0.36)
+    pp = yaml.safe_load((vp.CONFIG / 't1b_converter_teleop_provisional.yaml').read_text())['t1b_stop_converter'][
+        'ros__parameters']
+    po = float(pp['servo_offset'])
+    assert po == 0.36
+    validate_servo_offset(po, base)                         # within 0.05 of the vehicle_params baseline
+    pt = (parse_steer_table(pp['steer_table_left'], 'left', po), parse_steer_table(pp['steer_table_right'], 'right', po))
+    assert pt == ([(0.0, 0.36), (0.28, 0.10)], [(0.0, 0.36), (-0.28, 0.68)]), pt
+    assert servo_command(po, -0.5, -0.5, 0.0, pt) == 0.36
+    assert abs(servo_command(po, -0.5, -0.5, 0.28, pt) - 0.10) < 1e-12
+    assert abs(servo_command(po, -0.5, -0.5, -0.28, pt) - 0.68) < 1e-12
+    assert abs(servo_command(po, -0.5, -0.5, 0.07, pt) - 0.295) < 1e-9          # linear: 1/4 of the way left
+    assert abs(servo_command(po, -0.5, -0.5, 0.40, pt) - 0.10) < 1e-12          # clamped at the table end
+    assert abs(servo_command(po, -0.5, -0.5, -0.40, pt) - 0.68) < 1e-12
+    for bad_off in (0.335,):                                # the table needs its own offset override
+        try:
+            parse_steer_table(pp['steer_table_left'], 'left', bad_off)
+        except ValueError:
+            continue
+        raise AssertionError('provisional table accepted with offset %r' % bad_off)
     print('PASS: method/limit validation, drive pass-through, brake hold then release,')
     print('      current0, speed0, stale and non-finite /drive stop, servo_offset override limits,')
     print('      per-side servo gains (limits, T3 values, baseline unchanged), output clamp 0.10-0.68;')
-    print('      steering table (T3 yaml points, interpolation, clamp to +/-0.28, monotonic, 10 bad tables refused).')
+    print('      steering table (T3 yaml points, interpolation, clamp to +/-0.28, monotonic, 10 bad tables refused);')
+    print('      28 Nov provisional teleop table (offset 0.36 allowed, linear to 0.10 / 0.68, clamp, needs its offset).')
     print('      No ROS imported.')
 
 

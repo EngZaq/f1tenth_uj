@@ -137,6 +137,11 @@ python3 ~/f1tenth_uj/tools/real_car_tests/analyze.py <results folder printed by 
   (< 0.3 s PASS, >= 0.5 s use USB), L1 stop distance (VESC, LiDAR, estimate).
 - **`teleop_stub_test.py --work <dir>`** (LAPTOP ONLY, refuses with a VESC device / domain 42 / no localhost-only):
   real mux + converter + runner (pty), stub VESC, fake joy_node / LiDAR / IMU; phase A teleop, phase B autonomy.
+  `--converter-table <yaml>` picks the converter steering table (default the T3 table).
+- **Provisional teleop steering table (28 Nov):** `config/real_car/t1b_converter_teleop_provisional.yaml`, linear, NOT
+  ground-checked (linkage play ~2 deg, fix 29 Nov; T3 not redone): `servo_offset` override 0.36 (straight), left
+  (0, 0.36) -> (0.28, 0.10), right (0, 0.36) -> (-0.28, 0.68) = the full driving clip; `vesc_teleop_erpm12620.yaml`
+  clips at 0.10-0.68, so both ends pass. Teleop / mapping at <= 0.5 m/s only; replaced by a new T3 table after the fix.
 
 ## T1: stop behaviour on the stand (F-01)
 

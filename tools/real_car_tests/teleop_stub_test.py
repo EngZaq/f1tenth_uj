@@ -563,9 +563,16 @@ def phase_autonomy(w, work, env, out, c):
 
 
 def main():
+    global TABLE
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--work', required=True, help='scratch folder (logs, HOME of the children, run folders)')
+    ap.add_argument('--converter-table', default=str(TABLE),
+                    help='converter params file with the steering table (default: the T3 table; 28 Nov: '
+                         'config/real_car/t1b_converter_teleop_provisional.yaml)')
     args = ap.parse_args()
+    TABLE = Path(args.converter_table).expanduser().resolve()
+    if not TABLE.is_file():
+        raise SystemExit('converter table not found: %s' % TABLE)
     guard()
     work = Path(args.work).expanduser().resolve()
     (work / 'home').mkdir(parents=True, exist_ok=True)

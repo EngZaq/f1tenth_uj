@@ -41,6 +41,13 @@ For Moatasem and for the next Claude Code session. Read this, then
   refused. Autonomy: the same two scenes latch `LATCH_STOP_FRONT_SCAN_NOT_CLEAR` (0.06 / 0.07 s). If the stand
   CONTROLLER_LOST onset is >= 0.3 s with joy_node silent: `joy_ttl_s: 0.15` in `ps4_teleop.yaml` (margin) or USB.
 
+- **Provisional teleop steering table (28 Nov):** `config/real_car/t1b_converter_teleop_provisional.yaml` (linear,
+  NOT ground-checked; linkage play ~2 deg, fix 29 Nov; T3 not redone): straight 0.36 (converter `servo_offset`
+  override; `vehicle_params.yaml` stays 0.335), left (0.28, 0.10), right (-0.28, 0.68) = the full driving clip
+  (`vesc_teleop_erpm12620.yaml` clips 0.10-0.68). **PS4 teleop / mapping at <= 0.5 m/s only** (documented, not
+  enforced in code); the T3 table stays for T3 / T4. Steps b-d use it. After the linkage fix: new T3, new table.
+  Converter + runner self-tests cover it; stub harness `--converter-table` with it 41 / 41 PASS (servo 0.10 / 0.68).
+
 **Next car session: PS4 teleop on the stand, then the floor.** Every Jetson terminal: ROS + `install/setup.bash`,
 domain 42, `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh`.
 0. **Update** (the mux changed: the launch runs the INSTALLED copy, so build):
@@ -74,7 +81,7 @@ domain 42, `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh`.
    ```bash
    # A
    ~/f1tenth_uj/tools/real_car_tests/preflight.sh clean
-   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true safety_mode:=teleop max_speed_mps:=0.3 max_steer_rad:=0.28 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_teleop_erpm12620.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_t3_table.yaml
+   ros2 launch ~/f1tenth_uj/tools/real_car_tests/real_car_test.launch.py enable_real_actuation:=true safety_mode:=teleop max_speed_mps:=0.3 max_steer_rad:=0.28 vesc_yaml:=/home/ftenth/f1tenth_uj/config/real_car/vesc_teleop_erpm12620.yaml converter:=t1b stop_method:=brake brake_current_a:=5.0 converter_params_file:=/home/ftenth/f1tenth_uj/config/real_car/t1b_converter_teleop_provisional.yaml
    # C: joy_node (step a)
    # B (tmux new -s run)
    ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
@@ -98,7 +105,8 @@ domain 42, `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh`.
    only warns: YOU are the obstacle stop). Car still 10 s at start (IMU). Per step: A as in b) with
    `max_speed_mps:=<v>`, B `run_test.py --test teleop_ps4 --speed <v> --fast`, a few minutes of driving with one L1
    stop and one R1 release, then `teleop_onset.py` on the run. Order **0.3 -> 0.5 -> 0.7** (estimates 0.13 / 0.26 /
-   0.45 m). Proportional later: `--throttle-mode proportional`.
+   0.45 m). Proportional later: `--throttle-mode proportional`. **With the provisional table: 0.3 and 0.5 only;** 0.7
+   and the 1.0 check wait for the new T3 table after the linkage fix.
    **Brake-distance check at 1.0 m/s before anything >= 1.0** (runner refuses `--speed` > 1.0 until it is analysed):
    launch **`safety_mode:=autonomy`** (default: the 0.80 m obstacle gate stays as the backstop) with
    `max_speed_mps:=1.0`; a straight, free run toward a wall, tape mark **2.5 m before the wall**, start >= 3 m before
@@ -106,6 +114,27 @@ domain 42, `source ~/f1tenth_uj/tools/real_car_tests/local_env.sh`.
    stopped. Measure mark -> bumper with a tape. 3 repeats. `teleop_onset.py <run>`: VESC / LiDAR stop distance vs the
    estimate (0.56 m braking at 0.9 m/s^2, no deadman latency with L1). Pass: <= 1.25 x estimate + 0.05 m (0.74 m at
    1.0 m/s); else put the measured decel (v^2 / 2d) into `ps4_teleop.yaml floor_decel_mps2` and stay <= 1.0.
+**d) PS4 mapping drive** (after b passed; fixed throttle, 0.3 m/s, provisional table; spotter; hall loop with a
+   tape start mark). The launch already runs rf2o (`/odom_rf2o`), slam_toolbox (loop closing OFF:
+   `enable_slam_loop_closing` false), the IMU and its TF; the runner's bag records `/scan`, `/imu/data_raw`,
+   `/sensors/core`, `/odom_rf2o`, `/tf`, `/tf_static` (+ status topics, never `/drive` or `/commands/*`).
+   ```bash
+   # A: launch exactly as in b)        C: joy_node (step a)
+   # D: checks before arming
+   ros2 param get /slam_toolbox do_loop_closing          # False
+   ros2 topic hz /odom_rf2o                              # ~20 Hz (Ctrl-C)
+   # B
+   ~/f1tenth_uj/tools/real_car_tests/preflight.sh stack t1b
+   python3 ~/f1tenth_uj/tools/real_car_tests/run_test.py --test teleop_ps4 --speed 0.3 --throttle-mode fixed --fast
+   # car still 10 s on the mark, drive the loop slowly, stop back on the mark, still 5 s, R1 release; BEFORE q:
+   # D: live map (slam_toolbox, loop closing off) into the run folder
+   R=$(ls -td ~/f1tenth_hw_evidence/real_car_tests/*_teleop_ps4_* | head -1)
+   ros2 run nav2_map_server map_saver_cli -t /map -f $R/map_live_lc_off
+   # B: q   then
+   python3 ~/f1tenth_uj/tools/real_car_tests/teleop_onset.py $R
+   ```
+   Laptop, offline: `python3 tools/real_car_tests/hall_loop_map.py <run folder>` (loop closing off and on, lap
+   closure at the mark).
 
 **Status 23 Nov evening (laptop, no car; nothing actuated; ROS domain 43, localhost only, CYCLONEDDS_URI unset):**
 - **Deadman stops of the 23 Nov corridor teleop = Wi-Fi SSH, not the code** (results doc row "Teleop deadman stops"):
